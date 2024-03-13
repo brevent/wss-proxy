@@ -1,5 +1,11 @@
-#include <signal.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <signal.h>
+#include <unistd.h>
+#include <sys/resource.h>
+#ifdef __APPLE__
+#include <sys/sysctl.h>
+#endif
 #include <event2/event.h>
 #include "common.h"
 
@@ -34,22 +40,60 @@ uint16_t get_peer_port(struct bufferevent *bev) {
 static void on_signal(int fd, short signal, void *base) {
     (void) fd;
     if (signal == SIGTERM) {
-        fprintf(stderr, "received termination\n");
+        LOGW("received termination");
         event_base_loopbreak(base);
     } else if (signal == SIGINT) {
-        fprintf(stderr, "received interrupt\n");
+        LOGW("received interrupt");
         event_base_loopbreak(base);
     } else if (signal == SIGUSR1) {
         event_base_loopexit(base, 0);
-        fprintf(stderr, "received SIGUSR1\n");
+        LOGW("received SIGUSR1");
+    }
+}
+
+static void check_parent(evutil_socket_t fd, short event, void *arg) {
+    (void) fd;
+    (void) event;
+    (void) arg;
+    if (getppid() == 1) {
+        LOGE("parent process has been terminated.");
+        exit(EXIT_SUCCESS);
     }
 }
 
 void init_event_signal(struct event_base *base) {
+    struct rlimit rlim;
+    struct timeval one_minute = {60, 0};
+    struct event *ev;
+    ev = event_new(base, -1, EV_PERSIST, check_parent, NULL);
+    if (ev) {
+        event_add(ev, &one_minute);
+    } else {
+        LOGW("cannot add event to check parent");
+    }
+#ifdef RLIMIT_NOFILE
+    if (getrlimit(RLIMIT_NOFILE, &rlim) == 0) {
+        rlim_t cur_limit = rlim.rlim_cur;
+        rlim_t new_limit;
+#if defined(__APPLE__)
+        size_t size = sizeof(new_limit);
+        if (sysctlbyname("kern.maxfilesperproc", &new_limit, &size, NULL, 0)) {
+            new_limit = 10240;
+        }
+#else
+        new_limit = rlim.rlim_max;
+#endif
+        rlim.rlim_cur = new_limit;
+        if (cur_limit < new_limit && setrlimit(RLIMIT_NOFILE, &rlim) == 0) {
+            LOGI("open files: %u -> %u", (uint32_t) cur_limit, (uint32_t) rlim.rlim_cur);
+        } else {
+            LOGI("open files: %u", (uint32_t) cur_limit);
+        }
+    }
+#endif
     evsignal_new(base, SIGTERM, on_signal, base);
     evsignal_new(base, SIGINT, on_signal, base);
     evsignal_new(base, SIGUSR1, on_signal, base);
-    evsignal_new(base, SIGUSR2, on_signal, base);
 }
 
 #ifdef HAVE_SSL_CTX_SET_KEYLOG_CALLBACK

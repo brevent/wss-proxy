@@ -46,8 +46,6 @@ check_function_exists(bufferevent_getcb HAVE_BUFFEREVENT_GETCB)
 set(CMAKE_REQUIRED_LIBRARIES libevent::extra)
 # libevent 2.1.1, 8d3a850
 check_function_exists(evhttp_connection_base_bufferevent_new HAVE_EVHTTP_CONNECTION_BASE_BUFFEREVENT_NEW)
-# libevent 2.1.3, 7b07719
-check_function_exists(evhttp_request_set_error_cb HAVE_EVHTTP_REQUEST_SET_ERROR_CB)
 unset(CMAKE_REQUIRED_LIBRARIES)
 
 add_executable(wss-proxy-client wss-proxy-client.c common.c)

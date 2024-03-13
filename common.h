@@ -2,6 +2,7 @@
 #define WSS_PROXY_COMMON_H
 
 #include <stdint.h>
+#include <time.h>
 #include <event2/bufferevent.h>
 #ifdef HAVE_SSL_CTX_SET_KEYLOG_CALLBACK
 #include <openssl/ssl.h>
@@ -64,11 +65,53 @@ uint16_t get_port(struct sockaddr *sockaddr);
 
 uint16_t get_peer_port(struct bufferevent *bev);
 
-#ifdef NDEBUG
-#define debug_wss(fmt, ...) ((void)0)
-#else
-#define debug_wss(...) fprintf(stderr, __VA_ARGS__)
+#ifndef LOGGER_NAME
+#define LOGGER_NAME "wss-proxy"
 #endif
+
+#define TIME_FORMAT "%Y-%m-%d %H:%M:%S"
+
+#define LOGD(format, ...)                                                   \
+    do {                                                                    \
+        time_t now = time(NULL);                                            \
+        char timestr[20];                                                   \
+        strftime(timestr, 20, TIME_FORMAT, localtime(&now));                \
+        fprintf(stdout, " %s DEBUG " LOGGER_NAME " " format "\n", timestr,  \
+                    ## __VA_ARGS__);                                        \
+        fflush(stdout);                                                     \
+    }                                                                       \
+    while (0)
+
+#define LOGI(format, ...)                                                   \
+    do {                                                                    \
+        time_t now = time(NULL);                                            \
+        char timestr[20];                                                   \
+        strftime(timestr, 20, TIME_FORMAT, localtime(&now));                \
+        fprintf(stdout, " %s INFO " LOGGER_NAME " " format "\n", timestr,   \
+                    ## __VA_ARGS__);                                        \
+        fflush(stdout);                                                     \
+    }                                                                       \
+    while (0)
+
+#define LOGW(format, ...)                                                   \
+    do {                                                                    \
+        time_t now = time(NULL);                                            \
+        char timestr[20];                                                   \
+        strftime(timestr, 20, TIME_FORMAT, localtime(&now));                \
+        fprintf(stderr, " %s WARN " LOGGER_NAME " " format "\n", timestr,   \
+                    ## __VA_ARGS__);                                        \
+        fflush(stderr);                                                     \
+    } while (0)
+
+#define LOGE(format, ...)                                                   \
+    do {                                                                    \
+        time_t now = time(NULL);                                            \
+        char timestr[20];                                                   \
+        strftime(timestr, 20, TIME_FORMAT, localtime(&now));                \
+        fprintf(stderr, " %s ERROR " LOGGER_NAME " " format "\n", timestr,  \
+                    ## __VA_ARGS__);                                        \
+        fflush(stderr);                                                     \
+    } while (0)
 
 void init_event_signal(struct event_base *base);
 
