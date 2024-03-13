@@ -8,32 +8,33 @@
 #include <openssl/ssl.h>
 #endif
 
-typedef struct {
-    uint16_t unused;
-    uint8_t fop; // fin:1, rsv:3, opcode: 4
-    uint8_t mlen; // mask: 1, length: 7
-} wss_header_2;
+/**
+ * fop: fin:1, rsv:3, opcode: 4
+ * mlen: mask: 1, length: 7
+ */
+#define FOP_MASK struct {   \
+    uint8_t fop;            \
+    uint8_t mlen;           \
+}
 
-typedef struct {
-    uint8_t fop; // fin:1, rsv:3, opcode: 4
-    uint8_t mlen; // mask: 1, length: 7
-    uint16_t elen;
-} wss_header_4;
+#define WSS_HEADER union {  \
+    struct {                \
+        uint16_t unused;    \
+        FOP_MASK;           \
+    };                      \
+    struct {                \
+        FOP_MASK;           \
+        uint16_t elen;      \
+    } extend;               \
+}
 
 struct wss_frame_client {
-    union {
-        wss_header_2 f2;
-        wss_header_4 f4;
-    };
+    WSS_HEADER;
     uint32_t mask;
 };
 
 struct wss_frame_server {
-    uint32_t unused;
-    union {
-        wss_header_2 f2;
-        wss_header_4 f4;
-    };
+    WSS_HEADER;
 };
 
 enum wss_op {
@@ -47,6 +48,10 @@ enum wss_op {
 
 #ifndef WSS_PAYLOAD_SIZE
 #define WSS_PAYLOAD_SIZE 4096
+#endif
+
+#if (WSS_PAYLOAD_SIZE % 4)
+#error "WSS_PAYLOAD_SIZE must be a multiple of 4"
 #endif
 
 #ifndef MAX_PAYLOAD_SIZE

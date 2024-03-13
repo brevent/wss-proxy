@@ -26,14 +26,6 @@ struct wss_proxy_context {
     char user_agent[80];
 } wss_context;
 
-struct wss_tunnel_context {
-    union {
-        struct wss_frame_client client;
-        struct wss_frame_server server;
-    };
-    unsigned char buffer[WSS_PAYLOAD_SIZE];
-} tunnel_context;
-
 static int init_raw_addr(struct sockaddr_storage *sockaddr, int *socklen) {
     int port;
     char *end;
@@ -147,32 +139,29 @@ static int init_wss_addr(struct wss_server_info *server) {
 static enum bufferevent_filter_result wss_input_filter(struct evbuffer *src, struct evbuffer *dst,
                                                        ev_ssize_t dst_limit, enum bufferevent_flush_mode mode,
                                                        void *ctx) {
-    struct wss_tunnel_context *context = &tunnel_context;
+    struct wss_frame_server server;
     uint8_t op;
-    uint8_t mlen;
     uint16_t len;
     (void) dst_limit;
     (void) mode;
     (void) ctx;
-    if (evbuffer_get_length(src) < 2) {
+    if (evbuffer_get_length(src) < sizeof(FOP_MASK)) {
         return BEV_NEED_MORE;
     }
-    evbuffer_copyout(src, &(context->server.f2.fop), 2);
-    mlen = context->server.f2.mlen;
-    if (!(context->server.f2.fop & 0x80)) {
-        LOGW("fin should be 1");
+    evbuffer_copyout(src, &(server.fop), sizeof(FOP_MASK));
+    if (!(server.fop & 0x80)) {
+        LOGW("fin should be 1 (fragments is unsupported)");
         return BEV_ERROR;
     }
-    if (context->server.f2.fop & 0x70) {
+    if (server.fop & 0x70) {
         LOGW("rsv should be 0");
         return BEV_ERROR;
     }
-    if (mlen & 0x80) {
+    if (server.mlen & 0x80) {
         LOGW("server reply shouldn't mask");
         return BEV_ERROR;
     }
-    // FIXME: how to reset watermark
-    op = context->server.f2.fop & 0xf;
+    op = server.fop & 0xf;
     switch (op) {
         case OP_CONTINUATION:
             LOGW("continuation frame is unsupported");
@@ -195,61 +184,58 @@ static enum bufferevent_filter_result wss_input_filter(struct evbuffer *src, str
             LOGW("server send unsupported opcode: 0x%x", op);
             return BEV_ERROR;
     }
-    len = mlen & 0x7f;
+    len = server.mlen & 0x7f;
     if (len < 126) {
-        if (evbuffer_get_length(src) < (size_t) len + 2) {
-            // FIXME: how to set watermark
+        if (evbuffer_get_length(src) < (size_t) len + sizeof(FOP_MASK)) {
             return BEV_NEED_MORE;
         }
-        evbuffer_drain(src, 2);
+        evbuffer_drain(src, sizeof(FOP_MASK));
     } else if (len == 126) {
-        if (evbuffer_get_length(src) < 4) {
+        if (evbuffer_get_length(src) < sizeof(server.extend)) {
             return BEV_NEED_MORE;
         }
-        evbuffer_copyout(src, &(context->server.f4.fop), 4);
-        len = htons(context->server.f4.elen);
+        evbuffer_copyout(src, &(server.extend.fop), sizeof(server.extend));
+        len = htons(server.extend.elen);
         if (len > MAX_PAYLOAD_SIZE) {
             LOGW("payload length %d is unsupported", len);
             return BEV_ERROR;
         }
-        if (evbuffer_get_length(src) < (size_t) len + 4) {
-            // FIXME: how to set watermark
+        if (evbuffer_get_length(src) < (size_t) len + sizeof(server)) {
             return BEV_NEED_MORE;
         }
-        evbuffer_drain(src, 4);
+        evbuffer_drain(src, sizeof(server));
     } else {
         LOGW("payload length 64K+ is unsupported");
         return BEV_ERROR;
     }
+    if (op == OP_PING || op == OP_PONG) {
+        // should we pong to ping?
+        evbuffer_drain(src, len);
+        return BEV_OK;
+    }
     while (len > 0) {
-        uint16_t size = len;
-        if (size > WSS_PAYLOAD_SIZE) {
-            size = WSS_PAYLOAD_SIZE;
-        }
+        uint16_t size = len > WSS_PAYLOAD_SIZE ? WSS_PAYLOAD_SIZE : len;
+        evbuffer_remove_buffer(src, dst, size);
         len -= size;
-        if (op == OP_BINARY) {
-            evbuffer_remove(src, context->buffer, size);
-            evbuffer_add(dst, context->buffer, size);
-        } else {
-            // currently, we never response for ping / pong
-            evbuffer_drain(src, size);
-        }
     }
     return BEV_OK;
 }
 
-static uint8_t prepare_wss_data(struct wss_frame_client *client, enum wss_op op, uint16_t len) {
+static uint8_t *build_wss_frame(struct wss_frame_client *client, enum wss_op op, uint16_t len, uint8_t *header_len) {
+    // should we support continuation frame?
     uint8_t fop = 0x80 | (op & 0xf);
     client->mask = 0;
     if (len < 126) {
-        client->f2.fop = fop;
-        client->f2.mlen = 0x80 | (uint8_t) len;
-        return 6;
+        client->fop = fop;
+        client->mlen = 0x80 | (uint8_t) len;
+        *header_len = sizeof(FOP_MASK) + sizeof(client->mask);
+        return &(client->fop);
     } else {
-        client->f4.fop = fop;
-        client->f4.mlen = 0x80 | 126;
-        client->f4.elen = ntohs(len);
-        return 8;
+        client->extend.fop = fop;
+        client->extend.mlen = 0x80 | 126;
+        client->extend.elen = ntohs(len);
+        *header_len = sizeof(client->extend) + sizeof(client->mask);
+        return &(client->extend.fop);
     }
 }
 
@@ -270,14 +256,21 @@ static void close_wss_event_cb(struct bufferevent *tev, short event, void *wss) 
     evhttp_connection_free(wss);
 }
 
-static void close_wss(struct evhttp_connection *wss, uint16_t port) {
+static void close_wss(struct evhttp_connection *wss, uint16_t port, uint16_t reason) {
     struct bufferevent *tev;
-    struct wss_tunnel_context *context = &tunnel_context;
-    uint8_t pre = prepare_wss_data(&(context->client), OP_CLOSE, 2);
-    context->buffer[0] = 0x03;
-    context->buffer[1] = 0xe8;
+    struct wss_frame_client_close {
+        struct wss_frame_client client;
+        struct {
+            uint16_t reason;
+            uint16_t unused; // padding to uint32_t for mask
+        };
+    } wss_frame_client_close;
+    uint8_t *wss_header, wss_header_size;
+    uint16_t size = sizeof(wss_frame_client_close.reason);
+    wss_frame_client_close.reason = ntohs(reason);
+    wss_header = build_wss_frame(&(wss_frame_client_close.client), OP_CLOSE, size, &wss_header_size);
     tev = evhttp_connection_get_bufferevent(wss);
-    evbuffer_add(bufferevent_get_output(tev), &(context->client.f2.fop), 2 + pre);
+    evbuffer_add(bufferevent_get_output(tev), wss_header, size + wss_header_size);
     if (wss_context.server.debug) {
         LOGD("would close wss %p for peer %d", wss, port);
     }
@@ -288,25 +281,25 @@ static void raw_forward_cb(struct bufferevent *raw, void *wss) {
     struct evbuffer *src;
     struct evbuffer *dst;
     struct bufferevent *tev;
-    struct wss_tunnel_context *context = &tunnel_context;
+    struct wss_frame_client_data {
+        struct wss_frame_client client;
+        char buffer[WSS_PAYLOAD_SIZE];
+    } wss_frame_client_data;
 
     tev = evhttp_connection_get_bufferevent(wss);
     src = bufferevent_get_input(raw);
     dst = bufferevent_get_output(tev);
 
     for (;;) {
-        uint8_t pre;
-        int len = evbuffer_remove(src, context->buffer, WSS_PAYLOAD_SIZE);
-        if (len <= 0) {
+        // should we use continuation fame?
+        uint8_t *wss_header, wss_header_size;
+        int size = evbuffer_remove(src, wss_frame_client_data.buffer, WSS_PAYLOAD_SIZE);
+        if (size <= 0) {
             break;
         }
-        pre = prepare_wss_data(&(context->client), OP_BINARY, (uint16_t) len);
-        if (pre == 6) {
-            evbuffer_add(dst, &(context->client.f2.fop), len + pre);
-        } else if (pre == 8) {
-            evbuffer_add(dst, &(context->client.f4.fop), len + pre);
-        }
-        if (len < WSS_PAYLOAD_SIZE) {
+        wss_header = build_wss_frame(&(wss_frame_client_data.client), OP_BINARY, (uint16_t) size, &wss_header_size);
+        evbuffer_add(dst, wss_header, size + wss_header_size);
+        if (size < WSS_PAYLOAD_SIZE) {
             break;
         }
     }
@@ -320,7 +313,7 @@ static void raw_event_cb(struct bufferevent *raw, short event, void *wss) {
         if (wss_context.server.debug) {
             LOGD("connection %u closed, event: 0x%02x", get_peer_port(raw), event);
         }
-        close_wss(wss, port);
+        close_wss(wss, port, 1001);
     }
 }
 
@@ -344,7 +337,7 @@ static void wss_event_cb(struct bufferevent *wev, short event, void *raw) {
         if (wss_context.server.debug) {
             LOGD("connection %u closing from wss, event: 0x%02x", port, event);
         }
-        close_wss(wss, port);
+        close_wss(wss, port, 1000);
     }
 }
 
