@@ -2,7 +2,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
-#include <signal.h>
 #include <unistd.h>
 #include <event2/buffer.h>
 #include <event2/bufferevent_ssl.h>
@@ -13,7 +12,6 @@
 
 struct wss_server_info {
     uint8_t tls;
-    uint8_t debug;
     uint16_t port;
     const char *addr;
     const char *host;
@@ -24,7 +22,7 @@ struct wss_proxy_context {
     SSL_CTX *ssl_ctx;
     struct wss_server_info server;
     char user_agent[80];
-} wss_context;
+};
 
 static int init_raw_addr(struct sockaddr_storage *sockaddr, int *socklen) {
     int port;
@@ -62,6 +60,7 @@ static int init_wss_addr(struct wss_server_info *server) {
     int port;
     char *end;
     int mux = 1;
+    const char *loglevel;
     const char *remote_host = getenv("SS_REMOTE_HOST");
     const char *remote_port = getenv("SS_REMOTE_PORT");
     const char *options = getenv("SS_PLUGIN_OPTIONS");
@@ -84,6 +83,9 @@ static int init_wss_addr(struct wss_server_info *server) {
     }
     server->port = port;
 
+    if (options == NULL) {
+        options = "";
+    }
     if (strchr(options, '\\') != NULL) {
         LOGE("plugin options %s (contains \\) is unsupported", options);
         return EINVAL;
@@ -111,8 +113,9 @@ static int init_wss_addr(struct wss_server_info *server) {
         }
     }
     // loglevel
-    if (options != NULL && strstr(options, "loglevel=debug") != NULL) {
-        server->debug = 1;
+    if ((loglevel = strstr(options, "loglevel=")) != NULL) {
+        loglevel += 9;
+        init_log_level(loglevel);
     }
 
     // mux
@@ -241,18 +244,14 @@ static uint8_t *build_wss_frame(struct wss_frame_client *client, enum wss_op op,
 
 static void close_wss_data_cb(struct bufferevent *tev, void *wss) {
     (void) tev;
-    if (wss_context.server.debug) {
-        LOGD("close wss %p", wss);
-    }
+    LOGD("close wss %p", wss);
     evhttp_connection_free(wss);
 }
 
 static void close_wss_event_cb(struct bufferevent *tev, short event, void *wss) {
     (void) tev;
     (void) event;
-    if (wss_context.server.debug) {
-        LOGD("close wss %p, event: 0x%02x", wss, event);
-    }
+    LOGD("close wss %p, event: 0x%02x", wss, event);
     evhttp_connection_free(wss);
 }
 
@@ -271,9 +270,7 @@ static void close_wss(struct evhttp_connection *wss, uint16_t port, uint16_t rea
     wss_header = build_wss_frame(&(wss_frame_client_close.client), OP_CLOSE, size, &wss_header_size);
     tev = evhttp_connection_get_bufferevent(wss);
     evbuffer_add(bufferevent_get_output(tev), wss_header, size + wss_header_size);
-    if (wss_context.server.debug) {
-        LOGD("would close wss %p for peer %d", wss, port);
-    }
+    LOGD("would close wss %p for peer %d", wss, port);
     bufferevent_setcb(tev, NULL, close_wss_data_cb, close_wss_event_cb, wss);
 }
 
@@ -310,9 +307,7 @@ static void raw_event_cb(struct bufferevent *raw, short event, void *wss) {
     if (event & (BEV_EVENT_EOF | BEV_EVENT_ERROR)) {
         port = get_peer_port(raw);
         bufferevent_free(raw);
-        if (wss_context.server.debug) {
-            LOGD("connection %u closed, event: 0x%02x", get_peer_port(raw), event);
-        }
+        LOGD("connection %u closed, event: 0x%02x", get_peer_port(raw), event);
         close_wss(wss, port, 1001);
     }
 }
@@ -334,18 +329,14 @@ static void wss_event_cb(struct bufferevent *wev, short event, void *raw) {
         port = get_peer_port(raw);
         bufferevent_getcb(raw, NULL, NULL, NULL, (void **) &wss);
         bufferevent_free(raw);
-        if (wss_context.server.debug) {
-            LOGD("connection %u closing from wss, event: 0x%02x", port, event);
-        }
+        LOGD("connection %u closing from wss, event: 0x%02x", port, event);
         close_wss(wss, port, 1000);
     }
 }
 
 static void wss_close_cb(struct evhttp_connection *wss, void *wev) {
     (void) wss;
-    if (wss_context.server.debug) {
-        LOGD("wss %p closed", wss);
-    }
+    LOGD("wss %p closed", wss);
     bufferevent_free(wev);
 }
 
@@ -458,9 +449,7 @@ static void accept_conn_cb(struct evconnlistener *listener, evutil_socket_t fd,
         goto error;
     }
     port = get_port(address);
-    if (wss_context.server.debug) {
-        LOGD("new connection from %d", port);
-    }
+    LOGD("new connection from %d", port);
     wss = connect_wss(ctx, base, raw, port);
     if (!wss) {
         goto error;
@@ -472,34 +461,6 @@ error:
     }
 }
 
-static void log_callback(int severity, const char *msg) {
-    switch (severity) {
-        case EVENT_LOG_DEBUG:
-            if (wss_context.server.debug) {
-                LOGD("libevent: %s", msg);
-            }
-            break;
-        case EVENT_LOG_MSG:
-            LOGI("libevent: %s", msg);
-            break;
-        case EVENT_LOG_WARN:
-            LOGW("libevent: %s", msg);
-            break;
-        case EVENT_LOG_ERR:
-            LOGE("libevent: %s", msg);
-            break;
-        default:
-            LOGW("???event: %s", msg);
-            break;
-    }
-}
-
-static void toggle_debug(int signal) {
-    if (signal == SIGUSR2) {
-        wss_context.server.debug = !wss_context.server.debug;
-    }
-}
-
 int main() {
     int code = 1;
     struct event_base *base = NULL;
@@ -507,6 +468,7 @@ int main() {
     struct evconnlistener *listener = NULL;
     struct sockaddr_storage raw_addr;
     int socklen;
+    struct wss_proxy_context wss_context;
 
     memset(&wss_context, 0, sizeof(wss_context));
     if (init_wss_addr(&wss_context.server)) {
@@ -516,7 +478,7 @@ int main() {
     if (wss_context.server.tls) {
         wss_context.ssl_ctx = SSL_CTX_new(TLS_client_method());
         if (!wss_context.ssl_ctx) {
-            perror("cannot create ssl context");
+            LOGE("cannot create ssl context");
             return 1;
         }
 #ifdef HAVE_SSL_CTX_SET_KEYLOG_CALLBACK
@@ -534,7 +496,7 @@ int main() {
 
     cfg = event_config_new();
     if (!cfg) {
-        perror("cannot create event config");
+        LOGE("cannot create event config");
         goto error;
     }
     event_config_set_flag(cfg, EVENT_BASE_FLAG_NOLOCK);
@@ -544,7 +506,7 @@ int main() {
 #endif
     base = event_base_new_with_config(cfg);
     if (!base) {
-        perror("cannot create event base");
+        LOGE("cannot create event base");
         goto error;
     }
 
@@ -552,7 +514,7 @@ int main() {
                                        LEV_OPT_CLOSE_ON_FREE | LEV_OPT_CLOSE_ON_EXEC | LEV_OPT_REUSEABLE,
                                        -1, (struct sockaddr *) &raw_addr, socklen);
     if (!listener) {
-        perror("cannot listen to raw");
+        LOGE("cannot listen to raw");
         goto error;
     }
 
@@ -565,8 +527,6 @@ int main() {
 #endif
 
     init_event_signal(base);
-
-    signal(SIGUSR2, toggle_debug);
 
     LOGI("%s", wss_context.user_agent);
     LOGI("started, pid: %d, ppid: %d", getpid(), getppid());

@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <signal.h>
 #include <unistd.h>
 #include <sys/resource.h>
@@ -61,6 +62,62 @@ static void check_parent(evutil_socket_t fd, short event, void *arg) {
     }
 }
 
+void log_callback(int severity, const char *msg) {
+    switch (severity) {
+        case EVENT_LOG_DEBUG:
+            LOGD("libevent: %s", msg);
+            break;
+        case EVENT_LOG_MSG:
+            LOGI("libevent: %s", msg);
+            break;
+        case EVENT_LOG_WARN:
+            LOGW("libevent: %s", msg);
+            break;
+        case EVENT_LOG_ERR:
+            LOGE("libevent: %s", msg);
+            break;
+        default:
+            LOGW("???event: %s", msg);
+            break;
+    }
+}
+
+#ifndef NDEBUG
+static enum log_level log_level = DEBUG;
+#else
+static enum log_level log_level = INFO;
+#endif
+
+static void set_log_level(enum log_level level) {
+    log_level = level;
+}
+
+void init_log_level(const char *loglevel) {
+    if (loglevel == NULL || !evutil_ascii_strncasecmp(loglevel, "info", 4)) {
+        set_log_level(INFO);
+    } else if (!evutil_ascii_strncasecmp(loglevel, "debug", 5)) {
+        set_log_level(DEBUG);
+    } else if (!evutil_ascii_strncasecmp(loglevel, "warn", 4)) {
+        set_log_level(WARN);
+    } else if (!evutil_ascii_strncasecmp(loglevel, "error", 5)) {
+        set_log_level(ERROR);
+    }
+}
+
+enum log_level get_log_level() {
+    return log_level;
+}
+
+static void toggle_debug(int signal) {
+    if (signal == SIGUSR2) {
+        if (get_log_level() == DEBUG) {
+            set_log_level(INFO);
+        } else {
+            set_log_level(DEBUG);
+        }
+    }
+}
+
 void init_event_signal(struct event_base *base) {
     struct rlimit rlim;
     struct timeval one_minute = {60, 0};
@@ -94,6 +151,7 @@ void init_event_signal(struct event_base *base) {
     evsignal_new(base, SIGTERM, on_signal, base);
     evsignal_new(base, SIGINT, on_signal, base);
     evsignal_new(base, SIGUSR1, on_signal, base);
+    signal(SIGUSR2, toggle_debug);
 }
 
 #ifdef HAVE_SSL_CTX_SET_KEYLOG_CALLBACK

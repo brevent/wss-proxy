@@ -76,47 +76,33 @@ uint16_t get_peer_port(struct bufferevent *bev);
 
 #define TIME_FORMAT "%Y-%m-%d %H:%M:%S"
 
-#define LOGD(format, ...)                                                   \
-    do {                                                                    \
-        time_t now = time(NULL);                                            \
-        char timestr[20];                                                   \
-        strftime(timestr, 20, TIME_FORMAT, localtime(&now));                \
-        fprintf(stdout, " %s DEBUG " LOGGER_NAME " " format "\n", timestr,  \
-                    ## __VA_ARGS__);                                        \
-        fflush(stdout);                                                     \
-    }                                                                       \
-    while (0)
+enum log_level {
+    DEBUG,
+    INFO,
+    WARN,
+    ERROR,
+};
 
-#define LOGI(format, ...)                                                   \
-    do {                                                                    \
-        time_t now = time(NULL);                                            \
-        char timestr[20];                                                   \
-        strftime(timestr, 20, TIME_FORMAT, localtime(&now));                \
-        fprintf(stdout, " %s INFO " LOGGER_NAME " " format "\n", timestr,   \
-                    ## __VA_ARGS__);                                        \
-        fflush(stdout);                                                     \
-    }                                                                       \
-    while (0)
+void log_callback(int severity, const char *msg);
 
-#define LOGW(format, ...)                                                   \
-    do {                                                                    \
-        time_t now = time(NULL);                                            \
-        char timestr[20];                                                   \
-        strftime(timestr, 20, TIME_FORMAT, localtime(&now));                \
-        fprintf(stderr, " %s WARN " LOGGER_NAME " " format "\n", timestr,   \
-                    ## __VA_ARGS__);                                        \
-        fflush(stderr);                                                     \
-    } while (0)
+void init_log_level(const char *loglevel);
 
-#define LOGE(format, ...)                                                   \
-    do {                                                                    \
-        time_t now = time(NULL);                                            \
-        char timestr[20];                                                   \
-        strftime(timestr, 20, TIME_FORMAT, localtime(&now));                \
-        fprintf(stderr, " %s ERROR " LOGGER_NAME " " format "\n", timestr,  \
-                    ## __VA_ARGS__);                                        \
-        fflush(stderr);                                                     \
-    } while (0)
+enum log_level get_log_level(void);
+
+#define LOG(format, stream, level, ...)                                         \
+    if (get_log_level() <= level) {                                             \
+        time_t now = time(NULL);                                                \
+        char timestr[20];                                                       \
+        strftime(timestr, 20, TIME_FORMAT, localtime(&now));                    \
+        fprintf(stream, " %s " #level " " LOGGER_NAME " " format "\n", timestr, \
+                    ## __VA_ARGS__);                                            \
+        fflush(stream);                                                         \
+    }
+
+#define LOGD(format, ...) LOG(format, stdout, DEBUG, ## __VA_ARGS__)
+#define LOGI(format, ...) LOG(format, stdout, INFO, ## __VA_ARGS__)
+#define LOGW(format, ...) LOG(format, stderr, WARN, ## __VA_ARGS__)
+#define LOGE(format, ...) LOG(format, stderr, ERROR, ## __VA_ARGS__)
 
 void init_event_signal(struct event_base *base);
 
