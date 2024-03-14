@@ -53,6 +53,8 @@ enum wss_op {
 #define WSS_PAYLOAD_SIZE 4096
 #endif
 
+#define MAX_WSS_FRAME(x) (x > WSS_PAYLOAD_SIZE ? WSS_PAYLOAD_SIZE : x)
+
 #if (WSS_PAYLOAD_SIZE % 4)
 #error "WSS_PAYLOAD_SIZE must be a multiple of 4"
 #endif
@@ -111,6 +113,9 @@ void init_event_signal(struct event_base *base);
 
 int is_websocket_key(const char *websocket_key);
 int calc_websocket_accept(const char *key, char *websocket_accept);
+
+void unmask(char *buffer, uint16_t size, uint32_t mask);
+void mask(char *buffer, uint16_t size, uint32_t *mask);
 
 #ifdef HAVE_SSL_CTX_SET_KEYLOG_CALLBACK
 void ssl_keylog_callback(const SSL *ssl, const char *line);

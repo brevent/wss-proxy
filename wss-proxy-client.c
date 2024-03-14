@@ -217,9 +217,11 @@ static enum bufferevent_filter_result wss_input_filter(struct evbuffer *src, str
         return BEV_OK;
     }
     while (len > 0) {
-        uint16_t size = len > WSS_PAYLOAD_SIZE ? WSS_PAYLOAD_SIZE : len;
-        evbuffer_remove_buffer(src, dst, size);
-        len -= size;
+        int size = evbuffer_remove_buffer(src, dst, MAX_WSS_FRAME(len));
+        if (size <= 0) {
+            break;
+        }
+        len -= (uint16_t) size;
     }
     return BEV_OK;
 }
@@ -228,6 +230,9 @@ static uint8_t *build_wss_frame(struct wss_frame_client *client, enum wss_op op,
     // should we support continuation frame?
     uint8_t fop = 0x80 | (op & 0xf);
     client->mask = 0;
+#ifndef WSS_MOCK_MASK
+    mask(((char *) &(client->mask)) + sizeof(client->mask), len, &(client->mask));
+#endif
     if (len < 126) {
         client->fop = fop;
         client->mlen = 0x80 | (uint8_t) len;
@@ -295,10 +300,7 @@ static void raw_forward_cb(struct bufferevent *raw, void *wss) {
             break;
         }
         wss_header = build_wss_frame(&(wss_frame_client_data.client), OP_BINARY, (uint16_t) size, &wss_header_size);
-        evbuffer_add(dst, wss_header, size + wss_header_size);
-        if (size < WSS_PAYLOAD_SIZE) {
-            break;
-        }
+        evbuffer_add(dst, wss_header, (uint16_t) size + wss_header_size);
     }
 }
 

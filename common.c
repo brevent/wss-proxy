@@ -182,6 +182,21 @@ int calc_websocket_accept(const char *websocket_key, char *websocket_accept) {
     return EVP_EncodeBlock((uint8_t *) websocket_accept, sha1, SHA_DIGEST_LENGTH);
 }
 
+void unmask(char *buffer, uint16_t size, uint32_t mask) {
+    uint32_t *masked = (uint32_t *) buffer;
+    uint16_t mask_remain = ((uint32_t) size + 3) / 4;
+    for (; mask_remain > 0; mask_remain--, masked++) {
+        *masked = *masked ^ mask;
+    }
+}
+
+void mask(char *buffer, uint16_t size, uint32_t *mask) {
+    if (!*mask) {
+        evutil_secure_rng_get_bytes(mask, 4);
+    }
+    unmask(buffer, size, *mask);
+}
+
 #ifdef HAVE_SSL_CTX_SET_KEYLOG_CALLBACK
 void ssl_keylog_callback(const SSL *ssl, const char *line) {
     char *keylog_file_name;
