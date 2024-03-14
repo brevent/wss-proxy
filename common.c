@@ -8,6 +8,8 @@
 #include <sys/sysctl.h>
 #endif
 #include <event2/event.h>
+#include <openssl/sha.h>
+#include <openssl/evp.h>
 #include "common.h"
 
 uint16_t get_port(struct sockaddr *sockaddr) {
@@ -152,6 +154,32 @@ void init_event_signal(struct event_base *base) {
     evsignal_new(base, SIGINT, on_signal, base);
     evsignal_new(base, SIGUSR1, on_signal, base);
     signal(SIGUSR2, toggle_debug);
+}
+
+int is_websocket_key(const char *websocket_key) {
+    char buffer[25];
+    if (strcmp(websocket_key, WEBSOCKET_KEY) == 0) {
+        return 1;
+    }
+    if (websocket_key != NULL && strlen(websocket_key) == 24
+        && EVP_DecodeBlock((uint8_t *) buffer, (uint8_t *) websocket_key, 24) == 18 && strlen(buffer) == 16) {
+        return 1;
+    } else {
+        LOGW("handshake fail, invalid Sec-WebSocket-Key: %s", websocket_key);
+        return 0;
+    }
+}
+
+int calc_websocket_accept(const char *websocket_key, char *websocket_accept) {
+    char buffer[61];
+    unsigned char sha1[SHA_DIGEST_LENGTH];
+    if (strcmp(websocket_key, WEBSOCKET_KEY) == 0) {
+        strcpy(websocket_accept, WEBSOCKET_ACCEPT);
+        return 1;
+    }
+    sprintf(buffer, "%s258EAFA5-E914-47DA-95CA-C5AB0DC85B11", websocket_key);
+    SHA1((uint8_t *) buffer, 60, sha1);
+    return EVP_EncodeBlock((uint8_t *) websocket_accept, sha1, SHA_DIGEST_LENGTH);
 }
 
 #ifdef HAVE_SSL_CTX_SET_KEYLOG_CALLBACK

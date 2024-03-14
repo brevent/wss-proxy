@@ -8,6 +8,9 @@
 #include <openssl/ssl.h>
 #endif
 
+#define WEBSOCKET_KEY "d3NzLXByb3h5LWNsaWVudA=="
+#define WEBSOCKET_ACCEPT "AtJZCZ2q4ZbrGbpaNnaio3gT+5Y="
+
 /**
  * fop: fin:1, rsv:3, opcode: 4
  * mlen: mask: 1, length: 7
@@ -105,6 +108,9 @@ enum log_level get_log_level(void);
 #define LOGE(format, ...) LOG(format, stderr, ERROR, ## __VA_ARGS__)
 
 void init_event_signal(struct event_base *base);
+
+int is_websocket_key(const char *websocket_key);
+int calc_websocket_accept(const char *key, char *websocket_accept);
 
 #ifdef HAVE_SSL_CTX_SET_KEYLOG_CALLBACK
 void ssl_keylog_callback(const SSL *ssl, const char *line);

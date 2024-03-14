@@ -355,17 +355,49 @@ static void wss_ready_cb(struct bufferevent *raw, struct evhttp_connection *wss)
     bufferevent_setcb(raw, raw_forward_cb, NULL, raw_event_cb, wss);
 }
 
+static int is_websocket_handshake(struct evhttp_request *req) {
+    const char *accept;
+    const char *key;
+    char base64_accept[29];
+    key = evhttp_find_header(evhttp_request_get_output_headers(req), "Sec-WebSocket-Key");
+    accept = evhttp_find_header(evhttp_request_get_input_headers(req), "Sec-WebSocket-Accept");
+    if (is_websocket_key(key)
+        && calc_websocket_accept(key, base64_accept) > 0
+        && strcmp(accept, base64_accept) == 0) {
+        return 1;
+    }
+    LOGW("hand shake fail, key: %s, accept: %s", (const char *) key, accept);
+    return 0;
+}
+
 static void http_request_cb(struct evhttp_request *req, void *raw) {
     struct evhttp_connection *wss;
     int status = req == NULL ? -1 : evhttp_request_get_response_code(req);
     bufferevent_getcb(raw, NULL, NULL, NULL, (void **) &wss);
-    if (status == 101) {
+    if (status == 101 && is_websocket_handshake(req)) {
         wss_ready_cb(raw, wss);
     } else {
         LOGE("wss fail for peer %d, status: %d", get_peer_port(raw), status);
         bufferevent_free(raw);
         evhttp_connection_free(wss);
     }
+}
+
+static void generate_websocket_key(char *base64) {
+#ifndef WSS_MOCK_KEY
+    int i;
+    char key[17], *c;
+    evutil_secure_rng_get_bytes(key, 16);
+    for (i = 0, c = key; i < 16; ++i, ++c) {
+        if (*c == 0) {
+            *c = (char) (i + 1);
+        }
+    }
+    *c = '\0';
+    EVP_EncodeBlock((uint8_t *) base64, (uint8_t *) key, 16);
+#else
+    strcpy(base64, WEBSOCKET_KEY);
+#endif
 }
 
 static struct evhttp_connection *connect_wss(struct wss_proxy_context *context, struct event_base *base,
@@ -375,6 +407,7 @@ static struct evhttp_connection *connect_wss(struct wss_proxy_context *context, 
     struct evhttp_connection *wss = NULL;
     struct evkeyvalq *output_headers = NULL;
     struct evhttp_request *req = NULL;
+    char websocket_key[25];
 
     if (context->server.tls) {
         ssl = SSL_new(context->ssl_ctx);
@@ -419,8 +452,8 @@ static struct evhttp_connection *connect_wss(struct wss_proxy_context *context, 
     evhttp_add_header(output_headers, "Host", context->server.host);
     evhttp_add_header(output_headers, "Upgrade", "websocket");
     evhttp_add_header(output_headers, "Connection", "Upgrade");
-#define WEBSOCKET_KEY "d3NzLXByb3h5LWNsaWVudA=="
-    evhttp_add_header(output_headers, "Sec-WebSocket-Key", WEBSOCKET_KEY);
+    generate_websocket_key(websocket_key);
+    evhttp_add_header(output_headers, "Sec-WebSocket-Key", websocket_key);
     evhttp_add_header(output_headers, "Sec-WebSocket-Version", "13");
     evhttp_add_header(output_headers, "User-Agent", context->user_agent);
 
