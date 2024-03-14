@@ -68,7 +68,7 @@ enum wss_op {
 #endif
 
 #ifndef WSS_PROXY_VERSION
-#define WSS_PROXY_VERSION "0.1.0"
+#define WSS_PROXY_VERSION "0.2.0"
 #endif
 
 uint16_t get_port(struct sockaddr *sockaddr);

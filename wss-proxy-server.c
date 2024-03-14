@@ -112,16 +112,16 @@ static enum bufferevent_filter_result wss_input_filter(struct evbuffer *src, str
         case OP_BINARY:
             break;
         case OP_CLOSE:
-            LOGW("server send close frame");
+            LOGD("client send close frame");
             return BEV_ERROR;
         case OP_PING:
-            LOGD("server send ping frame");
+            LOGD("client send ping frame");
             break;
         case OP_PONG:
-            LOGD("server send pong frame");
+            LOGD("client send pong frame");
             break;
         default:
-            LOGW("server send unsupported opcode: 0x%x", op);
+            LOGW("client send unsupported opcode: 0x%x", op);
             return BEV_ERROR;
     }
     len = client.mlen & 0x7f;
