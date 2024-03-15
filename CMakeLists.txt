@@ -48,10 +48,10 @@ set(CMAKE_REQUIRED_LIBRARIES libevent::extra)
 check_function_exists(evhttp_connection_base_bufferevent_new HAVE_EVHTTP_CONNECTION_BASE_BUFFEREVENT_NEW)
 unset(CMAKE_REQUIRED_LIBRARIES)
 
-add_executable(wss-proxy-client wss-proxy-client.c common.c)
+add_executable(wss-proxy-client wss-proxy-client.c ws-header.c common.c)
 target_link_libraries(wss-proxy-client libevent::core libevent::extra libevent::openssl OpenSSL::SSL)
 install(TARGETS wss-proxy-client DESTINATION bin)
 
-add_executable(wss-proxy-server wss-proxy-server.c common.c)
+add_executable(wss-proxy-server wss-proxy-server.c ws-header.c common.c)
 target_link_libraries(wss-proxy-server libevent::core libevent::extra OpenSSL::Crypto)
 install(TARGETS wss-proxy-server DESTINATION bin)

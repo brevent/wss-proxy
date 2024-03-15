@@ -7,53 +7,11 @@
 #ifdef HAVE_SSL_CTX_SET_KEYLOG_CALLBACK
 #include <openssl/ssl.h>
 #endif
-
-#define WEBSOCKET_KEY "d3NzLXByb3h5LWNsaWVudA=="
-#define WEBSOCKET_ACCEPT "AtJZCZ2q4ZbrGbpaNnaio3gT+5Y="
-
-/**
- * fop: fin:1, rsv:3, opcode: 4
- * mlen: mask: 1, length: 7
- */
-#define FOP_MASK struct {   \
-    uint8_t fop;            \
-    uint8_t mlen;           \
-}
-
-#define WSS_HEADER union {  \
-    struct {                \
-        uint16_t unused;    \
-        FOP_MASK;           \
-    };                      \
-    struct {                \
-        FOP_MASK;           \
-        uint16_t elen;      \
-    } extend;               \
-}
-
-struct wss_frame_client {
-    WSS_HEADER;
-    uint32_t mask;
-};
-
-struct wss_frame_server {
-    WSS_HEADER;
-};
-
-enum wss_op {
-    OP_CONTINUATION = 0x0,
-    OP_TEXT = 0x1,
-    OP_BINARY = 0x2,
-    OP_CLOSE = 0x8,
-    OP_PING = 0x9,
-    OP_PONG = 0xa,
-};
+#include "ws-header.h"
 
 #ifndef WSS_PAYLOAD_SIZE
 #define WSS_PAYLOAD_SIZE 4096
 #endif
-
-#define MAX_WSS_FRAME(x) (x > WSS_PAYLOAD_SIZE ? WSS_PAYLOAD_SIZE : x)
 
 #if (WSS_PAYLOAD_SIZE % 4)
 #error "WSS_PAYLOAD_SIZE must be a multiple of 4"
@@ -71,10 +29,6 @@ enum wss_op {
 #define WSS_PROXY_VERSION "0.2.0"
 #endif
 
-uint16_t get_port(struct sockaddr *sockaddr);
-
-uint16_t get_peer_port(struct bufferevent *bev);
-
 #ifndef LOGGER_NAME
 #define LOGGER_NAME "wss-proxy"
 #endif
@@ -87,6 +41,8 @@ enum log_level {
     WARN,
     ERROR,
 };
+
+uint16_t get_peer_port(struct bufferevent *bev);
 
 void log_callback(int severity, const char *msg);
 
@@ -115,10 +71,19 @@ enum log_level get_log_level(void);
 void init_event_signal(struct event_base *base);
 
 int is_websocket_key(const char *websocket_key);
-int calc_websocket_accept(const char *key, char *websocket_accept);
 
-void unmask(char *buffer, uint16_t size, uint32_t mask);
-void mask(char *buffer, uint16_t size, uint32_t *mask);
+int calc_websocket_accept(const char *websocket_key, char *websocket_accept);
+
+enum wss_role {
+    wss_server = 0,
+    wss_client = 1,
+};
+
+extern const enum wss_role role;
+
+void raw_event_cb(struct bufferevent *raw, short event, void *wss);
+
+void tunnel_wss(struct bufferevent *raw, struct evhttp_connection *wss);
 
 #ifdef HAVE_SSL_CTX_SET_KEYLOG_CALLBACK
 void ssl_keylog_callback(const SSL *ssl, const char *line);

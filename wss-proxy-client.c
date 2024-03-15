@@ -10,6 +10,8 @@
 #include <openssl/ssl.h>
 #include "common.h"
 
+const enum wss_role role = wss_client;
+
 struct wss_server_info {
     uint8_t tls;
     uint16_t port;
@@ -139,224 +141,6 @@ static int init_wss_addr(struct wss_server_info *server) {
     return 0;
 }
 
-static enum bufferevent_filter_result wss_input_filter(struct evbuffer *src, struct evbuffer *dst,
-                                                       ev_ssize_t dst_limit, enum bufferevent_flush_mode mode,
-                                                       void *ctx) {
-    struct wss_frame_server server;
-    uint8_t op;
-    uint16_t len;
-    (void) dst_limit;
-    (void) mode;
-    (void) ctx;
-    if (evbuffer_get_length(src) < sizeof(FOP_MASK)) {
-        return BEV_NEED_MORE;
-    }
-    evbuffer_copyout(src, &(server.fop), sizeof(FOP_MASK));
-    if (!(server.fop & 0x80)) {
-        LOGW("fin should be 1 (fragments is unsupported)");
-        return BEV_ERROR;
-    }
-    if (server.fop & 0x70) {
-        LOGW("rsv should be 0");
-        return BEV_ERROR;
-    }
-    if (server.mlen & 0x80) {
-        LOGW("server reply shouldn't mask");
-        return BEV_ERROR;
-    }
-    op = server.fop & 0xf;
-    switch (op) {
-        case OP_CONTINUATION:
-            LOGW("continuation frame is unsupported");
-            return BEV_ERROR;
-        case OP_TEXT:
-            LOGW("text frame is unsupported");
-            return BEV_ERROR;
-        case OP_BINARY:
-            break;
-        case OP_CLOSE:
-            LOGW("server send close frame");
-            return BEV_ERROR;
-        case OP_PING:
-            LOGD("server send ping frame");
-            break;
-        case OP_PONG:
-            LOGD("server send pong frame");
-            break;
-        default:
-            LOGW("server send unsupported opcode: 0x%x", op);
-            return BEV_ERROR;
-    }
-    len = server.mlen & 0x7f;
-    if (len < 126) {
-        if (evbuffer_get_length(src) < (size_t) len + sizeof(FOP_MASK)) {
-            return BEV_NEED_MORE;
-        }
-        evbuffer_drain(src, sizeof(FOP_MASK));
-    } else if (len == 126) {
-        if (evbuffer_get_length(src) < sizeof(server.extend)) {
-            return BEV_NEED_MORE;
-        }
-        evbuffer_copyout(src, &(server.extend.fop), sizeof(server.extend));
-        len = htons(server.extend.elen);
-        if (len > MAX_PAYLOAD_SIZE) {
-            LOGW("payload length %d is unsupported", len);
-            return BEV_ERROR;
-        }
-        if (evbuffer_get_length(src) < (size_t) len + sizeof(server)) {
-            return BEV_NEED_MORE;
-        }
-        evbuffer_drain(src, sizeof(server));
-    } else {
-        LOGW("payload length 64K+ is unsupported");
-        return BEV_ERROR;
-    }
-    if (op == OP_PING || op == OP_PONG) {
-        // should we pong to ping?
-        evbuffer_drain(src, len);
-        return BEV_OK;
-    }
-    while (len > 0) {
-        int size = evbuffer_remove_buffer(src, dst, MAX_WSS_FRAME(len));
-        if (size <= 0) {
-            break;
-        }
-        len -= (uint16_t) size;
-    }
-    return BEV_OK;
-}
-
-static uint8_t *build_wss_frame(struct wss_frame_client *client, enum wss_op op, uint16_t len, uint8_t *header_len) {
-    // should we support continuation frame?
-    uint8_t fop = 0x80 | (op & 0xf);
-    client->mask = 0;
-#ifndef WSS_MOCK_MASK
-    mask(((char *) &(client->mask)) + sizeof(client->mask), len, &(client->mask));
-#endif
-    if (len < 126) {
-        client->fop = fop;
-        client->mlen = 0x80 | (uint8_t) len;
-        *header_len = sizeof(FOP_MASK) + sizeof(client->mask);
-        return &(client->fop);
-    } else {
-        client->extend.fop = fop;
-        client->extend.mlen = 0x80 | 126;
-        client->extend.elen = ntohs(len);
-        *header_len = sizeof(client->extend) + sizeof(client->mask);
-        return &(client->extend.fop);
-    }
-}
-
-static void close_wss_data_cb(struct bufferevent *tev, void *wss) {
-    (void) tev;
-    LOGD("close wss %p", wss);
-    evhttp_connection_free(wss);
-}
-
-static void close_wss_event_cb(struct bufferevent *tev, short event, void *wss) {
-    (void) tev;
-    (void) event;
-    LOGD("close wss %p, event: 0x%02x", wss, event);
-    evhttp_connection_free(wss);
-}
-
-static void close_wss(struct evhttp_connection *wss, uint16_t port, uint16_t reason) {
-    struct bufferevent *tev;
-    struct wss_frame_client_close {
-        struct wss_frame_client client;
-        struct {
-            uint16_t reason;
-            uint16_t unused; // padding to uint32_t for mask
-        };
-    } wss_frame_client_close;
-    uint8_t *wss_header, wss_header_size;
-    uint16_t size = sizeof(wss_frame_client_close.reason);
-    wss_frame_client_close.reason = ntohs(reason);
-    wss_header = build_wss_frame(&(wss_frame_client_close.client), OP_CLOSE, size, &wss_header_size);
-    tev = evhttp_connection_get_bufferevent(wss);
-    evbuffer_add(bufferevent_get_output(tev), wss_header, size + wss_header_size);
-    LOGD("would close wss %p for peer %d", wss, port);
-    bufferevent_setcb(tev, NULL, close_wss_data_cb, close_wss_event_cb, wss);
-}
-
-static void raw_forward_cb(struct bufferevent *raw, void *wss) {
-    struct evbuffer *src;
-    struct evbuffer *dst;
-    struct bufferevent *tev;
-    struct wss_frame_client_data {
-        struct wss_frame_client client;
-        char buffer[WSS_PAYLOAD_SIZE];
-    } wss_frame_client_data;
-
-    tev = evhttp_connection_get_bufferevent(wss);
-    src = bufferevent_get_input(raw);
-    dst = bufferevent_get_output(tev);
-
-    for (;;) {
-        // should we use continuation fame?
-        uint8_t *wss_header, wss_header_size;
-        int size = evbuffer_remove(src, wss_frame_client_data.buffer, WSS_PAYLOAD_SIZE);
-        if (size <= 0) {
-            break;
-        }
-        wss_header = build_wss_frame(&(wss_frame_client_data.client), OP_BINARY, (uint16_t) size, &wss_header_size);
-        evbuffer_add(dst, wss_header, (uint16_t) size + wss_header_size);
-    }
-}
-
-static void raw_event_cb(struct bufferevent *raw, short event, void *wss) {
-    uint16_t port;
-    if (event & (BEV_EVENT_EOF | BEV_EVENT_ERROR)) {
-        port = get_peer_port(raw);
-        bufferevent_free(raw);
-        LOGD("connection %u closed, event: 0x%02x", get_peer_port(raw), event);
-        close_wss(wss, port, 1001);
-    }
-}
-
-static void wss_forward_cb(struct bufferevent *wev, void *raw) {
-    struct evbuffer *src;
-    struct evbuffer *dst;
-
-    src = bufferevent_get_input(wev);
-    dst = bufferevent_get_output(raw);
-    evbuffer_add_buffer(dst, src);
-}
-
-static void wss_event_cb(struct bufferevent *wev, short event, void *raw) {
-    uint16_t port;
-    struct evhttp_connection *wss;
-    (void) wev;
-    if (event & (BEV_EVENT_EOF | BEV_EVENT_ERROR)) {
-        port = get_peer_port(raw);
-        bufferevent_getcb(raw, NULL, NULL, NULL, (void **) &wss);
-        bufferevent_free(raw);
-        LOGD("connection %u closing from wss, event: 0x%02x", port, event);
-        close_wss(wss, port, 1000);
-    }
-}
-
-static void wss_close_cb(struct evhttp_connection *wss, void *wev) {
-    (void) wss;
-    LOGD("wss %p closed", wss);
-    bufferevent_free(wev);
-}
-
-static void wss_ready_cb(struct bufferevent *raw, struct evhttp_connection *wss) {
-    struct bufferevent *tev;
-    struct bufferevent *wev;
-
-    tev = evhttp_connection_get_bufferevent(wss);
-    wev = bufferevent_filter_new(tev, wss_input_filter, NULL, 0, NULL, NULL);
-    evhttp_connection_set_closecb(wss, wss_close_cb, wev);
-
-    bufferevent_enable(wev, EV_READ | EV_WRITE);
-    bufferevent_setcb(wev, wss_forward_cb, NULL, wss_event_cb, raw);
-
-    bufferevent_enable(raw, EV_READ | EV_WRITE);
-    bufferevent_setcb(raw, raw_forward_cb, NULL, raw_event_cb, wss);
-}
-
 static int is_websocket_handshake(struct evhttp_request *req) {
     const char *accept;
     const char *key;
@@ -368,7 +152,7 @@ static int is_websocket_handshake(struct evhttp_request *req) {
         && strcmp(accept, base64_accept) == 0) {
         return 1;
     }
-    LOGW("hand shake fail, key: %s, accept: %s", (const char *) key, accept);
+    LOGW("hand shake fail, key: %s, accept: %s", key, accept);
     return 0;
 }
 
@@ -377,29 +161,12 @@ static void http_request_cb(struct evhttp_request *req, void *raw) {
     int status = req == NULL ? -1 : evhttp_request_get_response_code(req);
     bufferevent_getcb(raw, NULL, NULL, NULL, (void **) &wss);
     if (status == 101 && is_websocket_handshake(req)) {
-        wss_ready_cb(raw, wss);
+        tunnel_wss(raw, wss);
     } else {
         LOGE("wss fail for peer %d, status: %d", get_peer_port(raw), status);
         bufferevent_free(raw);
         evhttp_connection_free(wss);
     }
-}
-
-static void generate_websocket_key(char *base64) {
-#ifndef WSS_MOCK_KEY
-    int i;
-    char key[17], *c;
-    evutil_secure_rng_get_bytes(key, 16);
-    for (i = 0, c = key; i < 16; ++i, ++c) {
-        if (*c == 0) {
-            *c = (char) (i + 1);
-        }
-    }
-    *c = '\0';
-    EVP_EncodeBlock((uint8_t *) base64, (uint8_t *) key, 16);
-#else
-    strcpy(base64, WEBSOCKET_KEY);
-#endif
 }
 
 static struct evhttp_connection *connect_wss(struct wss_proxy_context *context, struct event_base *base,
@@ -409,7 +176,6 @@ static struct evhttp_connection *connect_wss(struct wss_proxy_context *context, 
     struct evhttp_connection *wss = NULL;
     struct evkeyvalq *output_headers = NULL;
     struct evhttp_request *req = NULL;
-    char websocket_key[25];
 
     if (context->server.tls) {
         ssl = SSL_new(context->ssl_ctx);
@@ -454,8 +220,17 @@ static struct evhttp_connection *connect_wss(struct wss_proxy_context *context, 
     evhttp_add_header(output_headers, "Host", context->server.host);
     evhttp_add_header(output_headers, "Upgrade", "websocket");
     evhttp_add_header(output_headers, "Connection", "Upgrade");
-    generate_websocket_key(websocket_key);
-    evhttp_add_header(output_headers, "Sec-WebSocket-Key", websocket_key);
+#ifndef WSS_MOCK_KEY
+    {
+        char websocket_key[25];
+        unsigned char key[16];
+        evutil_secure_rng_get_bytes(key, 16);
+        EVP_EncodeBlock((unsigned char *) websocket_key, key, 16);
+        evhttp_add_header(output_headers, "Sec-WebSocket-Key", websocket_key);
+    }
+#else
+    evhttp_add_header(output_headers, "Sec-WebSocket-Key", "d3NzLXByb3h5LWNsaWVudA==");
+#endif
     evhttp_add_header(output_headers, "Sec-WebSocket-Version", "13");
     evhttp_add_header(output_headers, "User-Agent", context->user_agent);
 
@@ -468,6 +243,14 @@ error:
     // should we close req?
     evhttp_connection_free(wss);
     return NULL;
+}
+
+static uint16_t get_port(struct sockaddr *sockaddr) {
+    if (sockaddr->sa_family == AF_INET6) {
+        return ntohs(((struct sockaddr_in6 *) sockaddr)->sin6_port);
+    } else {
+        return ntohs(((struct sockaddr_in *) sockaddr)->sin_port);
+    }
 }
 
 static void accept_conn_cb(struct evconnlistener *listener, evutil_socket_t fd,
