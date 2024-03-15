@@ -111,13 +111,15 @@ enum log_level get_log_level() {
     return log_level;
 }
 
-static void toggle_debug(int signal) {
+static void on_native_signal(int signal) {
     if (signal == SIGUSR2) {
         if (get_log_level() == DEBUG) {
             set_log_level(INFO);
         } else {
             set_log_level(DEBUG);
         }
+    } else if (signal == SIGPIPE) {
+        LOGW("received SIGPIPE");
     }
 }
 
@@ -154,7 +156,8 @@ void init_event_signal(struct event_base *base) {
     evsignal_new(base, SIGTERM, on_signal, base);
     evsignal_new(base, SIGINT, on_signal, base);
     evsignal_new(base, SIGUSR1, on_signal, base);
-    signal(SIGUSR2, toggle_debug);
+    signal(SIGUSR2, on_native_signal);
+    signal(SIGPIPE, on_native_signal);
 }
 
 int is_websocket_key(const char *websocket_key) {
