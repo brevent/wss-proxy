@@ -299,6 +299,9 @@ int main() {
             LOGE("cannot create ssl context");
             return 1;
         }
+#ifdef TLS1_2_VERSION
+        SSL_CTX_set_min_proto_version(wss_context.ssl_ctx, TLS1_2_VERSION);
+#endif
 #ifdef HAVE_SSL_CTX_SET_KEYLOG_CALLBACK
         SSL_CTX_set_keylog_callback(wss_context.ssl_ctx, ssl_keylog_callback);
 #endif
