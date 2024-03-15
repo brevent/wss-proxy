@@ -94,15 +94,18 @@ void init_log_level(const char *loglevel);
 
 enum log_level get_log_level(void);
 
-#define LOG(format, stream, level, ...)                                         \
-    if (get_log_level() <= level) {                                             \
-        time_t now = time(NULL);                                                \
-        char timestr[20];                                                       \
-        strftime(timestr, 20, TIME_FORMAT, localtime(&now));                    \
-        fprintf(stream, " %s " #level " " LOGGER_NAME " " format "\n", timestr, \
-                    ## __VA_ARGS__);                                            \
-        fflush(stream);                                                         \
-    }
+#define LOG(format, stream, level, ...)                                             \
+    do {                                                                            \
+        if (get_log_level() <= level) {                                             \
+            time_t now = time(NULL);                                                \
+            char timestr[20];                                                       \
+            strftime(timestr, 20, TIME_FORMAT, localtime(&now));                    \
+            fprintf(stream, " %s " #level " " LOGGER_NAME " " format "\n", timestr, \
+                        ## __VA_ARGS__);                                            \
+            fflush(stream);                                                         \
+        }                                                                           \
+    } while (0)
+
 
 #define LOGD(format, ...) LOG(format, stdout, DEBUG, ## __VA_ARGS__)
 #define LOGI(format, ...) LOG(format, stdout, INFO, ## __VA_ARGS__)
