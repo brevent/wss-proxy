@@ -57,3 +57,6 @@ add_executable(wss-proxy-server wss-proxy-server.c ws-header.c common.c)
 target_link_libraries(wss-proxy-server libevent::core libevent::extra OpenSSL::Crypto)
 target_compile_definitions(wss-proxy-server PRIVATE -DWSS_PROXY_SERVER)
 install(TARGETS wss-proxy-server DESTINATION bin)
+
+include(CTest)
+add_test(NAME run-test COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run-test.sh)
