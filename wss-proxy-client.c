@@ -10,8 +10,6 @@
 #include <openssl/ssl.h>
 #include "common.h"
 
-const enum wss_role role = wss_client;
-
 struct wss_server_info {
     uint8_t tls;
     uint16_t port;

@@ -12,8 +12,12 @@
 #include <event2/http.h>
 #include <openssl/sha.h>
 #include <openssl/evp.h>
+#ifdef WSS_PROXY_CLIENT
+#include <openssl/rand.h>
+#endif
 #include "common.h"
 
+#ifdef WSS_PROXY_CLIENT
 uint16_t get_peer_port(struct bufferevent *bev) {
     int fd;
     socklen_t len;
@@ -33,13 +37,16 @@ uint16_t get_peer_port(struct bufferevent *bev) {
         return ntohs(((struct sockaddr_in *) &sin)->sin_port);
     }
 }
+#endif
 
+#ifdef WSS_PROXY_SERVER
 static uint16_t get_http_port(struct evhttp_connection *evcon) {
     char *address;
     uint16_t port;
     evhttp_connection_get_peer(evcon, &address, &port);
     return port;
 }
+#endif
 
 static void on_signal(int fd, short signal, void *base) {
     (void) fd;
@@ -185,12 +192,12 @@ static uint8_t *build_ws_frame(enum ws_op op, void *payload, uint16_t size, uint
     memset(&info, 0, sizeof(struct ws_header_info));
     info.fin = 1;
     info.op = op;
-    info.mask = role == wss_client ? 1 : 0;
+#ifdef WSS_PROXY_CLIENT
+    info.mask = 1;
 #ifndef WSS_MOCK_MASK
-    if (info.mask) {
-        evutil_secure_rng_get_bytes(&(info.mask_key), MASK_SIZE);
-        mask(payload, size, info.mask_key);
-    }
+    RAND_bytes((unsigned char *) &(info.mask_key), MASK_SIZE);
+    mask(payload, size, info.mask_key);
+#endif
 #endif
     header = build_ws_header(&info, payload, size);
     *header_size = info.header_size;
@@ -243,13 +250,18 @@ static enum bufferevent_filter_result wss_input_filter(struct evbuffer *src, str
         LOGW("rsv should be 0");
         return BEV_ERROR;
     }
-    if (role == wss_client && info.mask) {
+#ifdef WSS_PROXY_CLIENT
+    if (info.mask) {
         LOGW("server response shouldn't mask");
         return BEV_ERROR;
-    } else if (role == wss_server && !info.mask) {
+    }
+#endif
+#ifdef WSS_PROXY_SERVER
+    if (!info.mask) {
         LOGW("client request should mask");
         return BEV_ERROR;
     }
+#endif
     switch (info.op) {
         case OP_CONTINUATION:
             LOGW("continuation frame is unsupported");
@@ -260,17 +272,28 @@ static enum bufferevent_filter_result wss_input_filter(struct evbuffer *src, str
         case OP_BINARY:
             break;
         case OP_CLOSE:
-            if (role == wss_client) {
-                LOGW("server send close frame");
-            } else {
-                LOGD("client send close frame");
-            }
+#ifdef WSS_PROXY_CLIENT
+            LOGW("server send close frame");
+#endif
+#ifdef WSS_PROXY_SERVER
+            LOGD("client send close frame");
+#endif
             return BEV_ERROR;
         case OP_PING:
-            LOGD("%s send ping frame", role == wss_client ? "client" : "server");
+#ifdef WSS_PROXY_CLIENT
+            LOGD("server send ping frame");
+#endif
+#ifdef WSS_PROXY_SERVER
+            LOGD("client send ping frame");
+#endif
             break;
         case OP_PONG:
-            LOGD("%s send pong frame", role == wss_client ? "client" : "server");
+#ifdef WSS_PROXY_CLIENT
+            LOGD("server send pong frame");
+#endif
+#ifdef WSS_PROXY_SERVER
+            LOGD("client send pong frame");
+#endif
             break;
         default:
             LOGW("op 0x%x is unsupported", info.op);
@@ -370,13 +393,14 @@ static void raw_forward_cb(struct bufferevent *raw, void *wss) {
 }
 
 void raw_event_cb(struct bufferevent *raw, short event, void *wss) {
-    uint16_t port;
+    uint16_t port = 0;
     if (event & (BEV_EVENT_EOF | BEV_EVENT_ERROR)) {
-        if (role == wss_client) {
-            port = get_peer_port(raw);
-        } else {
-            port = get_http_port(wss);
-        }
+#ifdef WSS_PROXY_CLIENT
+        port = get_peer_port(raw);
+#endif
+#ifdef WSS_PROXY_SERVER
+        port = get_http_port(wss);
+#endif
         bufferevent_free(raw);
         LOGD("connection %u closed, event: 0x%02x", port, event);
         close_wss(wss, port, 1001);
@@ -398,11 +422,12 @@ static void wss_event_cb(struct bufferevent *wev, short event, void *raw) {
     (void) wev;
     if (event & (BEV_EVENT_EOF | BEV_EVENT_ERROR)) {
         bufferevent_getcb(raw, NULL, NULL, NULL, (void **) &wss);
-        if (role == wss_client) {
-            port = get_peer_port(raw);
-        } else {
-            port = get_http_port(wss);
-        }
+#ifdef WSS_PROXY_CLIENT
+        port = get_peer_port(raw);
+#endif
+#ifdef WSS_PROXY_SERVER
+        port = get_http_port(wss);
+#endif
         bufferevent_free(raw);
         LOGD("connection %u closing from wss, event: 0x%02x", port, event);
         close_wss(wss, port, 1000);

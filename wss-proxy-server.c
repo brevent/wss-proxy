@@ -8,8 +8,6 @@
 #include <event2/listener.h>
 #include "common.h"
 
-const enum wss_role role = wss_server;
-
 struct raw_server_info {
     int port;
     const char *addr;

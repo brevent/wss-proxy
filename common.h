@@ -42,7 +42,9 @@ enum log_level {
     ERROR,
 };
 
+#ifdef WSS_PROXY_CLIENT
 uint16_t get_peer_port(struct bufferevent *bev);
+#endif
 
 void log_callback(int severity, const char *msg);
 
@@ -73,13 +75,6 @@ void init_event_signal(struct event_base *base);
 int is_websocket_key(const char *websocket_key);
 
 int calc_websocket_accept(const char *websocket_key, char *websocket_accept);
-
-enum wss_role {
-    wss_server = 0,
-    wss_client = 1,
-};
-
-extern const enum wss_role role;
 
 void raw_event_cb(struct bufferevent *raw, short event, void *wss);
 
