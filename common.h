@@ -17,10 +17,6 @@
 #error "WSS_PAYLOAD_SIZE must be a multiple of 4"
 #endif
 
-#ifndef MAX_PAYLOAD_SIZE
-#define MAX_PAYLOAD_SIZE 0x4050
-#endif
-
 #ifndef WSS_TIMEOUT
 #define WSS_TIMEOUT 10
 #endif

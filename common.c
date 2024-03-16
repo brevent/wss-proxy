@@ -225,17 +225,19 @@ static enum bufferevent_filter_result wss_input_filter(struct evbuffer *src, str
                                                        ev_ssize_t dst_limit, enum bufferevent_flush_mode mode,
                                                        void *ctx) {
     uint8_t header[MAX_WS_HEADER_SIZE];
-    size_t length;
+    ssize_t header_size;
     int result;
     struct ws_header_info info;
 
     (void) dst_limit;
     (void) mode;
 
-    length = evbuffer_get_length(src);
-    evbuffer_copyout(src, header, MIN(MAX_WS_HEADER_SIZE, length));
+    header_size = evbuffer_copyout(src, header, MAX_WS_HEADER_SIZE);
+    if (header_size < WS_HEADER_SIZE) {
+        return BEV_NEED_MORE;
+    }
     memset(&info, 0, sizeof(struct ws_header_info));
-    result = parse_ws_header(header, length, &info);
+    result = parse_ws_header(header, header_size, &info);
     if (result < 0) {
         LOGW("payload length 64K+ is unsupported");
         return BEV_ERROR;
@@ -299,11 +301,7 @@ static enum bufferevent_filter_result wss_input_filter(struct evbuffer *src, str
             LOGW("op 0x%x is unsupported", info.op);
             return BEV_ERROR;
     }
-    if (info.payload_size > MAX_PAYLOAD_SIZE) {
-        LOGW("payload length %d is unsupported", info.payload_size);
-        return BEV_ERROR;
-    }
-    if (length < (uint32_t) info.header_size + info.payload_size) {
+    if (evbuffer_get_length(src) < (uint32_t) info.header_size + info.payload_size) {
         return BEV_NEED_MORE;
     }
     if (info.op == OP_PONG) {
@@ -311,30 +309,33 @@ static enum bufferevent_filter_result wss_input_filter(struct evbuffer *src, str
         return BEV_OK;
     }
     evbuffer_drain(src, info.header_size);
-    length = info.payload_size;
     if (info.op == OP_PING) {
-        send_pong(src, length, info.mask_key, ctx);
+        send_pong(src, info.payload_size, info.mask_key, ctx);
         return BEV_OK;
     }
+#ifdef WSS_PROXY_SERVER
     if (info.mask_key) {
         char buffer[WSS_PAYLOAD_SIZE];
-        while (length > 0) {
-            int size = evbuffer_remove(src, buffer, MIN(length, WSS_PAYLOAD_SIZE));
+        while (info.payload_size > 0) {
+            int size = evbuffer_remove(src, buffer, MIN(info.payload_size, WSS_PAYLOAD_SIZE));
             if (size <= 0) {
-                break;
+                LOGW("cannot read more data");
+                return BEV_ERROR;
             }
             mask(buffer, (uint16_t) size, info.mask_key);
             evbuffer_add(dst, buffer, (uint16_t) size);
-            length -= (uint16_t) size;
+            info.payload_size -= (uint16_t) size;
         }
-    } else {
-        while (length > 0) {
-            int size = evbuffer_remove_buffer(src, dst, MIN(length, WSS_PAYLOAD_SIZE));
-            if (size <= 0) {
-                break;
-            }
-            length -= (uint16_t) size;
+        return BEV_OK;
+    }
+#endif
+    while (info.payload_size > 0) {
+        int size = evbuffer_remove_buffer(src, dst, MIN(info.payload_size, WSS_PAYLOAD_SIZE));
+        if (size <= 0) {
+            LOGW("cannot read more data");
+            return BEV_ERROR;
         }
+        info.payload_size -= (uint16_t) size;
     }
     return BEV_OK;
 }
@@ -393,7 +394,7 @@ static void raw_forward_cb(struct bufferevent *raw, void *wss) {
 }
 
 void raw_event_cb(struct bufferevent *raw, short event, void *wss) {
-    uint16_t port = 0;
+    uint16_t port;
     if (event & (BEV_EVENT_EOF | BEV_EVENT_ERROR)) {
 #ifdef WSS_PROXY_CLIENT
         port = get_peer_port(raw);
