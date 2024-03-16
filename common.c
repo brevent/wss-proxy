@@ -48,20 +48,6 @@ static uint16_t get_http_port(struct evhttp_connection *evcon) {
 }
 #endif
 
-static void on_signal(int fd, short signal, void *base) {
-    (void) fd;
-    if (signal == SIGTERM) {
-        LOGW("received termination");
-        event_base_loopbreak(base);
-    } else if (signal == SIGINT) {
-        LOGW("received interrupt");
-        event_base_loopbreak(base);
-    } else if (signal == SIGUSR1) {
-        event_base_loopexit(base, 0);
-        LOGW("received SIGUSR1");
-    }
-}
-
 static void check_parent(evutil_socket_t fd, short event, void *arg) {
     (void) fd;
     (void) event;
@@ -119,14 +105,29 @@ enum log_level get_log_level() {
 }
 
 static void on_native_signal(int signal) {
-    if (signal == SIGUSR2) {
-        if (get_log_level() == DEBUG) {
-            set_log_level(INFO);
-        } else {
+    switch (signal) {
+        case SIGINT:
+            LOGW("received interrupt");
+            exit(EXIT_SUCCESS);
+            break;
+        case SIGTERM:
+            LOGW("received termination");
+            exit(EXIT_SUCCESS);
+            break;
+        case SIGUSR1:
+            LOGW("received SIGUSR1");
             set_log_level(DEBUG);
-        }
-    } else if (signal == SIGPIPE) {
-        LOGW("received SIGPIPE");
+            break;
+        case SIGUSR2:
+            LOGW("received SIGUSR2");
+            set_log_level(INFO);
+            break;
+        case SIGPIPE:
+            LOGW("received SIGPIPE");
+            break;
+        default:
+            // Handle unknown signal
+            break;
     }
 }
 
@@ -160,9 +161,9 @@ void init_event_signal(struct event_base *base) {
         }
     }
 #endif
-    evsignal_new(base, SIGTERM, on_signal, base);
-    evsignal_new(base, SIGINT, on_signal, base);
-    evsignal_new(base, SIGUSR1, on_signal, base);
+    signal(SIGINT, on_native_signal);
+    signal(SIGTERM, on_native_signal);
+    signal(SIGUSR1, on_native_signal);
     signal(SIGUSR2, on_native_signal);
     signal(SIGPIPE, on_native_signal);
 }
