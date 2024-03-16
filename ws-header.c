@@ -90,16 +90,12 @@ uint8_t *build_ws_header(struct ws_header_info *info, void *payload, uint16_t si
 }
 
 void mask(void *buffer, uint16_t size, uint32_t mask_key) {
-    uint16_t offset;
-    uint8_t remainder;
+    uint16_t offset, max;
     uint32_t *masked = (uint32_t *) buffer;
-    for (offset = size / 4; offset > 0; offset--, masked++) {
+    for (offset = 0, max = (size >> 2); offset < max; offset++, masked++) {
         *masked ^= mask_key;
     }
-    if ((remainder = size % 4)) {
-        uint32_t remain;
-        memcpy(&remain, masked, remainder);
-        remain ^= mask_key;
-        memcpy(masked, &remain, remainder);
+    for (offset = 0, max = (size & 0x3); offset < max; offset++) {
+        ((uint8_t *) masked)[offset] ^= ((uint8_t *) &mask_key)[offset];
     }
 }
