@@ -5,10 +5,13 @@ set -e
 lport=1081
 sport=8888
 
-if which ss-v2ray-plugin; then
-    v2ray_plugin=ss-v2ray-plugin
-else
+if which v2ray-plugin; then
     v2ray_plugin=v2ray-plugin
+else
+    curl -L https://github.com/shadowsocks/v2ray-plugin/releases/download/v1.3.2/v2ray-plugin-linux-amd64-v1.3.2.tar.gz -O
+    tar xf v2ray-plugin-linux-amd64-v1.3.2.tar.gz
+    mv v2ray-plugin_linux_amd64 v2ray-plugin
+    v2ray_plugin=./v2ray-plugin
 fi
 
 check() {
