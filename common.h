@@ -26,7 +26,15 @@
 #endif
 
 #ifndef LOGGER_NAME
+#ifdef WSS_PROXY_SERVER
+#define LOGGER_NAME "wss-proxy-server"
+#endif
+#ifdef WSS_PROXY_CLIENT
+#define LOGGER_NAME "wss-proxy-client"
+#endif
+#ifndef LOGGER_NAME
 #define LOGGER_NAME "wss-proxy"
+#endif
 #endif
 
 #define TIME_FORMAT "%Y-%m-%d %H:%M:%S"
