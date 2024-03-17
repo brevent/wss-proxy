@@ -107,23 +107,23 @@ enum log_level get_log_level() {
 static void on_native_signal(int signal) {
     switch (signal) {
         case SIGINT:
-            LOGW("received interrupt");
+            LOGW("received interrupt, will exit");
             exit(EXIT_SUCCESS);
             break;
         case SIGTERM:
-            LOGW("received termination");
+            LOGW("received termination, will exit");
             exit(EXIT_SUCCESS);
             break;
         case SIGUSR1:
-            LOGW("received SIGUSR1");
+            LOGI("received SIGUSR1, change loglevel to debug");
             set_log_level(DEBUG);
             break;
         case SIGUSR2:
-            LOGW("received SIGUSR2");
+            LOGI("received SIGUSR2, change loglevel to info");
             set_log_level(INFO);
             break;
         case SIGPIPE:
-            LOGW("received SIGPIPE");
+            LOGD("received SIGPIPE");
             break;
         default:
             // Handle unknown signal
