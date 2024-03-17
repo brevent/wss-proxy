@@ -317,28 +317,32 @@ static enum bufferevent_filter_result wss_input_filter(struct evbuffer *src, str
 #ifdef WSS_PROXY_SERVER
     if (info.mask_key) {
         char buffer[WSS_PAYLOAD_SIZE];
-        while (info.payload_size > 0) {
-            int size = evbuffer_remove(src, buffer, MIN(info.payload_size, WSS_PAYLOAD_SIZE));
+        uint16_t payload_size = info.payload_size;
+        while (payload_size > 0) {
+            int size = evbuffer_remove(src, buffer, MIN(payload_size, WSS_PAYLOAD_SIZE));
             if (size <= 0) {
                 LOGW("cannot read more data");
                 return BEV_ERROR;
             }
             mask(buffer, (uint16_t) size, info.mask_key);
             evbuffer_add(dst, buffer, (uint16_t) size);
-            info.payload_size -= (uint16_t) size;
+            payload_size -= (uint16_t) size;
         }
         return BEV_OK;
     }
 #endif
-    while (info.payload_size > 0) {
-        int size = evbuffer_remove_buffer(src, dst, MIN(info.payload_size, WSS_PAYLOAD_SIZE));
-        if (size <= 0) {
-            LOGW("cannot read more data");
-            return BEV_ERROR;
+    {
+        uint16_t payload_size = info.payload_size;
+        while (payload_size > 0) {
+            int size = evbuffer_remove_buffer(src, dst, payload_size);
+            if (size <= 0) {
+                LOGW("cannot read more data");
+                return BEV_ERROR;
+            }
+            payload_size -= (uint16_t) size;
         }
-        info.payload_size -= (uint16_t) size;
+        return BEV_OK;
     }
-    return BEV_OK;
 }
 
 static void close_wss_data_cb(struct bufferevent *tev, void *wss) {
