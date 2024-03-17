@@ -23,7 +23,7 @@
 #endif
 
 #ifndef WSS_PROXY_VERSION
-#define WSS_PROXY_VERSION "0.2.2"
+#define WSS_PROXY_VERSION "0.2.3"
 #endif
 
 #ifndef LOGGER_NAME
