@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <time.h>
 #include <event2/bufferevent.h>
+#include <event2/http.h>
 #ifdef HAVE_SSL_CTX_SET_KEYLOG_CALLBACK
 #include <openssl/ssl.h>
 #endif
@@ -48,6 +49,10 @@ enum log_level {
 
 #ifdef WSS_PROXY_CLIENT
 uint16_t get_peer_port(struct bufferevent *bev);
+#endif
+
+#ifdef WSS_PROXY_SERVER
+uint16_t get_http_port(struct evhttp_connection *evcon);
 #endif
 
 void log_callback(int severity, const char *msg);

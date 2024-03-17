@@ -105,6 +105,7 @@ static void generic_request_handler(struct evhttp_request *req, void *ctx) {
     }
 
     wss = evhttp_request_get_connection(req);
+    LOGD("new connection from %d", get_http_port(wss));
     base = evhttp_connection_get_base(wss);
     raw = bufferevent_socket_new(base, -1, BEV_OPT_CLOSE_ON_FREE);
     if (raw == NULL) {

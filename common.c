@@ -40,7 +40,7 @@ uint16_t get_peer_port(struct bufferevent *bev) {
 #endif
 
 #ifdef WSS_PROXY_SERVER
-static uint16_t get_http_port(struct evhttp_connection *evcon) {
+uint16_t get_http_port(struct evhttp_connection *evcon) {
     char *address;
     uint16_t port;
     evhttp_connection_get_peer(evcon, &address, &port);
