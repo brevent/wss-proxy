@@ -65,7 +65,7 @@ unset(CMAKE_REQUIRED_LIBRARIES)
 
 add_executable(wss-proxy-client wss-proxy-client.c ws-header.c common.c)
 target_link_libraries(wss-proxy-client ${EVENT_CORE} ${EVENT_EXTRA} ${EVENT_OPENSSL} OpenSSL::SSL)
-target_compile_definitions(wss-proxy-client PRIVATE -DWSS_PROXY_CLIENT)
+target_compile_definitions(wss-proxy-client PRIVATE -DWSS_PROXY_CLIENT -DWSS_ENABLE_PING)
 install(TARGETS wss-proxy-client DESTINATION bin)
 
 add_executable(wss-proxy-server wss-proxy-server.c ws-header.c common.c)

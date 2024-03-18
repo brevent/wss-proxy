@@ -250,6 +250,29 @@ static void reply_close(struct evbuffer *src, uint16_t payload_size, uint32_t ma
     send_close(raw, reason);
 }
 
+#ifdef WSS_ENABLE_PING
+static void send_ping(struct bufferevent *tev, const char *payload, uint8_t size) {
+    uint8_t *wss_header, header_size, payload_size;
+    struct wss_frame_ping {
+        char header[MAX_WS_HEADER_SIZE];
+        char buffer[MAX_CONTROL_FRAME_SIZE];
+    } wss_frame_ping;
+    payload_size = size > 0 ? MIN(size, MAX_WS_HEADER_SIZE): 0;
+    if (payload_size > 0) {
+        memcpy(wss_frame_ping.buffer, payload, payload_size);
+    }
+    wss_header = build_ws_frame(OP_PING, &(wss_frame_ping.buffer), payload_size, &header_size);
+    evbuffer_add(bufferevent_get_output(tev), wss_header, payload_size + header_size);
+}
+
+static void set_ping_timeout(struct bufferevent *wev) {
+    struct timeval tv;
+    tv.tv_sec = 30;
+    tv.tv_usec = 0;
+    bufferevent_set_timeouts(wev, &tv, NULL);
+}
+#endif
+
 static enum bufferevent_filter_result wss_input_filter(struct evbuffer *src, struct evbuffer *dst,
                                                        ev_ssize_t dst_limit, enum bufferevent_flush_mode mode,
                                                        void *raw) {
@@ -520,6 +543,14 @@ static void wss_event_cb(struct bufferevent *wev, short event, void *raw) {
         LOGD("connection %u closing from wss %p, event: 0x%02x", port, wss, event);
         close_wss(raw, close_reason_wss, event);
     }
+#ifdef WSS_ENABLE_PING
+    if (event & BEV_EVENT_TIMEOUT) {
+        struct bufferevent *tev = bufferevent_get_underlying(wev);
+        bufferevent_enable(tev, EV_READ | EV_WRITE);
+        LOGD("timeout, send ping, event: 0x%x", event);
+        send_ping(tev, NULL, 0);
+    }
+#endif
 }
 
 static void wss_close_cb(struct evhttp_connection *wss, void *wev) {
@@ -537,6 +568,9 @@ void tunnel_wss(struct bufferevent *raw, struct evhttp_connection *wss) {
 
     bufferevent_enable(wev, EV_READ | EV_WRITE);
     bufferevent_setcb(wev, wss_forward_cb, NULL, wss_event_cb, raw);
+#ifdef WSS_ENABLE_PING
+    set_ping_timeout(tev);
+#endif
 
     bufferevent_enable(raw, EV_READ | EV_WRITE);
     bufferevent_setcb(raw, raw_forward_cb, NULL, raw_event_cb, wss);
