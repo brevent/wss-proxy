@@ -89,6 +89,11 @@ void raw_event_cb(struct bufferevent *raw, short event, void *wss);
 
 void tunnel_wss(struct bufferevent *raw, struct evhttp_connection *wss);
 
+/**
+ * @return whether close frame is sent
+ */
+int send_close(struct bufferevent *raw, uint16_t reason);
+
 #ifdef HAVE_SSL_CTX_SET_KEYLOG_CALLBACK
 void ssl_keylog_callback(const SSL *ssl, const char *line);
 #endif

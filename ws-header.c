@@ -38,7 +38,7 @@ int parse_ws_header(const uint8_t *buffer, uint16_t size, struct ws_header_info 
     if (len == 0x7f) {
         return -1;
     }
-    if (len < 0x7e) {
+    if (len <= MAX_CONTROL_FRAME_SIZE) {
         fop = ws_header.fop;
         info->mask = (ws_header.mlen & 0x80) != 0;
         info->payload_size = len;

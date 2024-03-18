@@ -64,32 +64,34 @@ ss-local -l $lport -s 127.0.0.1 -p $sport -m chacha20-ietf-poly1305 -k sip003 --
 lpid=$!
 ss-server -s 127.0.0.1 -p $sport -m chacha20-ietf-poly1305 -k sip003 --plugin $v2ray_plugin --plugin-opts "server;mux=0" &
 spid=$!
+sleep 1
 if ! check; then
     exit 1
 fi
 
+echo "cleaning..."
+sleep 1
 kill $spid
-echo -n wss-proxy client - wss-proxy server
-for x in 1 2 3; do
-    echo -n .
-    sleep 1
-done
-echo
+sleep 1
+echo wss-proxy client - wss-proxy server
 ss-server -s 127.0.0.1 -p $sport -m chacha20-ietf-poly1305 -k sip003 --plugin ./wss-proxy-server --plugin-opts "mux=0" &
 spid=$!
+sleep 1
 if ! check; then
     exit 1
 fi
 
+echo "cleaning..."
+sleep 1
 kill $lpid
+sleep 1
 echo v2ray-plugin client - wss-proxy server
-for x in 1 2 3; do
-    echo -n .
-    sleep 1
-done
-echo
 ss-local -l $lport -s 127.0.0.1 -p $sport -m chacha20-ietf-poly1305 -k sip003 --plugin $v2ray_plugin --plugin-opts "mux=0" &
 lpid=$!
+sleep 1
 if ! check; then
     exit 1
 fi
+
+echo "cleaning..."
+sleep 1

@@ -205,26 +205,54 @@ static uint8_t *build_ws_frame(enum ws_op op, void *payload, uint16_t size, uint
     return header;
 }
 
-static void send_pong(struct evbuffer *src, uint16_t size, uint32_t mask_key, struct bufferevent *tev) {
-    uint8_t *header, header_size;
-    struct wss_frame_ping {
+static void send_pong(struct evbuffer *src, uint16_t payload_size, uint32_t mask_key, struct bufferevent *raw) {
+    struct bufferevent *tev;
+    struct evhttp_connection *wss;
+    uint8_t *wss_header, header_size;
+    struct wss_frame_pong {
         char header[MAX_WS_HEADER_SIZE];
-        char buffer[125];
-    } wss_frame_ping;
-    if (size > 125) {
-        LOGD("ping payload length %d is unsupported", size);
-    } else if ((header_size = evbuffer_remove(src, wss_frame_ping.buffer, size)) == size) {
-        mask(wss_frame_ping.buffer, (uint16_t) size, mask_key);
-        header = build_ws_frame(OP_PONG, &(wss_frame_ping.buffer), size, &header_size);
-        evbuffer_add(bufferevent_get_output(tev), header, (uint16_t) size + header_size);
-    } else {
-        LOGD("ping payload %d, read: %d", size, header_size);
+        char buffer[MAX_CONTROL_FRAME_SIZE];
+    } wss_frame_pong;
+    uint16_t remain_size, size = 0;
+    if (payload_size > 0) {
+        size = evbuffer_remove(src, wss_frame_pong.buffer, MIN(MAX_CONTROL_FRAME_SIZE, payload_size));
     }
+    if ((remain_size = payload_size - size) > 0) {
+        evbuffer_drain(src, remain_size);
+        LOGD("pong frame too large: %u", payload_size);
+        return;
+    }
+#ifdef WSS_PROXY_CLIENT
+    (void) mask_key;
+#endif
+#ifdef WSS_PROXY_SERVER
+    unmask(wss_frame_pong.buffer, (uint16_t) size, mask_key);
+#endif
+    wss_header = build_ws_frame(OP_PONG, &(wss_frame_pong.buffer), size, &header_size);
+    bufferevent_getcb(raw, NULL, NULL, NULL, (void **) &wss);
+    tev = evhttp_connection_get_bufferevent(wss);
+    evbuffer_add(bufferevent_get_output(tev), wss_header, size + header_size);
+}
+
+static void reply_close(struct evbuffer *src, uint16_t payload_size, uint32_t mask_key, struct bufferevent *raw) {
+    uint16_t reason = CLOSE_NORMAL_CLOSURE;
+    if (payload_size >= 2) {
+        evbuffer_copyout(src, &reason, 2);
+#ifdef WSS_PROXY_CLIENT
+        (void) mask_key;
+#endif
+#ifdef WSS_PROXY_SERVER
+        unmask(&reason, 2, mask_key);
+#endif
+        reason = htons(reason);
+    }
+    evbuffer_drain(src, payload_size);
+    send_close(raw, reason);
 }
 
 static enum bufferevent_filter_result wss_input_filter(struct evbuffer *src, struct evbuffer *dst,
                                                        ev_ssize_t dst_limit, enum bufferevent_flush_mode mode,
-                                                       void *ctx) {
+                                                       void *raw) {
     uint8_t header[MAX_WS_HEADER_SIZE];
     ssize_t header_size;
     int result;
@@ -241,16 +269,19 @@ static enum bufferevent_filter_result wss_input_filter(struct evbuffer *src, str
     result = parse_ws_header(header, header_size, &info);
     if (result < 0) {
         LOGW("payload length 64K+ is unsupported");
+        send_close(raw, CLOSE_MESSAGE_TOO_BIG);
         return BEV_ERROR;
     } else if (result > 0) {
         return BEV_NEED_MORE;
     }
     if (!info.fin) {
         LOGW("fin should be 1 (fragments is unsupported)");
+        send_close(raw, CLOSE_PROTOCOL_ERROR);
         return BEV_ERROR;
     }
     if (info.rsv) {
         LOGW("rsv should be 0");
+        send_close(raw, CLOSE_PROTOCOL_ERROR);
         return BEV_ERROR;
     }
 #ifdef WSS_PROXY_CLIENT
@@ -262,26 +293,29 @@ static enum bufferevent_filter_result wss_input_filter(struct evbuffer *src, str
 #ifdef WSS_PROXY_SERVER
     if (!info.mask) {
         LOGW("client request should mask");
+        send_close(raw, CLOSE_PROTOCOL_ERROR);
         return BEV_ERROR;
     }
 #endif
     switch (info.op) {
         case OP_CONTINUATION:
             LOGW("continuation frame is unsupported");
+            send_close(raw, CLOSE_UNSUPPORTED_DATA);
             return BEV_ERROR;
         case OP_TEXT:
             LOGW("text frame is unsupported");
+            send_close(raw, CLOSE_UNSUPPORTED_DATA);
             return BEV_ERROR;
         case OP_BINARY:
             break;
         case OP_CLOSE:
 #ifdef WSS_PROXY_CLIENT
-            LOGW("server send close frame");
+            LOGD("server send close frame");
 #endif
 #ifdef WSS_PROXY_SERVER
             LOGD("client send close frame");
 #endif
-            return BEV_ERROR;
+            break;
         case OP_PING:
 #ifdef WSS_PROXY_CLIENT
             LOGD("server send ping frame");
@@ -300,6 +334,7 @@ static enum bufferevent_filter_result wss_input_filter(struct evbuffer *src, str
             break;
         default:
             LOGW("op 0x%x is unsupported", info.op);
+            send_close(raw, CLOSE_PROTOCOL_ERROR);
             return BEV_ERROR;
     }
     if (evbuffer_get_length(src) < (uint32_t) info.header_size + info.payload_size) {
@@ -311,8 +346,12 @@ static enum bufferevent_filter_result wss_input_filter(struct evbuffer *src, str
     }
     evbuffer_drain(src, info.header_size);
     if (info.op == OP_PING) {
-        send_pong(src, info.payload_size, info.mask_key, ctx);
+        send_pong(src, info.payload_size, info.mask_key, raw);
         return BEV_OK;
+    }
+    if (info.op == OP_CLOSE) {
+        reply_close(src, info.payload_size, info.mask_key, raw);
+        return BEV_ERROR;
     }
 #ifdef WSS_PROXY_SERVER
     if (info.mask_key) {
@@ -322,9 +361,10 @@ static enum bufferevent_filter_result wss_input_filter(struct evbuffer *src, str
             int size = evbuffer_remove(src, buffer, MIN(payload_size, WSS_PAYLOAD_SIZE));
             if (size <= 0) {
                 LOGW("cannot read more data");
+                send_close(raw, CLOSE_INTERNAL_ERROR);
                 return BEV_ERROR;
             }
-            mask(buffer, (uint16_t) size, info.mask_key);
+            unmask(buffer, (uint16_t) size, info.mask_key);
             evbuffer_add(dst, buffer, (uint16_t) size);
             payload_size -= (uint16_t) size;
         }
@@ -337,6 +377,7 @@ static enum bufferevent_filter_result wss_input_filter(struct evbuffer *src, str
             int size = evbuffer_remove_buffer(src, dst, payload_size);
             if (size <= 0) {
                 LOGW("cannot read more data");
+                send_close(raw, CLOSE_INTERNAL_ERROR);
                 return BEV_ERROR;
             }
             payload_size -= (uint16_t) size;
@@ -347,40 +388,79 @@ static enum bufferevent_filter_result wss_input_filter(struct evbuffer *src, str
 
 static void close_wss_data_cb(struct bufferevent *tev, void *wss) {
     (void) tev;
-    LOGD("close wss %p", wss);
+    LOGD("close wss %p in read callback", wss);
     evhttp_connection_free(wss);
 }
 
 static void close_wss_event_cb(struct bufferevent *tev, short event, void *wss) {
     (void) tev;
-    LOGD("close wss %p, event: 0x%02x", wss, event);
+    LOGD("close wss %p in event callback, event: 0x%02x", wss, event);
     evhttp_connection_free(wss);
 }
 
-static void close_wss(struct evhttp_connection *wss, uint16_t port, uint16_t reason) {
+static void wss_closed_write_cb(struct bufferevent *raw, void *wss) {
+    (void) raw;
+    (void) wss;
+}
+
+int send_close(struct bufferevent *raw, uint16_t reason) {
     struct bufferevent *tev;
-    struct wss_frame_close {
-        char header[MAX_WS_HEADER_SIZE];
-        uint16_t reason;
-    } wss_frame_close;
-    uint8_t *wss_header, header_size;
-    uint16_t size = sizeof(wss_frame_close.reason);
-    wss_frame_close.reason = ntohs(reason);
-    wss_header = build_ws_frame(OP_CLOSE, &(wss_frame_close.reason), size, &header_size);
-    tev = evhttp_connection_get_bufferevent(wss);
-    evbuffer_add(bufferevent_get_output(tev), wss_header, size + header_size);
-    LOGD("would close wss %p for peer %d", wss, port);
-    bufferevent_setcb(tev, NULL, close_wss_data_cb, close_wss_event_cb, wss);
+    struct evhttp_connection *wss;
+    bufferevent_data_cb read_cb, write_cb;
+    bufferevent_event_cb event_cb;
+    bufferevent_getcb(raw, &read_cb, &write_cb, &event_cb, (void *) &wss);
+    if (write_cb == wss_closed_write_cb) {
+        LOGD("wss %p closed", wss);
+        return 0;
+    } else {
+        uint8_t *wss_header, header_size;
+        struct wss_frame_close {
+            char header[MAX_WS_HEADER_SIZE];
+            uint16_t reason;
+        } wss_frame_close;
+        bufferevent_setcb(raw, read_cb, wss_closed_write_cb, event_cb, wss);
+        wss_frame_close.reason = ntohs(reason);
+        wss_header = build_ws_frame(OP_CLOSE, &(wss_frame_close.reason), 2, &header_size);
+        tev = evhttp_connection_get_bufferevent(wss);
+        evbuffer_add(bufferevent_get_output(tev), wss_header, 2 + header_size);
+        return 1;
+    }
+}
+
+enum close_reason {
+    close_reason_raw,
+    close_reason_wss,
+};
+
+static void close_wss(struct bufferevent *raw, enum close_reason close_reason, short event) {
+    struct evhttp_connection *wss;
+    int sent;
+    bufferevent_data_cb read_cb, write_cb;
+    bufferevent_event_cb event_cb;
+    bufferevent_getcb(raw, &read_cb, &write_cb, &event_cb, (void *) &wss);
+    if (close_reason == close_reason_raw) {
+        sent = send_close(raw, CLOSE_GOING_AWAY);
+    } else if (event & BEV_EVENT_EOF) {
+        // we can do nothing
+        sent = 0;
+    } else {
+        // we should have sent out
+        sent = send_close(raw, CLOSE_INTERNAL_ERROR);
+    }
+    bufferevent_free(raw);
+    if (sent) {
+        struct bufferevent *tev = evhttp_connection_get_bufferevent(wss);
+        bufferevent_setcb(tev, close_wss_data_cb, NULL, close_wss_event_cb, wss);
+    } else {
+        LOGD("close wss %p as close was send", wss);
+        evhttp_connection_free(wss);
+    }
 }
 
 static void raw_forward_cb(struct bufferevent *raw, void *wss) {
     struct evbuffer *src;
     struct evbuffer *dst;
     struct bufferevent *tev;
-    struct wss_frame_data {
-        char header[MAX_WS_HEADER_SIZE];
-        char buffer[WSS_PAYLOAD_SIZE];
-    } wss_frame_data;
 
     tev = evhttp_connection_get_bufferevent(wss);
     src = bufferevent_get_input(raw);
@@ -389,6 +469,10 @@ static void raw_forward_cb(struct bufferevent *raw, void *wss) {
     for (;;) {
         // should we use continuation fame?
         uint8_t *wss_header, wss_header_size;
+        struct wss_frame_data {
+            char header[MAX_WS_HEADER_SIZE];
+            char buffer[WSS_PAYLOAD_SIZE];
+        } wss_frame_data;
         int size = evbuffer_remove(src, wss_frame_data.buffer, WSS_PAYLOAD_SIZE);
         if (size <= 0) {
             break;
@@ -407,9 +491,8 @@ void raw_event_cb(struct bufferevent *raw, short event, void *wss) {
 #ifdef WSS_PROXY_SERVER
         port = get_http_port(wss);
 #endif
-        bufferevent_free(raw);
-        LOGD("connection %u closed, event: 0x%02x", port, event);
-        close_wss(wss, port, 1001);
+        LOGD("connection %u closed for wss %p, event: 0x%02x", port, wss, event);
+        close_wss(raw, close_reason_raw, event);
     }
 }
 
@@ -434,9 +517,8 @@ static void wss_event_cb(struct bufferevent *wev, short event, void *raw) {
 #ifdef WSS_PROXY_SERVER
         port = get_http_port(wss);
 #endif
-        bufferevent_free(raw);
-        LOGD("connection %u closing from wss, event: 0x%02x", port, event);
-        close_wss(wss, port, 1000);
+        LOGD("connection %u closing from wss %p, event: 0x%02x", port, wss, event);
+        close_wss(raw, close_reason_wss, event);
     }
 }
 
@@ -450,7 +532,7 @@ void tunnel_wss(struct bufferevent *raw, struct evhttp_connection *wss) {
     struct bufferevent *wev;
 
     tev = evhttp_connection_get_bufferevent(wss);
-    wev = bufferevent_filter_new(tev, wss_input_filter, NULL, 0, NULL, tev);
+    wev = bufferevent_filter_new(tev, wss_input_filter, NULL, 0, NULL, raw);
     evhttp_connection_set_closecb(wss, wss_close_cb, wev);
 
     bufferevent_enable(wev, EV_READ | EV_WRITE);
