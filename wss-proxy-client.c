@@ -182,7 +182,16 @@ static struct evhttp_connection *connect_wss(struct wss_proxy_context *context, 
             return NULL;
         }
 
-        SSL_set_tlsext_host_name(ssl, context->server.host);
+        if (!SSL_set_tlsext_host_name(ssl, context->server.host)) {
+            LOGE("cannot set sni extension for peer %d", port);
+            SSL_free(ssl);
+            return NULL;
+        }
+        if (!SSL_set1_host(ssl, context->server.host)) {
+            LOGE("cannot set certificate verification hostname for peer %d", port);
+            SSL_free(ssl);
+            return NULL;
+        }
         tev = bufferevent_openssl_socket_new(base, -1, ssl, BUFFEREVENT_SSL_CONNECTING, BEV_OPT_CLOSE_ON_FREE);
     } else {
         tev = bufferevent_socket_new(base, -1, BEV_OPT_CLOSE_ON_FREE);
@@ -297,9 +306,15 @@ int main() {
             LOGE("cannot create ssl context");
             return 1;
         }
-#ifdef TLS1_2_VERSION
-        SSL_CTX_set_min_proto_version(wss_context.ssl_ctx, TLS1_2_VERSION);
-#endif
+        SSL_CTX_set_verify(wss_context.ssl_ctx, SSL_VERIFY_PEER, NULL);
+        if (!SSL_CTX_set_default_verify_paths(wss_context.ssl_ctx)) {
+            LOGE("cannot set default trusted certificate store");
+            return 1;
+        }
+        if (!SSL_CTX_set_min_proto_version(wss_context.ssl_ctx, TLS1_2_VERSION)) {
+            LOGE("cannot set minimum TLS to 1.2");
+            return 1;
+        }
 #ifdef HAVE_SSL_CTX_SET_KEYLOG_CALLBACK
         SSL_CTX_set_keylog_callback(wss_context.ssl_ctx, ssl_keylog_callback);
 #endif
