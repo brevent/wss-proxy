@@ -99,6 +99,7 @@ static void generic_request_handler(struct evhttp_request *req, void *ctx) {
     struct raw_server_info *raw_server_info = ctx;
     char sec_websocket_accept[29];
     struct evkeyvalq *headers = evhttp_request_get_output_headers(req);
+    int ss;
 
     if (!do_websocket_handshake(req, sec_websocket_accept)) {
         goto error;
@@ -120,9 +121,17 @@ static void generic_request_handler(struct evhttp_request *req, void *ctx) {
     evhttp_add_header(headers, "Upgrade", "websocket");
     evhttp_add_header(headers, "Connection", "Upgrade");
     evhttp_add_header(headers, "Sec-WebSocket-Accept", (char *) sec_websocket_accept);
+    ss = IS_SHADOWSOCKS(evhttp_find_header(evhttp_request_get_input_headers(req), X_UPGRADE));
+    if (ss) {
+        evhttp_add_header(headers, X_UPGRADE, SHADOWSOCKS);
+    }
     evhttp_send_reply(req, 101, "Switching Protocols", NULL);
 
-    tunnel_wss(raw, wss);
+    if (ss) {
+        tunnel_ss(raw, wss);
+    } else {
+        tunnel_wss(raw, wss);
+    }
     return;
 error:
     evhttp_send_error(req, HTTP_BADREQUEST, "Bad Request");

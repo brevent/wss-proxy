@@ -95,3 +95,15 @@ fi
 
 echo "cleaning..."
 sleep 1
+kill $lpid
+sleep 1
+echo wss-proxy client - wss-proxy server - ss
+ss-local -l $lport -s 127.0.0.1 -p $sport -m chacha20-ietf-poly1305 -k sip003 --plugin ./wss-proxy-client --plugin-opts "mux=0;ws=0" &
+lpid=$!
+sleep 1
+if ! check; then
+    exit 1
+fi
+
+echo "cleaning..."
+sleep 1

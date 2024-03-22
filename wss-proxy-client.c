@@ -11,7 +11,8 @@
 #include "common.h"
 
 struct wss_server_info {
-    uint8_t tls;
+    uint8_t tls: 1;
+    uint8_t ws: 1;
     uint16_t port;
     const char *addr;
     const char *host;
@@ -60,6 +61,7 @@ static int init_wss_addr(struct wss_server_info *server) {
     int port;
     char *end;
     int mux = 1;
+    char *wss;
     const char *loglevel;
     const char *remote_host = getenv("SS_REMOTE_HOST");
     const char *remote_port = getenv("SS_REMOTE_PORT");
@@ -124,6 +126,14 @@ static int init_wss_addr(struct wss_server_info *server) {
         mux = (int) strtol(end, NULL, 10);
     }
 
+    // wss
+    if ((end = strstr(options, "ws=")) != NULL) {
+        end += 3;
+        server->ws = (int) strtol(end, NULL, 10);
+    } else {
+        server->ws = 1;
+    }
+
     // strip
     if ((end = strstr(server->host, ";")) != NULL) {
         *end = '\0';
@@ -132,8 +142,21 @@ static int init_wss_addr(struct wss_server_info *server) {
         *end = '\0';
     }
 
-    LOGI("wss client %s:%d (%s://%s%s)", remote_host, port, server->tls ? "wss" : "ws", server->host, server->path);
-    if (mux) {
+    if (server->ws) {
+        if (server->tls) {
+            wss = "wss";
+        } else {
+            wss = "ws";
+        }
+    } else {
+        if (server->tls) {
+            wss = "sss";
+        } else {
+            wss = "ss";
+        }
+    }
+    LOGI("wss client %s:%d (%s://%s%s)", remote_host, port, wss, server->host, server->path);
+    if (server->ws && mux) {
         LOGW("mux %d is unsupported", mux);
     }
     return 0;
@@ -159,7 +182,11 @@ static void http_request_cb(struct evhttp_request *req, void *raw) {
     int status = req == NULL ? -1 : evhttp_request_get_response_code(req);
     bufferevent_getcb(raw, NULL, NULL, NULL, (void **) &wss);
     if (status == 101 && is_websocket_handshake(req)) {
-        tunnel_wss(raw, wss);
+        if (IS_SHADOWSOCKS(evhttp_find_header(evhttp_request_get_input_headers(req), X_UPGRADE))) {
+            tunnel_ss(raw, wss);
+        } else {
+            tunnel_wss(raw, wss);
+        }
     } else {
         LOGE("wss fail for peer %d, status: %d", get_peer_port(raw), status);
         bufferevent_free(raw);
@@ -240,6 +267,9 @@ static struct evhttp_connection *connect_wss(struct wss_proxy_context *context, 
 #endif
     evhttp_add_header(output_headers, "Sec-WebSocket-Version", "13");
     evhttp_add_header(output_headers, "User-Agent", context->user_agent);
+    if (!context->server.ws) {
+        evhttp_add_header(output_headers, X_UPGRADE, SHADOWSOCKS);
+    }
 
     if (evhttp_make_request(wss, req, EVHTTP_REQ_GET, context->server.path)) {
         LOGE("cannot make http request for peer %d", port);

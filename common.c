@@ -591,6 +591,44 @@ void tunnel_wss(struct bufferevent *raw, struct evhttp_connection *wss) {
     bufferevent_setcb(raw, raw_forward_cb, NULL, raw_event_cb_wss, wss);
 }
 
+static void wss_event_cb_ss(struct bufferevent *tev, short event, void *raw) {
+    uint16_t port;
+    struct evhttp_connection *wss;
+    (void) tev;
+    if (event & (BEV_EVENT_EOF | BEV_EVENT_ERROR)) {
+        bufferevent_getcb(raw, NULL, NULL, NULL, (void **) &wss);
+#ifdef WSS_PROXY_CLIENT
+        port = get_peer_port(raw);
+#endif
+#ifdef WSS_PROXY_SERVER
+        port = get_http_port(wss);
+#endif
+        LOGD("connection %u closing from wss %p (won't send close), event: 0x%02x", port, wss, event);
+        bufferevent_free(raw);
+        evhttp_connection_free(wss);
+    }
+}
+
+static void raw_forward_cb_ss(struct bufferevent *raw, void *wss) {
+    struct evbuffer *src;
+    struct evbuffer *dst;
+
+    src = bufferevent_get_input(raw);
+    dst = bufferevent_get_output(evhttp_connection_get_bufferevent(wss));
+    evbuffer_add_buffer(dst, src);
+}
+
+void tunnel_ss(struct bufferevent *raw, struct evhttp_connection *wss) {
+    struct bufferevent *tev;
+
+    tev = evhttp_connection_get_bufferevent(wss);
+    bufferevent_enable(tev, EV_READ | EV_WRITE);
+    bufferevent_setcb(tev, wss_forward_cb, NULL, wss_event_cb_ss, raw);
+
+    bufferevent_enable(raw, EV_READ | EV_WRITE);
+    bufferevent_setcb(raw, raw_forward_cb_ss, NULL, raw_event_cb, wss);
+}
+
 #ifdef HAVE_SSL_CTX_SET_KEYLOG_CALLBACK
 void ssl_keylog_callback(const SSL *ssl, const char *line) {
     char *keylog_file_name;

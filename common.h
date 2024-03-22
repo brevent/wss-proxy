@@ -94,6 +94,11 @@ void tunnel_wss(struct bufferevent *raw, struct evhttp_connection *wss);
  */
 int send_close(struct bufferevent *raw, uint16_t reason);
 
+#define X_UPGRADE "X-Upgrade"
+#define SHADOWSOCKS "shadowsocks"
+#define IS_SHADOWSOCKS(x) (x != NULL && !evutil_ascii_strcasecmp(x, SHADOWSOCKS))
+void tunnel_ss(struct bufferevent *raw, struct evhttp_connection *wss);
+
 #ifdef HAVE_SSL_CTX_SET_KEYLOG_CALLBACK
 void ssl_keylog_callback(const SSL *ssl, const char *line);
 #endif
