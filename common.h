@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <time.h>
 #include <event2/bufferevent.h>
+#include <event2/bufferevent_struct.h>
 #include <event2/http.h>
 #ifdef HAVE_SSL_CTX_SET_KEYLOG_CALLBACK
 #include <openssl/ssl.h>
@@ -84,6 +85,8 @@ void init_event_signal(struct event_base *base);
 int is_websocket_key(const char *websocket_key);
 
 int calc_websocket_accept(const char *websocket_key, char *websocket_accept);
+
+#define get_wss(raw) ((struct evhttp_connection *) (((struct bufferevent *) raw)->cbarg))
 
 void raw_event_cb(struct bufferevent *raw, short event, void *wss);
 

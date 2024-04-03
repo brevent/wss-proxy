@@ -229,7 +229,7 @@ static void send_pong(struct evbuffer *src, uint16_t payload_size, uint32_t mask
     unmask(wss_frame_pong.buffer, (uint16_t) size, mask_key);
 #endif
     wss_header = build_ws_frame(OP_PONG, &(wss_frame_pong.buffer), size, &header_size);
-    bufferevent_getcb(raw, NULL, NULL, NULL, (void **) &wss);
+    wss = get_wss(raw);
     tev = evhttp_connection_get_bufferevent(wss);
     evbuffer_add(bufferevent_get_output(tev), wss_header, size + header_size);
 }
@@ -428,11 +428,8 @@ static void wss_closed_write_cb(struct bufferevent *raw, void *wss) {
 
 int send_close(struct bufferevent *raw, uint16_t reason) {
     struct bufferevent *tev;
-    struct evhttp_connection *wss;
-    bufferevent_data_cb read_cb, write_cb;
-    bufferevent_event_cb event_cb;
-    bufferevent_getcb(raw, &read_cb, &write_cb, &event_cb, (void *) &wss);
-    if (write_cb == wss_closed_write_cb) {
+    struct evhttp_connection *wss = get_wss(raw);
+    if (raw->writecb == wss_closed_write_cb) {
         LOGD("wss %p closed", wss);
         return 0;
     } else {
@@ -441,7 +438,7 @@ int send_close(struct bufferevent *raw, uint16_t reason) {
             char header[MAX_WS_HEADER_SIZE];
             uint16_t reason;
         } wss_frame_close;
-        bufferevent_setcb(raw, read_cb, wss_closed_write_cb, event_cb, wss);
+        raw->writecb = wss_closed_write_cb;
         wss_frame_close.reason = ntohs(reason);
         wss_header = build_ws_frame(OP_CLOSE, &(wss_frame_close.reason), 2, &header_size);
         tev = evhttp_connection_get_bufferevent(wss);
@@ -456,11 +453,8 @@ enum close_reason {
 };
 
 static void close_wss(struct bufferevent *raw, enum close_reason close_reason, short event) {
-    struct evhttp_connection *wss;
     int sent;
-    bufferevent_data_cb read_cb, write_cb;
-    bufferevent_event_cb event_cb;
-    bufferevent_getcb(raw, &read_cb, &write_cb, &event_cb, (void *) &wss);
+    struct evhttp_connection *wss = get_wss(raw);
     if (close_reason == close_reason_raw) {
         sent = send_close(raw, CLOSE_GOING_AWAY);
     } else if (event & BEV_EVENT_EOF) {
@@ -548,7 +542,7 @@ static void wss_event_cb(struct bufferevent *wev, short event, void *raw) {
     struct evhttp_connection *wss;
     (void) wev;
     if (event & (BEV_EVENT_EOF | BEV_EVENT_ERROR)) {
-        bufferevent_getcb(raw, NULL, NULL, NULL, (void **) &wss);
+        wss = get_wss(raw);
 #ifdef WSS_PROXY_CLIENT
         port = get_peer_port(raw);
 #endif
@@ -596,7 +590,7 @@ static void wss_event_cb_ss(struct bufferevent *tev, short event, void *raw) {
     struct evhttp_connection *wss;
     (void) tev;
     if (event & (BEV_EVENT_EOF | BEV_EVENT_ERROR)) {
-        bufferevent_getcb(raw, NULL, NULL, NULL, (void **) &wss);
+        wss = get_wss(raw);
 #ifdef WSS_PROXY_CLIENT
         port = get_peer_port(raw);
 #endif

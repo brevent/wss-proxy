@@ -223,10 +223,9 @@ static void show_http_error(struct bufferevent *raw, struct evhttp_connection *w
 }
 
 static void http_request_cb(struct evhttp_request *req, void *raw) {
-    struct evhttp_connection *wss;
+    struct evhttp_connection *wss = get_wss(raw);
     int socket_error = EVUTIL_SOCKET_ERROR();
     int status = req == NULL ? -1 : evhttp_request_get_response_code(req);
-    bufferevent_getcb(raw, NULL, NULL, NULL, (void **) &wss);
     if (status == 101 && is_websocket_handshake(req)) {
         if (IS_SHADOWSOCKS(evhttp_find_header(evhttp_request_get_input_headers(req), X_UPGRADE))) {
             tunnel_ss(raw, wss);
