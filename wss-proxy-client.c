@@ -256,18 +256,16 @@ static struct evhttp_connection *connect_wss(struct wss_proxy_context *context, 
         ssl = SSL_new(context->ssl_ctx);
         if (!ssl) {
             LOGE("cannot create ssl for peer %d", port);
-            return NULL;
+            goto error;
         }
 
         if (!SSL_set_tlsext_host_name(ssl, context->server.host)) {
             LOGE("cannot set sni extension for peer %d", port);
-            SSL_free(ssl);
-            return NULL;
+            goto error;
         }
         if (!SSL_set1_host(ssl, context->server.host)) {
             LOGE("cannot set certificate verification hostname for peer %d", port);
-            SSL_free(ssl);
-            return NULL;
+            goto error;
         }
         tev = bufferevent_openssl_socket_new(base, -1, ssl, BUFFEREVENT_SSL_CONNECTING, BEV_OPT_CLOSE_ON_FREE);
     } else {
@@ -276,16 +274,14 @@ static struct evhttp_connection *connect_wss(struct wss_proxy_context *context, 
 
     if (!tev) {
         LOGE("cannot create wss for peer %d", port);
-        SSL_free(ssl);
-        return NULL;
+        goto error;
     }
 
     wss = evhttp_connection_base_bufferevent_new(base, NULL, tev,
                                                  context->server.addr, context->server.port);
     if (!wss) {
         LOGE("cannot connect to wss for peer %d", port);
-        bufferevent_free(tev);
-        return NULL;
+        goto error;
     }
 
     evhttp_connection_set_timeout(wss, WSS_TIMEOUT);
@@ -300,6 +296,7 @@ static struct evhttp_connection *connect_wss(struct wss_proxy_context *context, 
 
     output_headers = evhttp_request_get_output_headers(req);
     if (!output_headers) {
+        LOGE("cannot get output headers for peer %d", port);
         goto error;
     }
     evhttp_add_header(output_headers, "Host", context->server.host);
@@ -329,7 +326,15 @@ static struct evhttp_connection *connect_wss(struct wss_proxy_context *context, 
     return wss;
 error:
     // should we close req?
-    evhttp_connection_free(wss);
+    if (ssl != NULL) {
+        SSL_free(ssl);
+    }
+    if (tev != NULL) {
+        bufferevent_free(tev);
+    }
+    if (wss != NULL) {
+        evhttp_connection_free(wss);
+    }
     return NULL;
 }
 
@@ -345,7 +350,6 @@ static void accept_conn_cb(struct evconnlistener *listener, evutil_socket_t fd,
                            struct sockaddr *address, int socklen, void *ctx) {
     struct event_base *base;
     struct bufferevent *raw = NULL;
-    struct evhttp_connection *wss;
     uint16_t port;
 
     (void) socklen;
@@ -356,8 +360,7 @@ static void accept_conn_cb(struct evconnlistener *listener, evutil_socket_t fd,
     }
     port = get_port(address);
     LOGD("new connection from %d", port);
-    wss = connect_wss(ctx, base, raw, port);
-    if (!wss) {
+    if (!connect_wss(ctx, base, raw, port)) {
         goto error;
     }
     return;
