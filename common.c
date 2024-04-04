@@ -19,23 +19,19 @@
 
 #ifdef WSS_PROXY_CLIENT
 uint16_t get_peer_port(struct bufferevent *bev) {
-    int fd;
-    socklen_t len;
-    struct sockaddr_storage sin;
+    evutil_socket_t sock;
+    ev_socklen_t socklen;
+    struct sockaddr_storage sockaddr;
 
-    fd = bufferevent_getfd(bev);
-    if (fd < 0) {
+    sock = bufferevent_getfd(bev);
+    if (sock < 0) {
         return 0;
     }
-    len = sizeof(sin);
-    if (getpeername(fd, (struct sockaddr *) &sin, &len) == -1) {
+    socklen = sizeof(sockaddr);
+    if (getpeername(sock, (struct sockaddr *) &sockaddr, &socklen) == -1) {
         return 0;
     }
-    if (sin.ss_family == AF_INET6) {
-        return ntohs(((struct sockaddr_in6 *) &sin)->sin6_port);
-    } else {
-        return ntohs(((struct sockaddr_in *) &sin)->sin_port);
-    }
+    return get_port((struct sockaddr *)&sockaddr);
 }
 #endif
 
@@ -47,6 +43,14 @@ uint16_t get_http_port(struct evhttp_connection *evcon) {
     return port;
 }
 #endif
+
+uint16_t get_port(struct sockaddr *sockaddr) {
+    if (sockaddr->sa_family == AF_INET6) {
+        return ntohs(((struct sockaddr_in6 *) sockaddr)->sin6_port);
+    } else {
+        return ntohs(((struct sockaddr_in *) sockaddr)->sin_port);
+    }
+}
 
 static void check_parent(evutil_socket_t fd, short event, void *arg) {
     (void) fd;

@@ -56,6 +56,8 @@ uint16_t get_peer_port(struct bufferevent *bev);
 uint16_t get_http_port(struct evhttp_connection *evcon);
 #endif
 
+uint16_t get_port(struct sockaddr *sockaddr);
+
 void log_callback(int severity, const char *msg);
 
 void init_log_level(const char *loglevel);

@@ -337,14 +337,6 @@ error:
     return NULL;
 }
 
-static uint16_t get_port(struct sockaddr *sockaddr) {
-    if (sockaddr->sa_family == AF_INET6) {
-        return ntohs(((struct sockaddr_in6 *) sockaddr)->sin6_port);
-    } else {
-        return ntohs(((struct sockaddr_in *) sockaddr)->sin_port);
-    }
-}
-
 static void accept_conn_cb(struct evconnlistener *listener, evutil_socket_t fd,
                            struct sockaddr *address, int socklen, void *ctx) {
     struct event_base *base;
