@@ -19,7 +19,7 @@ check() {
     urlt=dl.jianyv.com/cdn-cgi/trace
 
     rm -rf o.*
-    echo "checking donwload binary"
+    echo "checking download binary"
     curl -q -m 6 -4 -s -L $urlb -o o.bin
     curl -q -m 6 -4 -s -x socks5h://$laddr:$lport -L $urlb -o o.ws.bin
     if ! cmp -s o.bin o.ws.bin; then
