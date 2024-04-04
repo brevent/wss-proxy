@@ -17,12 +17,41 @@
 #endif
 #include "common.h"
 
+void safe_bufferevent_free(struct bufferevent *bev) {
+    if (bev->be_ops) {
+        bufferevent_free(bev);
+    } else {
+        bufferevent_udp_free(bev);
+    }
+}
+
+void bufferevent_udp_free(struct bufferevent *raw) {
+#ifdef WSS_PROXY_CLIENT
+    LOGD("udp eof for peer %d", get_peer_port(raw));
+#endif
+#ifdef WSS_PROXY_SERVER
+    LOGD("udp eof for peer %d", get_http_port(get_wss(raw)));
+#endif
+    event_del(&(raw->ev_read));
+    evbuffer_free(raw->output);
+    evbuffer_free(raw->input);
+#ifdef WSS_PROXY_CLIENT
+    lh_bufferevent_udp_delete(((struct bufferevent_udp *) raw)->hash, ((struct bufferevent_udp *) raw));
+#endif
+    free(raw);
+}
+
+#define bufferevent_free safe_bufferevent_free
+
 #ifdef WSS_PROXY_CLIENT
 uint16_t get_peer_port(struct bufferevent *bev) {
     evutil_socket_t sock;
     ev_socklen_t socklen;
     struct sockaddr_storage sockaddr;
 
+    if (!bev->be_ops) {
+        return get_port(((struct bufferevent_udp *) bev)->sockaddr);
+    }
     sock = bufferevent_getfd(bev);
     if (sock < 0) {
         return 0;
@@ -49,6 +78,14 @@ uint16_t get_port(struct sockaddr *sockaddr) {
         return ntohs(((struct sockaddr_in6 *) sockaddr)->sin6_port);
     } else {
         return ntohs(((struct sockaddr_in *) sockaddr)->sin_port);
+    }
+}
+
+void set_port(struct sockaddr_storage *sockaddr, uint16_t port) {
+    if (sockaddr->ss_family == AF_INET6) {
+        ((struct sockaddr_in6 *) sockaddr)->sin6_port = htons(port);
+    } else {
+        ((struct sockaddr_in *) sockaddr)->sin_port = htons(port);
     }
 }
 
@@ -635,8 +672,38 @@ void tunnel_ss(struct bufferevent *raw, struct evhttp_connection *wss) {
     bufferevent_enable(tev, EV_READ | EV_WRITE);
     bufferevent_setcb(tev, wss_forward_cb, NULL, wss_event_cb_ss, raw);
 
-    bufferevent_enable(raw, EV_READ | EV_WRITE);
-    bufferevent_setcb(raw, raw_forward_cb_ss, NULL, raw_event_cb, wss);
+    if (raw->be_ops) {
+        bufferevent_enable(raw, EV_READ | EV_WRITE);
+        bufferevent_setcb(raw, raw_forward_cb_ss, NULL, raw_event_cb, wss);
+    } else {
+        raw->enabled = EV_READ | EV_WRITE;
+        raw_forward_cb_ss(raw, wss);
+    }
+}
+
+void udp_send_cb(struct evbuffer *buf, const struct evbuffer_cb_info *info, void *arg) {
+    char buffer[WSS_PAYLOAD_SIZE];
+    struct bufferevent *raw = arg;
+    struct bufferevent_udp *bev_udp = arg;
+    size_t size = evbuffer_get_length(buf);
+    (void) info;
+    while (size > 0) {
+        ev_ssize_t length = evbuffer_copyout(buf, buffer, MIN(size, WSS_PAYLOAD_SIZE));
+        if (length < 0) {
+            LOGE("cannot read udp for %d", get_port(bev_udp->sockaddr));
+            raw_event_cb(raw, BEV_EVENT_ERROR, get_wss(raw));
+            break;
+        }
+        if (sendto(bev_udp->sock, buffer, length, 0, bev_udp->sockaddr, bev_udp->socklen) < 0) {
+            // is there any chance to sendto later?
+            int socket_error = evutil_socket_geterror(bev_udp->sock);
+            LOGE("cannot send udp to %d: %s", get_port(bev_udp->sockaddr), evutil_socket_error_to_string(socket_error));
+            raw_event_cb(raw, BEV_EVENT_ERROR, get_wss(raw));
+            break;
+        }
+        evbuffer_drain(buf, length);
+        size -= length;
+    }
 }
 
 #ifdef HAVE_SSL_CTX_SET_KEYLOG_CALLBACK

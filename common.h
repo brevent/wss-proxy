@@ -9,6 +9,9 @@
 #ifdef HAVE_SSL_CTX_SET_KEYLOG_CALLBACK
 #include <openssl/ssl.h>
 #endif
+#ifdef WSS_PROXY_CLIENT
+#include <openssl/lhash.h>
+#endif
 #include "ws-header.h"
 
 #ifndef WSS_PAYLOAD_SIZE
@@ -48,6 +51,40 @@ enum log_level {
     ERROR,
 };
 
+typedef struct bufferevent_udp bufferevent_udp;
+
+#ifdef WSS_PROXY_CLIENT
+#ifdef DEFINE_LHASH_OF_EX
+DEFINE_LHASH_OF_EX(bufferevent_udp);
+#else
+DEFINE_LHASH_OF(bufferevent_udp);
+#endif
+#endif
+
+struct bufferevent_udp {
+    struct bufferevent be;
+    evutil_socket_t sock;
+    ev_socklen_t socklen;
+    struct sockaddr *sockaddr;
+#ifdef WSS_PROXY_CLIENT
+    union {
+        struct sockaddr_in sin;
+        struct sockaddr_in6 sin6;
+    } sockaddr_storage;
+    LHASH_OF(bufferevent_udp) *hash;
+#endif
+};
+
+void safe_bufferevent_free(struct bufferevent *bufev);
+
+void bufferevent_udp_free(struct bufferevent *bufev);
+
+#ifndef _WIN32
+#define EVUTIL_ERR_RW_RETRIABLE(e) ((e) == EINTR || (e) == EAGAIN || (e) == EWOULDBLOCK)
+#else
+#define EVUTIL_ERR_RW_RETRIABLE(e) ((e) == WSAEINTR || (e) == WSAEWOULDBLOCK)
+#endif
+
 #ifdef WSS_PROXY_CLIENT
 uint16_t get_peer_port(struct bufferevent *bev);
 #endif
@@ -57,6 +94,8 @@ uint16_t get_http_port(struct evhttp_connection *evcon);
 #endif
 
 uint16_t get_port(struct sockaddr *sockaddr);
+
+void set_port(struct sockaddr_storage *sockaddr, uint16_t port);
 
 void log_callback(int severity, const char *msg);
 
@@ -109,6 +148,12 @@ void set_ping_timeout(struct bufferevent *wev, int sec);
 #define SHADOWSOCKS "shadowsocks"
 #define IS_SHADOWSOCKS(x) (x != NULL && !evutil_ascii_strcasecmp(x, SHADOWSOCKS))
 void tunnel_ss(struct bufferevent *raw, struct evhttp_connection *wss);
+
+#define X_SOCK_TYPE "X-Sock-Type"
+#define SOCK_TYPE_UDP "udp"
+#define IS_UDP(x) (x != NULL && !evutil_ascii_strcasecmp(x, SOCK_TYPE_UDP))
+
+void udp_send_cb(struct evbuffer *buf, const struct evbuffer_cb_info *info, void *arg);
 
 #ifdef HAVE_SSL_CTX_SET_KEYLOG_CALLBACK
 void ssl_keylog_callback(const SSL *ssl, const char *line);

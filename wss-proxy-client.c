@@ -11,6 +11,8 @@
 #include <openssl/err.h>
 #include "common.h"
 
+#define bufferevent_free safe_bufferevent_free
+
 struct wss_server_info {
     uint8_t tls: 1;
     uint8_t ws: 1;
@@ -26,9 +28,33 @@ struct wss_proxy_context {
     char user_agent[80];
 };
 
-static int init_raw_addr(struct sockaddr_storage *sockaddr, int *socklen) {
+struct udp_context {
+    LHASH_OF(bufferevent_udp) *hash;
+    struct event_base *base;
+    struct wss_proxy_context *wss_context;
+};
+
+static unsigned long bufferevent_udp_hash(const bufferevent_udp *a) {
+    socklen_t i, max;
+    unsigned long result = a->socklen;
+    uint32_t *a32 = (uint32_t *) a->sockaddr;
+    for (i = 0, max = (a->socklen >> 2); i < max; ++i, a32++) {
+        result ^= *a32;
+    }
+    return result;
+}
+
+static int bufferevent_udp_cmp(const bufferevent_udp *a, const bufferevent_udp *b) {
+    int result = (int) a->socklen - (int) b->socklen;
+    if (!result) {
+        return result;
+    }
+    return memcmp(a->sockaddr, b->sockaddr, a->socklen);
+}
+
+static int init_raw_addr(struct sockaddr_storage *sockaddr, int *socklen, int *udp_port) {
     int port;
-    char *end;
+    char *end, *options;
     const char *local_host = getenv("SS_LOCAL_HOST");
     const char *local_port = getenv("SS_LOCAL_PORT");
 
@@ -48,13 +74,25 @@ static int init_raw_addr(struct sockaddr_storage *sockaddr, int *socklen) {
         return -1;
     }
 
-    if (sockaddr->ss_family == AF_INET6) {
-        ((struct sockaddr_in6 *) sockaddr)->sin6_port = htons(port);
-    } else {
-        ((struct sockaddr_in *) sockaddr)->sin_port = htons(port);
+    set_port(sockaddr, port);
+
+    *udp_port = port;
+    if ((options = getenv("SS_PLUGIN_OPTIONS")) != NULL && (options = strstr(options, "udp-port=")) != NULL) {
+        options += 9;
+        if ((end = strstr(options, ";")) != NULL) {
+            *end = '\0';
+        }
+        *udp_port = (int) strtol(options, &end, 10);
+        if (*udp_port <= 0 || *udp_port > 65535 || *end != '\0') {
+            *udp_port = -1;
+        }
     }
 
-    LOGI("raw server %s:%d", local_host, port);
+    if (*udp_port > 0) {
+        LOGI("raw server tcp://%s:%d, udp://%s:%d", local_host, port, local_host, *udp_port);
+    } else {
+        LOGI("raw server %s:%d", local_host, port);
+    }
     return 0;
 }
 
@@ -286,7 +324,11 @@ static struct evhttp_connection *connect_wss(struct wss_proxy_context *context, 
     }
 
     evhttp_connection_set_timeout(wss, WSS_TIMEOUT);
-    bufferevent_setcb(raw, NULL, NULL, raw_event_cb, wss);
+    if (raw->be_ops) {
+        bufferevent_setcb(raw, NULL, NULL, raw_event_cb, wss);
+    } else {
+        raw->cbarg = wss;
+    }
 
     req = evhttp_request_new(http_request_cb, raw);
     if (!req) {
@@ -316,7 +358,10 @@ static struct evhttp_connection *connect_wss(struct wss_proxy_context *context, 
 #endif
     evhttp_add_header(output_headers, "Sec-WebSocket-Version", "13");
     evhttp_add_header(output_headers, "User-Agent", context->user_agent);
-    if (!context->server.ws) {
+    if (!raw->be_ops) {
+        evhttp_add_header(output_headers, X_SOCK_TYPE, SOCK_TYPE_UDP);
+        evhttp_add_header(output_headers, X_UPGRADE, SHADOWSOCKS);
+    } else if (!context->server.ws) {
         evhttp_add_header(output_headers, X_UPGRADE, SHADOWSOCKS);
     }
 
@@ -363,16 +408,124 @@ error:
     }
 }
 
+static evutil_socket_t init_udp_sock(const struct sockaddr *sa, int socklen) {
+    evutil_socket_t sock = socket(sa->sa_family, SOCK_DGRAM, 0);
+    if (sock < 0) {
+        LOGE("cannot create udp socket");
+        goto error;
+    }
+    if (evutil_make_socket_nonblocking(sock) < 0) {
+        LOGE("cannot make udp socket nonblocking");
+        goto error;
+    }
+    if (evutil_make_socket_closeonexec(sock) < 0) {
+        LOGE("cannot make udp socket closeonexec");
+        goto error;
+    }
+    if (evutil_make_listen_socket_reuseable(sock) < 0) {
+        LOGE("cannot make udp socket reuseable");
+        goto error;
+    }
+    if (bind(sock, sa, socklen) < 0) {
+        LOGE("cannot bind udp socket");
+        goto error;
+    }
+    return sock;
+error:
+    if (sock > 0) {
+        evutil_closesocket(sock);
+    }
+    return -1;
+}
+
+static void udp_timeout_cb(evutil_socket_t sock, short event, void *ctx) {
+    (void) sock;
+    if (event & EV_TIMEOUT) {
+        struct bufferevent *raw = ctx;
+        LOGD("udp timeout for peer %d", get_peer_port(raw));
+        raw_event_cb(raw, BEV_EVENT_EOF, get_wss(raw));
+    }
+}
+
+static void udp_read_cb(evutil_socket_t sock, short event, void *ctx) {
+    ssize_t size;
+    uint16_t port;
+    char buffer[WSS_PAYLOAD_SIZE];
+    struct udp_context *context = ctx;
+    struct bufferevent_udp key, *data;
+    struct bufferevent *raw;
+    struct timeval one_minute = {60, 0};
+    (void) event;
+    for (;;) {
+        key.socklen = sizeof(struct sockaddr_storage);
+        size = recvfrom(sock, buffer, WSS_PAYLOAD_SIZE, 0, (struct sockaddr *) &(key.sockaddr_storage), &(key.socklen));
+        port = get_port((struct sockaddr *) &(key.sockaddr_storage));
+        if (size < 0) {
+            int socket_error = evutil_socket_geterror(sock);
+            if (!EVUTIL_ERR_RW_RETRIABLE(socket_error)) {
+                LOGE("cannot recvfrom udp for peer %d: %s", port, evutil_socket_error_to_string(socket_error));
+            }
+            break;
+        }
+        key.sockaddr = (struct sockaddr *) &(key.sockaddr_storage);
+        data = lh_bufferevent_udp_retrieve(context->hash, &key);
+        if (data == NULL) {
+            data = calloc(1, sizeof(struct bufferevent_udp));
+            if (!data) {
+                LOGE("cannot calloc for peer %d", port);
+                continue;
+            }
+            data->sock = sock;
+            data->socklen = key.socklen;
+            data->sockaddr = (struct sockaddr *) &(data->sockaddr_storage);
+            memcpy(&(data->sockaddr_storage), &(key.sockaddr_storage), key.socklen);
+            data->hash = context->hash;
+            raw = (struct bufferevent *) data;
+            if (!connect_wss(context->wss_context, context->base, raw, port)) {
+                LOGE("cannot connect to wss for peer %d", port);
+                free(data);
+                continue;
+            }
+            raw->ev_base = context->base;
+            raw->input = evbuffer_new();
+            raw->output = evbuffer_new();
+            evbuffer_add_cb(raw->output, udp_send_cb, data);
+            event_assign(&(raw->ev_read), context->base, sock, EV_READ | EV_PERSIST, udp_timeout_cb, data);
+            LOGD("udp init for peer %d", port);
+            lh_bufferevent_udp_insert(context->hash, data);
+        }
+        raw = (struct bufferevent *) data;
+        if (size == 0) {
+            LOGE("udp receive 0 for peer %d", port);
+            raw_event_cb(raw, BEV_EVENT_EOF, get_wss(raw));
+            continue;
+        }
+        event_add(&(raw->ev_read), &one_minute);
+        if (raw->enabled & EV_READ) {
+            struct evbuffer *dst;
+            dst = bufferevent_get_output(evhttp_connection_get_bufferevent(get_wss(raw)));
+            evbuffer_add(dst, buffer, size);
+        } else {
+            evbuffer_add(raw->input, buffer, size);
+        }
+    }
+}
+
 int main() {
     int code = 1;
     struct event_base *base = NULL;
     struct event_config *cfg = NULL;
     struct event *event_parent = NULL, *event_sigquit = NULL;
     struct evconnlistener *listener = NULL;
-    struct sockaddr_storage raw_addr;
+    struct sockaddr_storage raw_addr, udp_raw_addr;
     int socklen;
     struct wss_proxy_context wss_context;
+    evutil_socket_t sock = 0;
+    struct event *udp_event = NULL;
+    struct udp_context udp_context;
+    int udp_port = 0;
 
+    memset(&udp_context, 0, sizeof(struct udp_context));
     memset(&wss_context, 0, sizeof(wss_context));
     if (init_wss_addr(&wss_context.server)) {
         return 1;
@@ -400,7 +553,7 @@ int main() {
 
     socklen = sizeof(raw_addr);
     memset(&raw_addr, 0, socklen);
-    if (init_raw_addr(&raw_addr, &socklen)) {
+    if (init_raw_addr(&raw_addr, &socklen, &udp_port)) {
         return 1;
     }
 
@@ -430,6 +583,24 @@ int main() {
         goto error;
     }
 
+    if (udp_port < 0) {
+        goto start;
+    }
+    memcpy(&udp_raw_addr, &raw_addr, socklen);
+    if (udp_port > 0) {
+        set_port(&udp_raw_addr, udp_port);
+    }
+    sock = init_udp_sock((struct sockaddr *) &udp_raw_addr, socklen);
+    if (sock < 0) {
+        goto error;
+    }
+    udp_context.hash = lh_bufferevent_udp_new(bufferevent_udp_hash, bufferevent_udp_cmp);
+    udp_context.base = base;
+    udp_context.wss_context = &wss_context;
+    udp_event = event_new(base, sock, EV_READ | EV_PERSIST, udp_read_cb, &udp_context);
+    event_add(udp_event, NULL);
+
+start:
 #ifdef OPENSSL_VERSION_STRING
     snprintf(wss_context.user_agent, sizeof(wss_context.user_agent), "wss-proxy-client/%s libevent/%s OpenSSL/%s",
              WSS_PROXY_VERSION, event_get_version(), OpenSSL_version(OPENSSL_VERSION_STRING));
@@ -457,8 +628,17 @@ error:
     if (event_sigquit) {
         event_free(event_sigquit);
     }
+    if (udp_context.hash) {
+        lh_bufferevent_udp_free(udp_context.hash);
+    }
     if (listener) {
         evconnlistener_free(listener);
+    }
+    if (sock > 0) {
+        evutil_closesocket(sock);
+    }
+    if (udp_event) {
+        event_free(udp_event);
     }
     if (base) {
         event_base_free(base);

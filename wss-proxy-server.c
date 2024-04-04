@@ -8,9 +8,15 @@
 #include <event2/listener.h>
 #include "common.h"
 
+#define bufferevent_free safe_bufferevent_free
+
 struct raw_server_info {
-    int port;
     const char *addr;
+    int socklen;
+    int port;
+    struct sockaddr_storage sockaddr;
+    int udp_port;
+    struct sockaddr_storage udp_sockaddr;
 };
 
 static int init_ws_info(const char **addr, int *port) {
@@ -51,7 +57,7 @@ static int init_ws_info(const char **addr, int *port) {
 }
 
 static int init_raw_info(struct raw_server_info *raw_server_info) {
-    char *end;
+    char *end, *options;
     const char *local_host = getenv("SS_LOCAL_HOST");
     const char *local_port = getenv("SS_LOCAL_PORT");
     raw_server_info->addr = local_host == NULL ? "127.0.0.1" : local_host;
@@ -64,7 +70,25 @@ static int init_raw_info(struct raw_server_info *raw_server_info) {
         LOGE("local port %s is not supported", local_port);
         return EINVAL;
     }
-    LOGI("raw client %s:%d", raw_server_info->addr, raw_server_info->port);
+
+    raw_server_info->udp_port = raw_server_info->port;
+    if ((options = getenv("SS_PLUGIN_OPTIONS")) != NULL && (options = strstr(options, "udp-port=")) != NULL) {
+        options += 9;
+        if ((end = strstr(options, ";")) != NULL) {
+            *end = '\0';
+        }
+        raw_server_info->udp_port = (int) strtol(options, &end, 10);
+        if (raw_server_info->udp_port <= 0 || raw_server_info->udp_port > 65535 || *end != '\0') {
+            raw_server_info->udp_port = -1;
+        }
+    }
+
+    if (raw_server_info->udp_port > 0) {
+        LOGI("raw client tcp://%s:%d, udp://%s:%d", raw_server_info->addr, raw_server_info->port,
+             raw_server_info->addr, raw_server_info->udp_port);
+    } else {
+        LOGI("raw client %s:%d", raw_server_info->addr, raw_server_info->port);
+    }
     return 0;
 }
 
@@ -92,6 +116,105 @@ static int do_websocket_handshake(struct evhttp_request *req, char *sec_websocke
     return 1;
 }
 
+static void udp_read_cb(evutil_socket_t sock, short event, void *ctx) {
+    struct bufferevent *raw = ctx;
+    struct evhttp_connection *wss = get_wss(raw);
+    if (event & EV_TIMEOUT) {
+        LOGD("udp timeout for peer %d", get_http_port(wss));
+        raw_event_cb(raw, BEV_EVENT_EOF, wss);
+    } else if (event & EV_READ) {
+        ssize_t size;
+        socklen_t socklen;
+        char buffer[WSS_PAYLOAD_SIZE];
+        struct sockaddr_storage sockaddr;
+        struct timeval one_minute = {60, 0};
+        for (;;) {
+            socklen = sizeof(struct sockaddr_storage);
+            size = recvfrom(sock, buffer, WSS_PAYLOAD_SIZE, 0, (struct sockaddr *) &sockaddr, &socklen);
+            if (size < 0) {
+                int socket_error = evutil_socket_geterror(sock);
+                if (!EVUTIL_ERR_RW_RETRIABLE(socket_error)) {
+                    LOGE("cannot recvfrom udp for peer %d: %s", get_http_port(wss),
+                         evutil_socket_error_to_string(socket_error));
+                }
+                break;
+            }
+            if (size == 0) {
+                LOGE("udp receive 0 for peer %d", get_http_port(wss));
+                raw_event_cb(raw, BEV_EVENT_EOF, wss);
+                continue;
+            }
+            event_add(&(raw->ev_read), &one_minute);
+            if (raw->enabled & EV_READ) {
+                struct evbuffer *dst;
+                dst = bufferevent_get_output(evhttp_connection_get_bufferevent(wss));
+                evbuffer_add(dst, buffer, size);
+            } else {
+                evbuffer_add(raw->input, buffer, size);
+            }
+        }
+    }
+}
+
+static struct bufferevent *init_udp_client(struct event_base *base, struct raw_server_info *raw_server_info) {
+    evutil_socket_t sock;
+    struct bufferevent_udp *data;
+    struct bufferevent *raw;
+    struct timeval one_minute = {60, 0};
+
+    sock = socket(raw_server_info->udp_sockaddr.ss_family, SOCK_DGRAM, 0);
+    if (sock < 0) {
+        LOGE("cannot create udp socket");
+        goto error;
+    }
+    if (evutil_make_socket_nonblocking(sock) < 0) {
+        LOGE("cannot make udp socket nonblocking");
+        goto error;
+    }
+    if (evutil_make_socket_closeonexec(sock) < 0) {
+        LOGE("cannot make udp socket closeonexec");
+        goto error;
+    }
+    if (evutil_make_listen_socket_reuseable(sock) < 0) {
+        LOGE("cannot make udp socket reuseable");
+        goto error;
+    }
+    data = calloc(1, sizeof(struct bufferevent_udp));
+    if (data == NULL) {
+        goto error;
+    }
+    data->sock = sock;
+    data->socklen = raw_server_info->socklen;
+    data->sockaddr = (struct sockaddr *) &(raw_server_info->udp_sockaddr);
+    raw = (struct bufferevent *) data;
+    raw->ev_base = base;
+    raw->input = evbuffer_new();
+    raw->output = evbuffer_new();
+    evbuffer_add_cb(raw->output, udp_send_cb, raw);
+    event_assign(&(raw->ev_read), base, sock, EV_READ | EV_PERSIST, udp_read_cb, raw);
+    event_add(&(raw->ev_read), &one_minute);
+    return raw;
+error:
+    if (sock > 0) {
+        evutil_closesocket(sock);
+    }
+    return NULL;
+}
+
+static struct bufferevent *init_tcp_client(struct event_base *base, struct raw_server_info *raw_server_info) {
+    struct bufferevent *raw = bufferevent_socket_new(base, -1, BEV_OPT_CLOSE_ON_FREE);
+    if (raw == NULL) {
+        LOGW("cannot create raw connection");
+        return NULL;
+    }
+    if (bufferevent_socket_connect(raw, (struct sockaddr *) &(raw_server_info->sockaddr), raw_server_info->socklen)) {
+        LOGW("cannot connect raw at %s:%u", raw_server_info->addr, raw_server_info->port);
+        bufferevent_free(raw);
+        return NULL;
+    }
+    return raw;
+}
+
 static void generic_request_handler(struct evhttp_request *req, void *ctx) {
     struct event_base *base;
     struct bufferevent *raw = NULL;
@@ -100,6 +223,7 @@ static void generic_request_handler(struct evhttp_request *req, void *ctx) {
     char sec_websocket_accept[29];
     struct evkeyvalq *headers = evhttp_request_get_output_headers(req);
     int ss;
+    int udp;
 
     if (!do_websocket_handshake(req, sec_websocket_accept)) {
         goto error;
@@ -108,14 +232,19 @@ static void generic_request_handler(struct evhttp_request *req, void *ctx) {
     wss = evhttp_request_get_connection(req);
     LOGD("new connection from %d", get_http_port(wss));
     base = evhttp_connection_get_base(wss);
-    raw = bufferevent_socket_new(base, -1, BEV_OPT_CLOSE_ON_FREE);
+    udp = IS_UDP(evhttp_find_header(evhttp_request_get_input_headers(req), X_SOCK_TYPE));
+    if (udp) {
+        raw = init_udp_client(base, raw_server_info);
+    } else {
+        raw = init_tcp_client(base, raw_server_info);
+    }
     if (raw == NULL) {
-        LOGW("cannot create raw connection");
         goto error;
     }
-    if (bufferevent_socket_connect_hostname(raw, NULL, AF_UNSPEC, raw_server_info->addr, raw_server_info->port)) {
-        LOGW("cannot connect raw at %s:%u", raw_server_info->addr, raw_server_info->port);
-        goto error;
+    if (raw->be_ops) {
+        bufferevent_setcb(raw, NULL, NULL, raw_event_cb, wss);
+    } else {
+        raw->cbarg = wss;
     }
 
     evhttp_add_header(headers, "Upgrade", "websocket");
@@ -124,6 +253,9 @@ static void generic_request_handler(struct evhttp_request *req, void *ctx) {
     ss = IS_SHADOWSOCKS(evhttp_find_header(evhttp_request_get_input_headers(req), X_UPGRADE));
     if (ss) {
         evhttp_add_header(headers, X_UPGRADE, SHADOWSOCKS);
+    } else if (udp) {
+        bufferevent_free(raw);
+        goto error;
     }
     evhttp_send_reply(req, 101, "Switching Protocols", NULL);
 
@@ -135,9 +267,6 @@ static void generic_request_handler(struct evhttp_request *req, void *ctx) {
     return;
 error:
     evhttp_send_error(req, HTTP_BADREQUEST, "Bad Request");
-    if (raw != NULL) {
-        bufferevent_free(raw);
-    }
 }
 
 int main() {
@@ -153,6 +282,17 @@ int main() {
     memset(&raw_server_info, 0, sizeof(raw_server_info));
     if (init_raw_info(&raw_server_info)) {
         return 1;
+    }
+    raw_server_info.socklen = sizeof(struct sockaddr_storage);
+    if (evutil_parse_sockaddr_port(raw_server_info.addr, (struct sockaddr *) &(raw_server_info.sockaddr),
+                                   &(raw_server_info.socklen)) < 0) {
+        LOGE("cannot parse %s", raw_server_info.addr);
+        goto error;
+    }
+    set_port(&(raw_server_info.sockaddr), raw_server_info.port);
+    if (raw_server_info.udp_port > 0) {
+        memcpy(&(raw_server_info.udp_sockaddr), &(raw_server_info.sockaddr), raw_server_info.socklen);
+        set_port(&(raw_server_info.udp_sockaddr), raw_server_info.udp_port);
     }
 
     if (init_ws_info(&addr, &port)) {
