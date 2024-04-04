@@ -109,15 +109,14 @@ enum log_level get_log_level() {
 }
 
 static void on_native_signal(int signal) {
+    if (signal == SIGINT) {
+        LOGW("received interrupt, will exit");
+        exit(EXIT_SUCCESS);
+    } else if (signal == SIGTERM) {
+        LOGW("received termination, will exit");
+        exit(EXIT_SUCCESS);
+    }
     switch (signal) {
-        case SIGINT:
-            LOGW("received interrupt, will exit");
-            exit(EXIT_SUCCESS);
-            break;
-        case SIGTERM:
-            LOGW("received termination, will exit");
-            exit(EXIT_SUCCESS);
-            break;
         case SIGUSR1:
             LOGI("received SIGUSR1, change loglevel to debug");
             set_log_level(DEBUG);
