@@ -254,7 +254,7 @@ static void reply_close(struct evbuffer *src, uint16_t payload_size, uint32_t ma
 }
 
 #ifdef WSS_ENABLE_PING
-static void send_ping(struct bufferevent *tev, const char *payload, uint8_t size) {
+void send_ping(struct bufferevent *tev, const char *payload, uint8_t size) {
     uint8_t *wss_header, header_size, payload_size;
     struct wss_frame_ping {
         char header[MAX_WS_HEADER_SIZE];
@@ -268,9 +268,9 @@ static void send_ping(struct bufferevent *tev, const char *payload, uint8_t size
     evbuffer_add(bufferevent_get_output(tev), wss_header, payload_size + header_size);
 }
 
-static void set_ping_timeout(struct bufferevent *wev) {
+void set_ping_timeout(struct bufferevent *wev, int sec) {
     struct timeval tv;
-    tv.tv_sec = 30;
+    tv.tv_sec = sec;
     tv.tv_usec = 0;
     bufferevent_set_timeouts(wev, &tv, NULL);
 }
@@ -581,7 +581,7 @@ void tunnel_wss(struct bufferevent *raw, struct evhttp_connection *wss) {
     bufferevent_enable(wev, EV_READ | EV_WRITE);
     bufferevent_setcb(wev, wss_forward_cb, NULL, wss_event_cb, raw);
 #ifdef WSS_ENABLE_PING
-    set_ping_timeout(tev);
+    set_ping_timeout(tev, 30);
 #endif
 
     bufferevent_enable(raw, EV_READ | EV_WRITE);

@@ -99,6 +99,12 @@ void tunnel_wss(struct bufferevent *raw, struct evhttp_connection *wss);
  */
 int send_close(struct bufferevent *raw, uint16_t reason);
 
+#ifdef WSS_ENABLE_PING
+void send_ping(struct bufferevent *tev, const char *payload, uint8_t size);
+
+void set_ping_timeout(struct bufferevent *wev, int sec);
+#endif
+
 #define X_UPGRADE "X-Upgrade"
 #define SHADOWSOCKS "shadowsocks"
 #define IS_SHADOWSOCKS(x) (x != NULL && !evutil_ascii_strcasecmp(x, SHADOWSOCKS))
