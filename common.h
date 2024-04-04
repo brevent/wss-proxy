@@ -82,7 +82,7 @@ enum log_level get_log_level(void);
 #define LOGW(format, ...) LOG(format, stderr, WARN, ## __VA_ARGS__)
 #define LOGE(format, ...) LOG(format, stderr, ERROR, ## __VA_ARGS__)
 
-void init_event_signal(struct event_base *base);
+int init_event_signal(struct event_base *base, struct event **event_parent, struct event **event_sigquit);
 
 int is_websocket_key(const char *websocket_key);
 

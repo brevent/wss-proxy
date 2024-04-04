@@ -144,6 +144,7 @@ int main() {
     int code = 1;
     struct event_base *base = NULL;
     struct event_config *cfg = NULL;
+    struct event *event_parent = NULL, *event_sigquit = NULL;
     struct evhttp *http_server = NULL;
     const char *addr;
     int port;
@@ -187,15 +188,25 @@ int main() {
     }
     evhttp_set_gencb(http_server, generic_request_handler, &raw_server_info);
 
-    init_event_signal(base);
+    if (init_event_signal(base, &event_parent, &event_sigquit)) {
+        goto error;
+    }
 
     LOGI("wss-proxy-server/%s libevent/%s", WSS_PROXY_VERSION, event_get_version());
     LOGI("started, pid: %d, ppid: %d", getpid(), getppid());
 
     event_base_dispatch(base);
 
+    LOGI("graceful shutdown");
+
     code = 0;
 error:
+    if (event_parent) {
+        event_free(event_parent);
+    }
+    if (event_sigquit) {
+        event_free(event_sigquit);
+    }
     if (http_server) {
         evhttp_free(http_server);
     }

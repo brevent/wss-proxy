@@ -134,13 +134,18 @@ static void on_native_signal(int signal) {
     }
 }
 
-void init_event_signal(struct event_base *base) {
+static void sigquit_cb(evutil_socket_t fd, short event, void *arg) {
+    (void) fd;
+    (void) event;
+    event_base_loopbreak((struct event_base *) arg);
+}
+
+int init_event_signal(struct event_base *base, struct event **event_parent, struct event **event_sigquit) {
     struct rlimit rlim;
     struct timeval one_minute = {60, 0};
-    struct event *ev;
-    ev = event_new(base, -1, EV_PERSIST, check_parent, NULL);
-    if (ev) {
-        event_add(ev, &one_minute);
+    *event_parent = event_new(base, -1, EV_PERSIST, check_parent, NULL);
+    if (*event_parent) {
+        event_add(*event_parent, &one_minute);
     } else {
         LOGW("cannot add event to check parent");
     }
@@ -169,6 +174,14 @@ void init_event_signal(struct event_base *base) {
     signal(SIGUSR1, on_native_signal);
     signal(SIGUSR2, on_native_signal);
     signal(SIGPIPE, on_native_signal);
+    *event_sigquit = evsignal_new(base, SIGQUIT, sigquit_cb, base);
+    if (!event_sigquit) {
+        LOGE("cannot event sigquit");
+        return -1;
+    } else {
+        event_add(*event_sigquit, NULL);
+        return 0;
+    }
 }
 
 int is_websocket_key(const char *websocket_key) {
