@@ -524,7 +524,7 @@ void raw_event_cb(struct bufferevent *raw, short event, void *wss) {
 #ifdef WSS_PROXY_SERVER
         port = get_http_port(wss);
 #endif
-        LOGD("connection %u closed for wss %p (won't send close), event: 0x%02x", port, wss, event);
+        LOGD("connection %u closed for wss, event: 0x%02x", port, event);
         bufferevent_free(raw);
         evhttp_connection_free(wss);
     }
@@ -613,7 +613,7 @@ static void wss_event_cb_ss(struct bufferevent *tev, short event, void *raw) {
 #ifdef WSS_PROXY_SERVER
         port = get_http_port(wss);
 #endif
-        LOGD("connection %u closing from wss %p (won't send close), event: 0x%02x", port, wss, event);
+        LOGD("connection %u closing from wss, event: 0x%02x", port, event);
         bufferevent_free(raw);
         evhttp_connection_free(wss);
     }
