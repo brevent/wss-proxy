@@ -20,12 +20,12 @@ struct raw_server_info {
 };
 
 static int init_ws_info(const char **addr, int *port) {
-    int mux = 1;
+    int mux;
     char *end;
+    const char *value;
     const char *remote_host = getenv("SS_REMOTE_HOST");
     const char *remote_port = getenv("SS_REMOTE_PORT");
     const char *options = getenv("SS_PLUGIN_OPTIONS");
-    const char *loglevel;
     if (remote_host != NULL && strchr(remote_host, '|') != NULL) {
         LOGE("remote host %s is not supported", remote_host);
         return EINVAL;
@@ -36,18 +36,19 @@ static int init_ws_info(const char **addr, int *port) {
         LOGE("remote port %s is not supported", remote_port);
         return EINVAL;
     }
-    if (options == NULL) {
-        options = "";
+    if (options != NULL && strchr(options, '\\') != NULL) {
+        LOGE("plugin options %s (contains \\) is unsupported", options);
+        return EINVAL;
     }
     // mux
-    if ((end = strstr(options, "mux=")) != NULL) {
-        end += 4;
-        mux = (int) strtol(end, NULL, 10);
+    if ((value = find_option(options, "mux", NULL)) != NULL) {
+        mux = (int) strtol(value, NULL, 10);
+    } else {
+        mux = 1;
     }
     // loglevel
-    if ((loglevel = strstr(options, "loglevel=")) != NULL) {
-        loglevel += 9;
-        init_log_level(loglevel);
+    if ((value = find_option(options, "loglevel", NULL)) != NULL) {
+        init_log_level(value);
     }
     LOGI("wss server %s:%d", *addr, *port);
     if (mux) {
@@ -57,7 +58,7 @@ static int init_ws_info(const char **addr, int *port) {
 }
 
 static int init_raw_info(struct raw_server_info *raw_server_info) {
-    char *end, *options;
+    char *end;
     const char *local_host = getenv("SS_LOCAL_HOST");
     const char *local_port = getenv("SS_LOCAL_PORT");
     raw_server_info->addr = local_host == NULL ? "127.0.0.1" : local_host;
@@ -71,17 +72,7 @@ static int init_raw_info(struct raw_server_info *raw_server_info) {
         return EINVAL;
     }
 
-    raw_server_info->udp_port = raw_server_info->port;
-    if ((options = getenv("SS_PLUGIN_OPTIONS")) != NULL && (options = strstr(options, "udp-port=")) != NULL) {
-        options += 9;
-        if ((end = strstr(options, ";")) != NULL) {
-            *end = '\0';
-        }
-        raw_server_info->udp_port = (int) strtol(options, &end, 10);
-        if (raw_server_info->udp_port <= 0 || raw_server_info->udp_port > 65535 || *end != '\0') {
-            raw_server_info->udp_port = -1;
-        }
-    }
+    raw_server_info->udp_port = find_udp_port(raw_server_info->port);
 
     if (raw_server_info->udp_port > 0) {
         LOGI("raw client tcp://%s:%d, udp://%s:%d", raw_server_info->addr, raw_server_info->port,

@@ -115,11 +115,14 @@ enum log_level get_log_level(void);
         }                                                                           \
     } while (0)
 
-
 #define LOGD(format, ...) LOG(format, stdout, DEBUG, ## __VA_ARGS__)
 #define LOGI(format, ...) LOG(format, stdout, INFO, ## __VA_ARGS__)
 #define LOGW(format, ...) LOG(format, stderr, WARN, ## __VA_ARGS__)
 #define LOGE(format, ...) LOG(format, stderr, ERROR, ## __VA_ARGS__)
+
+const char *find_option(const char *options, const char *key, const char *no_value);
+
+int find_udp_port(int default_port);
 
 int init_event_signal(struct event_base *base, struct event **event_parent, struct event **event_sigquit);
 

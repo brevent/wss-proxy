@@ -54,7 +54,7 @@ static int bufferevent_udp_cmp(const bufferevent_udp *a, const bufferevent_udp *
 
 static int init_raw_addr(struct sockaddr_storage *sockaddr, int *socklen, int *udp_port) {
     int port;
-    char *end, *options;
+    char *end;
     const char *local_host = getenv("SS_LOCAL_HOST");
     const char *local_port = getenv("SS_LOCAL_PORT");
 
@@ -76,17 +76,7 @@ static int init_raw_addr(struct sockaddr_storage *sockaddr, int *socklen, int *u
 
     set_port(sockaddr, port);
 
-    *udp_port = port;
-    if ((options = getenv("SS_PLUGIN_OPTIONS")) != NULL && (options = strstr(options, "udp-port=")) != NULL) {
-        options += 9;
-        if ((end = strstr(options, ";")) != NULL) {
-            *end = '\0';
-        }
-        *udp_port = (int) strtol(options, &end, 10);
-        if (*udp_port <= 0 || *udp_port > 65535 || *end != '\0') {
-            *udp_port = -1;
-        }
-    }
+    *udp_port = find_udp_port(port);
 
     if (*udp_port > 0) {
         LOGI("raw server tcp://%s:%d, udp://%s:%d", local_host, port, local_host, *udp_port);
@@ -97,11 +87,9 @@ static int init_raw_addr(struct sockaddr_storage *sockaddr, int *socklen, int *u
 }
 
 static int init_wss_addr(struct wss_server_info *server) {
-    int port;
-    char *end;
-    int mux = 1;
-    char *wss;
-    const char *loglevel;
+    int port, mux;
+    char *end, *wss;
+    const char *value;
     const char *remote_host = getenv("SS_REMOTE_HOST");
     const char *remote_port = getenv("SS_REMOTE_PORT");
     const char *options = getenv("SS_PLUGIN_OPTIONS");
@@ -124,60 +112,51 @@ static int init_wss_addr(struct wss_server_info *server) {
     }
     server->port = port;
 
-    if (options == NULL) {
-        options = "";
-    }
-    if (strchr(options, '\\') != NULL) {
+    if (options != NULL && strchr(options, '\\') != NULL) {
         LOGE("plugin options %s (contains \\) is unsupported", options);
         return EINVAL;
     }
 
     // host
-    server->host = strstr(options, "host=");
+    server->host = find_option(options, "host", NULL);
     if (server->host == NULL) {
         server->host = remote_host;
-    } else {
-        server->host += 5;
     }
     // path
-    server->path = strstr(options, "path=");
+    server->path = find_option(options, "path", NULL);
     if (server->path == NULL) {
         server->path = "/";
-    } else {
-        server->path += 5;
     }
     // tls
-    if ((end = strstr(options, "tls")) != NULL) {
-        end += 3;
-        if (*end == '\0' || *end == ';') {
-            server->tls = 1;
-        }
+    if ((value = find_option(options, "tls", "1")) != NULL) {
+        server->tls = (int) strtol(value, NULL, 10);
     }
     // loglevel
-    if ((loglevel = strstr(options, "loglevel=")) != NULL) {
-        loglevel += 9;
-        init_log_level(loglevel);
+    if ((value = find_option(options, "loglevel", NULL)) != NULL) {
+        init_log_level(value);
     }
 
     // mux
-    if ((end = strstr(options, "mux=")) != NULL) {
-        end += 4;
-        mux = (int) strtol(end, NULL, 10);
+    if ((value = find_option(options, "mux", "1")) != NULL) {
+        mux = (int) strtol(value, NULL, 10);
+    } else {
+        mux = 1;
     }
 
     // wss
-    if ((end = strstr(options, "ws=")) != NULL) {
-        end += 3;
-        server->ws = (int) strtol(end, NULL, 10);
+    if ((value = find_option(options, "ws", "1")) != NULL) {
+        server->ws = (int) strtol(value, NULL, 10);
     } else {
         server->ws = 1;
     }
 
     // strip
-    if ((end = strstr(server->host, ";")) != NULL) {
+    server->host = strdup(server->host);
+    if ((end = strchr(server->host, ';')) != NULL) {
         *end = '\0';
     }
-    if ((end = strstr(server->path, ";")) != NULL) {
+    server->path = strdup(server->path);
+    if ((end = strchr(server->path, ';')) != NULL) {
         *end = '\0';
     }
 
@@ -648,6 +627,12 @@ error:
     }
     if (wss_context.ssl_ctx) {
         SSL_CTX_free(wss_context.ssl_ctx);
+    }
+    if (wss_context.server.host) {
+        free((char *) wss_context.server.host);
+    }
+    if (wss_context.server.path) {
+        free((char *) wss_context.server.path);
     }
     return code;
 }

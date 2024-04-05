@@ -145,6 +145,42 @@ enum log_level get_log_level() {
     return log_level;
 }
 
+const char *find_option(const char *options, const char *key, const char *no_value) {
+    size_t len;
+    const char *pos, *value;
+    if (options == NULL) {
+        return NULL;
+    }
+    pos = options;
+    len = strlen(key);
+    while ((pos = strstr(pos, key)) != NULL) {
+        if (pos == options || *(pos - 1) == ';') {
+            value = pos + len;
+            if (*value == '=') {
+                return value + 1;
+            } else if (*value == ';' || *value == '\0') {
+                return no_value;
+            }
+        }
+        pos += len;
+    }
+    return NULL;
+}
+
+int find_udp_port(int default_port) {
+    char *end;
+    const char *value;
+    value = find_option(getenv("SS_PLUGIN_OPTIONS"), "udp-port", NULL);
+    if (value != NULL) {
+        int port = (int) strtol(value, &end, 10);
+        if (port <= 0 || port > 65535 || (*end != '\0' && *end != ';')) {
+            port = -1;
+        }
+        return port;
+    }
+    return default_port;
+}
+
 static void on_native_signal(int signal) {
     if (signal == SIGINT) {
         LOGW("received interrupt, will exit");
