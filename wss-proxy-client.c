@@ -180,45 +180,47 @@ static int is_websocket_handshake(struct evhttp_request *req) {
 
 static void http_error_cb(enum evhttp_request_error error, void *raw) {
     int socket_error = EVUTIL_SOCKET_ERROR();
+    uint16_t port = get_peer_port(raw);
     switch (error) {
         case EVREQ_HTTP_TIMEOUT:
-            LOGE("http timeout for peer %d", get_peer_port(raw));
+            LOGE("http timeout for peer %d", port);
             break;
         case EVREQ_HTTP_EOF:
-            LOGE("http eof for peer %d", get_peer_port(raw));
+            LOGE("http eof for peer %d", port);
             break;
         case EVREQ_HTTP_INVALID_HEADER:
-            LOGE("http invalid header for peer %d", get_peer_port(raw));
+            LOGE("http invalid header for peer %d", port);
             break;
         case EVREQ_HTTP_BUFFER_ERROR:
-            LOGE("http buffer error for peer %d", get_peer_port(raw));
+            LOGE("http buffer error for peer %d", port);
             break;
         case EVREQ_HTTP_REQUEST_CANCEL:
-            LOGE("http request cancel for peer %d", get_peer_port(raw));
+            LOGE("http request cancel for peer %d", port);
             break;
         case EVREQ_HTTP_DATA_TOO_LONG:
-            LOGE("http data too long for peer %d", get_peer_port(raw));
+            LOGE("http data too long for peer %d", port);
             break;
         default:
-            LOGE("http unknown reason %d for peer %d", error, get_peer_port(raw));
+            LOGE("http unknown reason %d for peer %d", error, port);
             break;
     }
     EVUTIL_SET_SOCKET_ERROR(socket_error);
 }
 
-static void show_http_error(struct bufferevent *raw, struct evhttp_connection *wss, int socket_error) {
+static void show_http_error(struct bufferevent *raw, struct evhttp_connection *wss, int socket_error, int show_unknown) {
     unsigned long tls_error;
     char error_buffer[256];
+    uint16_t port = get_peer_port(raw);
     if ((tls_error = bufferevent_get_openssl_error(evhttp_connection_get_bufferevent(wss)))) {
         memset(error_buffer, 0, sizeof(error_buffer));
         ERR_error_string_n(tls_error, error_buffer, sizeof(error_buffer));
-        LOGE("tls fail for peer %d: %s", get_peer_port(raw), error_buffer);
+        LOGE("tls fail for peer %d: %s", port, error_buffer);
     } else if (socket_error == EWOULDBLOCK) {
-        LOGE("wss fail for peer %d: socket timeout", get_peer_port(raw));
+        LOGE("wss fail for peer %d: socket timeout", port);
     } else if (socket_error) {
-        LOGE("wss fail for peer %d: %s", get_peer_port(raw), evutil_socket_error_to_string(socket_error));
-    } else {
-        LOGE("wss fail for peer %d: unknown reason", get_peer_port(raw));
+        LOGE("wss fail for peer %d: %s", port, evutil_socket_error_to_string(socket_error));
+    } else if (show_unknown) {
+        LOGE("wss fail for peer %d: unknown reason", port);
     }
 }
 
@@ -236,7 +238,7 @@ static void http_request_cb(struct evhttp_request *req, void *raw) {
         if (status > 0) {
             LOGE("wss fail for peer %d, status: %d", get_peer_port(raw), status);
         } else {
-            show_http_error(raw, wss, socket_error);
+            show_http_error(raw, wss, socket_error, req != NULL);
         }
         bufferevent_free(raw);
         evhttp_connection_free(wss);
