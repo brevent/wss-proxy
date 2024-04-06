@@ -40,8 +40,8 @@ cmake --build build
 - `mux`, default `1` (only `0` is supported, specify for compatible with `v2ray-plugin`)
 
 #### Options for `wss-proxy-client` only
-- `ws` (since 0.2.6, #e7b7f36), default `1` to use websocket after handshake, `0` to use raw shadowsocks after handshake
-- `extra-listen-port` (since 0.3.0, #689f0e7), extra listen port for shadowsocks client without sip003u
+- `ws` (since 0.2.6, [e7b7f36](https://github.com/brevent/wss-proxy/commit/e7b7f36)), default `1` to use websocket after handshake, `0` to use raw shadowsocks after handshake
+- `extra-listen-port` (since 0.3.0, [689f0e7](https://github.com/brevent/wss-proxy/commit/689f0e7)), extra listen port for shadowsocks client without sip003u
 
 ### Server
 
