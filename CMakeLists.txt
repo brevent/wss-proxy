@@ -27,7 +27,6 @@ include(CheckFunctionExists)
 
 find_package(OpenSSL 1.1.1 REQUIRED)
 set(CMAKE_REQUIRED_LIBRARIES OpenSSL::SSL)
-# OpenSSL 3.0
 check_function_exists(SSL_CTX_set_keylog_callback HAVE_SSL_CTX_SET_KEYLOG_CALLBACK)
 if (HAVE_SSL_CTX_SET_KEYLOG_CALLBACK)
     add_definitions(-DHAVE_SSL_CTX_SET_KEYLOG_CALLBACK)
