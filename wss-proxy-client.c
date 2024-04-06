@@ -34,6 +34,13 @@ struct udp_context {
     struct wss_proxy_context *wss_context;
 };
 
+struct server_context {
+    struct evconnlistener *listener;
+    evutil_socket_t udp_sock;
+    struct event *udp_event;
+    struct udp_context udp_context;
+};
+
 static unsigned long bufferevent_udp_hash(const bufferevent_udp *a) {
     socklen_t i, max;
     unsigned long result = a->socklen;
@@ -52,7 +59,7 @@ static int bufferevent_udp_cmp(const bufferevent_udp *a, const bufferevent_udp *
     return memcmp(a->sockaddr, b->sockaddr, a->socklen);
 }
 
-static int init_raw_addr(struct sockaddr_storage *sockaddr, int *socklen, int *udp_port) {
+static int init_raw_addr(struct sockaddr_storage *sockaddr, int *socklen) {
     int port;
     char *end;
     const char *local_host = getenv("SS_LOCAL_HOST");
@@ -75,14 +82,7 @@ static int init_raw_addr(struct sockaddr_storage *sockaddr, int *socklen, int *u
     }
 
     set_port(sockaddr, port);
-
-    *udp_port = find_udp_port(port);
-
-    if (*udp_port > 0) {
-        LOGI("raw server tcp://%s:%d, udp://%s:%d", local_host, port, local_host, *udp_port);
-    } else {
-        LOGI("raw server %s:%d", local_host, port);
-    }
+    LOGI("raw server %s:%d", local_host, port);
     return 0;
 }
 
@@ -387,26 +387,26 @@ error:
     }
 }
 
-static evutil_socket_t init_udp_sock(const struct sockaddr *sa, int socklen) {
-    evutil_socket_t sock = socket(sa->sa_family, SOCK_DGRAM, 0);
+static evutil_socket_t init_udp_sock(const struct sockaddr *sockaddr, int socklen) {
+    evutil_socket_t sock = socket(sockaddr->sa_family, SOCK_DGRAM, 0);
     if (sock < 0) {
-        LOGE("cannot create udp socket");
+        LOGE("cannot create udp socket for %d", get_port(sockaddr));
         goto error;
     }
     if (evutil_make_socket_nonblocking(sock) < 0) {
-        LOGE("cannot make udp socket nonblocking");
+        LOGE("cannot make udp socket nonblocking for %d", get_port(sockaddr));
         goto error;
     }
     if (evutil_make_socket_closeonexec(sock) < 0) {
-        LOGE("cannot make udp socket closeonexec");
+        LOGE("cannot make udp socket closeonexec for %d", get_port(sockaddr));
         goto error;
     }
     if (evutil_make_listen_socket_reuseable(sock) < 0) {
-        LOGE("cannot make udp socket reuseable");
+        LOGE("cannot make udp socket reuseable for %d", get_port(sockaddr));
         goto error;
     }
-    if (bind(sock, sa, socklen) < 0) {
-        LOGE("cannot bind udp socket");
+    if (bind(sock, sockaddr, socklen) < 0) {
+        LOGE("cannot bind udp socket for %d", get_port(sockaddr));
         goto error;
     }
     return sock;
@@ -490,21 +490,68 @@ static void udp_read_cb(evutil_socket_t sock, short event, void *ctx) {
     }
 }
 
+static void server_context_free(const struct server_context *server_context) {
+    if (server_context->listener) {
+        evconnlistener_free(server_context->listener);
+    }
+    if (server_context->udp_sock > 0) {
+        evutil_closesocket(server_context->udp_sock);
+    }
+    if (server_context->udp_context.hash) {
+        lh_bufferevent_udp_free(server_context->udp_context.hash);
+    }
+    if (server_context->udp_event) {
+        event_free(server_context->udp_event);
+    }
+}
+
+static int init_server_context(struct server_context *server_context, struct event_base *base,
+                               struct wss_proxy_context *wss_context, struct sockaddr *sockaddr, int socklen) {
+    unsigned flags = LEV_OPT_CLOSE_ON_FREE | LEV_OPT_CLOSE_ON_EXEC | LEV_OPT_REUSEABLE;
+    server_context->listener = evconnlistener_new_bind(base, accept_conn_cb, wss_context, flags, -1,
+                                                       sockaddr, socklen);
+    if (!server_context->listener) {
+        LOGE("cannot listen to raw for %d", get_port(sockaddr));
+        goto error;
+    }
+
+    server_context->udp_sock = init_udp_sock(sockaddr, socklen);
+    if (server_context->udp_sock < 0) {
+        goto error;
+    }
+
+    server_context->udp_context.hash = lh_bufferevent_udp_new(bufferevent_udp_hash, bufferevent_udp_cmp);
+    if (!server_context->udp_context.hash) {
+        LOGE("cannot create lhash for %d", get_port(sockaddr));
+        goto error;
+    }
+    server_context->udp_context.base = base;
+    server_context->udp_context.wss_context = wss_context;
+
+    server_context->udp_event = event_new(base, server_context->udp_sock, EV_READ | EV_PERSIST, udp_read_cb,
+                                          &(server_context->udp_context));
+    if (!server_context->udp_event) {
+        LOGE("cannot create event for %d", get_port(sockaddr));
+        goto error;
+    }
+
+    event_add(server_context->udp_event, NULL);
+    return 0;
+error:
+    server_context_free(server_context);
+    return 1;
+}
+
 int main() {
     int code = 1;
     struct event_base *base = NULL;
     struct event_config *cfg = NULL;
     struct event *event_parent = NULL, *event_sigquit = NULL;
-    struct evconnlistener *listener = NULL;
-    struct sockaddr_storage raw_addr, udp_raw_addr;
-    int socklen;
+    struct sockaddr_storage raw_addr, extra_raw_addr;
+    struct server_context server_context, extra_server_context;
+    int socklen, extra_port;
     struct wss_proxy_context wss_context;
-    evutil_socket_t sock = 0;
-    struct event *udp_event = NULL;
-    struct udp_context udp_context;
-    int udp_port = 0;
 
-    memset(&udp_context, 0, sizeof(struct udp_context));
     memset(&wss_context, 0, sizeof(wss_context));
     if (init_wss_addr(&wss_context.server)) {
         return 1;
@@ -532,7 +579,7 @@ int main() {
 
     socklen = sizeof(raw_addr);
     memset(&raw_addr, 0, socklen);
-    if (init_raw_addr(&raw_addr, &socklen, &udp_port)) {
+    if (init_raw_addr(&raw_addr, &socklen)) {
         return 1;
     }
 
@@ -554,32 +601,24 @@ int main() {
         goto error;
     }
 
-    listener = evconnlistener_new_bind(base, accept_conn_cb, &wss_context,
-                                       LEV_OPT_CLOSE_ON_FREE | LEV_OPT_CLOSE_ON_EXEC | LEV_OPT_REUSEABLE,
-                                       -1, (struct sockaddr *) &raw_addr, socklen);
-    if (!listener) {
-        LOGE("cannot listen to raw");
+    memset(&server_context, 0, sizeof(server_context));
+    if (init_server_context(&server_context, base, &wss_context, (struct sockaddr *) &raw_addr, socklen)) {
         goto error;
     }
 
-    if (udp_port < 0) {
-        goto start;
+    extra_port = find_option_port("extra-listen-port", 0);
+    if (extra_port > 0) {
+        memset(&extra_server_context, 0, sizeof(server_context));
+        memcpy(&extra_raw_addr, &raw_addr, socklen);
+        set_port(&extra_raw_addr, extra_port);
+        if (init_server_context(&extra_server_context, base, &wss_context,
+                                 (struct sockaddr *) &extra_raw_addr, socklen)) {
+            LOGW("cannot listen to extra port %d", extra_port);
+        } else {
+            LOGI("extra raw server %s:%d", getenv("SS_LOCAL_HOST"), extra_port);
+        }
     }
-    memcpy(&udp_raw_addr, &raw_addr, socklen);
-    if (udp_port > 0) {
-        set_port(&udp_raw_addr, udp_port);
-    }
-    sock = init_udp_sock((struct sockaddr *) &udp_raw_addr, socklen);
-    if (sock < 0) {
-        goto error;
-    }
-    udp_context.hash = lh_bufferevent_udp_new(bufferevent_udp_hash, bufferevent_udp_cmp);
-    udp_context.base = base;
-    udp_context.wss_context = &wss_context;
-    udp_event = event_new(base, sock, EV_READ | EV_PERSIST, udp_read_cb, &udp_context);
-    event_add(udp_event, NULL);
 
-start:
 #ifdef OPENSSL_VERSION_STRING
     snprintf(wss_context.user_agent, sizeof(wss_context.user_agent), "wss-proxy-client/%s libevent/%s OpenSSL/%s",
              WSS_PROXY_VERSION, event_get_version(), OpenSSL_version(OPENSSL_VERSION_STRING));
@@ -607,18 +646,8 @@ error:
     if (event_sigquit) {
         event_free(event_sigquit);
     }
-    if (udp_context.hash) {
-        lh_bufferevent_udp_free(udp_context.hash);
-    }
-    if (listener) {
-        evconnlistener_free(listener);
-    }
-    if (sock > 0) {
-        evutil_closesocket(sock);
-    }
-    if (udp_event) {
-        event_free(udp_event);
-    }
+    server_context_free(&server_context);
+    server_context_free(&extra_server_context);
     if (base) {
         event_base_free(base);
     }

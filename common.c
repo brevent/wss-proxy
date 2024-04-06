@@ -73,7 +73,7 @@ uint16_t get_http_port(struct evhttp_connection *evcon) {
 }
 #endif
 
-uint16_t get_port(struct sockaddr *sockaddr) {
+uint16_t get_port(const struct sockaddr *sockaddr) {
     if (sockaddr->sa_family == AF_INET6) {
         return ntohs(((struct sockaddr_in6 *) sockaddr)->sin6_port);
     } else {
@@ -167,10 +167,10 @@ const char *find_option(const char *options, const char *key, const char *no_val
     return NULL;
 }
 
-int find_udp_port(int default_port) {
+int find_option_port(const char *key, int default_port) {
     char *end;
     const char *value;
-    value = find_option(getenv("SS_PLUGIN_OPTIONS"), "udp-port", NULL);
+    value = find_option(getenv("SS_PLUGIN_OPTIONS"), key, NULL);
     if (value != NULL) {
         int port = (int) strtol(value, &end, 10);
         if (port <= 0 || port > 65535 || (*end != '\0' && *end != ';')) {

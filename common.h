@@ -93,7 +93,7 @@ uint16_t get_peer_port(struct bufferevent *bev);
 uint16_t get_http_port(struct evhttp_connection *evcon);
 #endif
 
-uint16_t get_port(struct sockaddr *sockaddr);
+uint16_t get_port(const struct sockaddr *sockaddr);
 
 void set_port(struct sockaddr_storage *sockaddr, uint16_t port);
 
@@ -122,7 +122,7 @@ enum log_level get_log_level(void);
 
 const char *find_option(const char *options, const char *key, const char *no_value);
 
-int find_udp_port(int default_port);
+int find_option_port(const char *key, int default_port);
 
 int init_event_signal(struct event_base *base, struct event **event_parent, struct event **event_sigquit);
 

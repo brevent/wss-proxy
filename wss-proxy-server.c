@@ -72,7 +72,7 @@ static int init_raw_info(struct raw_server_info *raw_server_info) {
         return EINVAL;
     }
 
-    raw_server_info->udp_port = find_udp_port(raw_server_info->port);
+    raw_server_info->udp_port = find_option_port("udp-port", raw_server_info->port);
 
     if (raw_server_info->udp_port > 0) {
         LOGI("raw client tcp://%s:%d, udp://%s:%d", raw_server_info->addr, raw_server_info->port,
@@ -172,6 +172,7 @@ static struct bufferevent *init_udp_client(struct event_base *base, struct raw_s
     }
     data = calloc(1, sizeof(struct bufferevent_udp));
     if (data == NULL) {
+        LOGE("cannot calloc for udp socket");
         goto error;
     }
     data->sock = sock;
