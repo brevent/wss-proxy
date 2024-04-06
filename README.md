@@ -67,6 +67,6 @@ Unsupported options:
 - `host`, use behind nginx, plugin server support any host.
 - `path`, use behind nginx, plugin server support any path.
 
-#### Options for `wss-proxy-client` only
+#### Options for `wss-proxy-server` only
 - `udp-port`, udp port to shadowsocks server without sip003u
   - There is no `tcp-port`, which is environment `SS_LOCAL_PORT`.
