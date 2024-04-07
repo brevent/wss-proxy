@@ -478,7 +478,7 @@ static enum bufferevent_filter_result wss_input_filter(struct evbuffer *src, str
         evbuffer_add(dst, udp_frame.buffer, info.payload_size);
     } else {
         udp_frame.length = ntohs(info.payload_size);
-        evbuffer_add(dst, &udp_frame, info.payload_size + 2);
+        evbuffer_add(dst, &udp_frame, info.payload_size + UDP_FRAME_LENGTH_SIZE);
     }
     return BEV_OK;
 }

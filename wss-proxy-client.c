@@ -476,7 +476,7 @@ static void udp_read_cb_client(evutil_socket_t sock, short event, void *ctx) {
         if ((data = init_udp_client(&key, context, sock, get_port(key.sockaddr))) == NULL) {
             break;
         }
-        evbuffer_add(data->be.input, &udp_frame, size + 2);
+        evbuffer_add(data->be.input, &udp_frame, size + UDP_FRAME_LENGTH_SIZE);
     }
 }
 

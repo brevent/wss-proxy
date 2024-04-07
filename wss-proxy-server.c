@@ -123,7 +123,7 @@ static void udp_read_cb_server(evutil_socket_t sock, short event, void *ctx) {
             if ((size = udp_read(sock, &udp_frame, (struct sockaddr *) &sockaddr, &socklen)) < 0) {
                 break;
             }
-            evbuffer_add(raw->input, &udp_frame, size + 2);
+            evbuffer_add(raw->input, &udp_frame, size + UDP_FRAME_LENGTH_SIZE);
         }
     }
 }
