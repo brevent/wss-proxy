@@ -107,41 +107,19 @@ static int do_websocket_handshake(struct evhttp_request *req, char *sec_websocke
     return 1;
 }
 
-static void udp_read_cb(evutil_socket_t sock, short event, void *ctx) {
+static void udp_read_cb_server(evutil_socket_t sock, short event, void *ctx) {
     struct bufferevent *raw = ctx;
     struct evhttp_connection *wss = get_wss(raw);
     if (event & EV_TIMEOUT) {
         LOGD("udp timeout for peer %d", get_http_port(wss));
         raw_event_cb(raw, BEV_EVENT_EOF, wss);
     } else if (event & EV_READ) {
-        ssize_t size;
-        socklen_t socklen;
-        char buffer[WSS_PAYLOAD_SIZE];
+        ev_socklen_t socklen;
         struct sockaddr_storage sockaddr;
-        struct timeval one_minute = {60, 0};
         for (;;) {
             socklen = sizeof(struct sockaddr_storage);
-            size = recvfrom(sock, buffer, WSS_PAYLOAD_SIZE, 0, (struct sockaddr *) &sockaddr, &socklen);
-            if (size < 0) {
-                int socket_error = evutil_socket_geterror(sock);
-                if (!EVUTIL_ERR_RW_RETRIABLE(socket_error)) {
-                    LOGE("cannot recvfrom udp for peer %d: %s", get_http_port(wss),
-                         evutil_socket_error_to_string(socket_error));
-                }
+            if (udp_read_cb(sock, raw, (struct sockaddr *) &sockaddr, &socklen) < 0) {
                 break;
-            }
-            if (size == 0) {
-                LOGE("udp receive 0 for peer %d", get_http_port(wss));
-                raw_event_cb(raw, BEV_EVENT_EOF, wss);
-                continue;
-            }
-            event_add(&(raw->ev_read), &one_minute);
-            if (raw->enabled & EV_READ) {
-                struct evbuffer *dst;
-                dst = bufferevent_get_output(evhttp_connection_get_bufferevent(wss));
-                evbuffer_add(dst, buffer, size);
-            } else {
-                evbuffer_add(raw->input, buffer, size);
             }
         }
     }
@@ -183,7 +161,7 @@ static struct bufferevent *init_udp_client(struct event_base *base, struct raw_s
     raw->input = evbuffer_new();
     raw->output = evbuffer_new();
     evbuffer_add_cb(raw->output, udp_send_cb, raw);
-    event_assign(&(raw->ev_read), base, sock, EV_READ | EV_PERSIST, udp_read_cb, raw);
+    event_assign(&(raw->ev_read), base, sock, EV_READ | EV_PERSIST, udp_read_cb_server, raw);
     event_add(&(raw->ev_read), &one_minute);
     return raw;
 error:
@@ -245,9 +223,6 @@ static void generic_request_handler(struct evhttp_request *req, void *ctx) {
     ss = IS_SHADOWSOCKS(evhttp_find_header(evhttp_request_get_input_headers(req), X_UPGRADE));
     if (ss) {
         evhttp_add_header(headers, X_UPGRADE, SHADOWSOCKS);
-    } else if (udp) {
-        bufferevent_free(raw);
-        goto error;
     }
     evhttp_send_reply(req, 101, "Switching Protocols", NULL);
 

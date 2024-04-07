@@ -246,6 +246,7 @@ static void http_request_cb(struct evhttp_request *req, void *raw) {
     int socket_error = EVUTIL_SOCKET_ERROR();
     int status = req == NULL ? -1 : evhttp_request_get_response_code(req);
     if (status == 101 && is_websocket_handshake(req)) {
+        LOGD("wss is ready for peer %d", get_peer_port(raw));
         if (IS_SHADOWSOCKS(evhttp_find_header(evhttp_request_get_input_headers(req), X_UPGRADE))) {
             tunnel_ss(raw, wss);
         } else {
@@ -339,8 +340,8 @@ static struct evhttp_connection *connect_wss(struct wss_proxy_context *context, 
     evhttp_add_header(output_headers, "User-Agent", context->user_agent);
     if (!raw->be_ops) {
         evhttp_add_header(output_headers, X_SOCK_TYPE, SOCK_TYPE_UDP);
-        evhttp_add_header(output_headers, X_UPGRADE, SHADOWSOCKS);
-    } else if (!context->server.ws) {
+    }
+    if (!context->server.ws) {
         evhttp_add_header(output_headers, X_UPGRADE, SHADOWSOCKS);
     }
 
@@ -426,66 +427,65 @@ static void udp_timeout_cb(evutil_socket_t sock, short event, void *ctx) {
     }
 }
 
-static void udp_read_cb(evutil_socket_t sock, short event, void *ctx) {
-    ssize_t size;
-    uint16_t port;
-    char buffer[WSS_PAYLOAD_SIZE];
+static struct bufferevent_udp *init_udp_client(struct bufferevent_udp *key, struct udp_context *context,
+                                               evutil_socket_t sock, int port) {
+    struct bufferevent_udp *data;
+    struct bufferevent *raw;
+    data = lh_bufferevent_udp_retrieve(context->hash, key);
+    if (data != NULL) {
+        return data;
+    }
+    data = calloc(1, sizeof(struct bufferevent_udp));
+    if (!data) {
+        LOGE("cannot calloc for peer %d", port);
+        return NULL;
+    }
+    memcpy(&(data->sockaddr_storage), &(key->sockaddr_storage), key->socklen);
+    data->sock = sock;
+    data->socklen = key->socklen;
+    data->sockaddr = (struct sockaddr *) &(data->sockaddr_storage);
+    data->hash = context->hash;
+    raw = (struct bufferevent *) data;
+    if (!connect_wss(context->wss_context, context->base, raw, port)) {
+        LOGE("cannot connect to wss for peer %d", port);
+        free(data);
+        return NULL;
+    }
+    raw->ev_base = context->base;
+    raw->input = evbuffer_new();
+    raw->output = evbuffer_new();
+    evbuffer_add_cb(raw->output, udp_send_cb, data);
+    event_assign(&(raw->ev_read), context->base, sock, EV_READ | EV_PERSIST, udp_timeout_cb, data);
+    LOGD("udp init for peer %d", port);
+    lh_bufferevent_udp_insert(context->hash, data);
+    return data;
+}
+
+static void udp_read_cb_client(evutil_socket_t sock, short event, void *ctx) {
+    char buffer[1];
     struct udp_context *context = ctx;
     struct bufferevent_udp key, *data;
-    struct bufferevent *raw;
-    struct timeval one_minute = {60, 0};
     (void) event;
+    key.sockaddr = (struct sockaddr *) &(key.sockaddr_storage);
     for (;;) {
         key.socklen = sizeof(struct sockaddr_storage);
-        size = recvfrom(sock, buffer, WSS_PAYLOAD_SIZE, 0, (struct sockaddr *) &(key.sockaddr_storage), &(key.socklen));
-        port = get_port((struct sockaddr *) &(key.sockaddr_storage));
-        if (size < 0) {
+        if (recvfrom(sock, &buffer, 1, MSG_PEEK, key.sockaddr, &(key.socklen)) < 0) {
             int socket_error = evutil_socket_geterror(sock);
             if (!EVUTIL_ERR_RW_RETRIABLE(socket_error)) {
-                LOGE("cannot recvfrom udp for peer %d: %s", port, evutil_socket_error_to_string(socket_error));
+                LOGE("cannot recvfrom udp when check addr: %s", evutil_socket_error_to_string(socket_error));
             }
             break;
         }
-        key.sockaddr = (struct sockaddr *) &(key.sockaddr_storage);
-        data = lh_bufferevent_udp_retrieve(context->hash, &key);
-        if (data == NULL) {
-            data = calloc(1, sizeof(struct bufferevent_udp));
-            if (!data) {
-                LOGE("cannot calloc for peer %d", port);
-                continue;
-            }
-            data->sock = sock;
-            data->socklen = key.socklen;
-            data->sockaddr = (struct sockaddr *) &(data->sockaddr_storage);
-            memcpy(&(data->sockaddr_storage), &(key.sockaddr_storage), key.socklen);
-            data->hash = context->hash;
-            raw = (struct bufferevent *) data;
-            if (!connect_wss(context->wss_context, context->base, raw, port)) {
-                LOGE("cannot connect to wss for peer %d", port);
-                free(data);
-                continue;
-            }
-            raw->ev_base = context->base;
-            raw->input = evbuffer_new();
-            raw->output = evbuffer_new();
-            evbuffer_add_cb(raw->output, udp_send_cb, data);
-            event_assign(&(raw->ev_read), context->base, sock, EV_READ | EV_PERSIST, udp_timeout_cb, data);
-            LOGD("udp init for peer %d", port);
-            lh_bufferevent_udp_insert(context->hash, data);
+        if ((data = init_udp_client(&key, context, sock, get_port(key.sockaddr))) == NULL) {
+            break;
         }
-        raw = (struct bufferevent *) data;
-        if (size == 0) {
-            LOGE("udp receive 0 for peer %d", port);
-            raw_event_cb(raw, BEV_EVENT_EOF, get_wss(raw));
-            continue;
+        if (!data->be.readcb) {
+            // wait for tunnel ok
+            break;
         }
-        event_add(&(raw->ev_read), &one_minute);
-        if (raw->enabled & EV_READ) {
-            struct evbuffer *dst;
-            dst = bufferevent_get_output(evhttp_connection_get_bufferevent(get_wss(raw)));
-            evbuffer_add(dst, buffer, size);
-        } else {
-            evbuffer_add(raw->input, buffer, size);
+        key.socklen = sizeof(struct sockaddr_storage);
+        if (udp_read_cb(sock, (struct bufferevent *) data, key.sockaddr, &(key.socklen)) < 0) {
+            break;
         }
     }
 }
@@ -528,7 +528,7 @@ static int init_server_context(struct server_context *server_context, struct eve
     server_context->udp_context.base = base;
     server_context->udp_context.wss_context = wss_context;
 
-    server_context->udp_event = event_new(base, server_context->udp_sock, EV_READ | EV_PERSIST, udp_read_cb,
+    server_context->udp_event = event_new(base, server_context->udp_sock, EV_READ | EV_PERSIST, udp_read_cb_client,
                                           &(server_context->udp_context));
     if (!server_context->udp_event) {
         LOGE("cannot create event for %d", get_port(sockaddr));

@@ -51,6 +51,18 @@ enum log_level {
     ERROR,
 };
 
+#define MAX_UDP_FRAME_SIZE 65535
+struct udp_frame {
+    union {
+        struct {
+            uint16_t length;
+            char buffer[MAX_UDP_FRAME_SIZE];
+        } raw;
+        char buffer[MAX_UDP_FRAME_SIZE];
+    };
+};
+#define MAX_WSS_PAYLOAD_SIZE MAX_UDP_FRAME_SIZE
+
 typedef struct bufferevent_udp bufferevent_udp;
 
 #ifdef WSS_PROXY_CLIENT
@@ -157,6 +169,8 @@ void tunnel_ss(struct bufferevent *raw, struct evhttp_connection *wss);
 #define IS_UDP(x) (x != NULL && !evutil_ascii_strcasecmp(x, SOCK_TYPE_UDP))
 
 void udp_send_cb(struct evbuffer *buf, const struct evbuffer_cb_info *info, void *arg);
+
+int udp_read_cb(evutil_socket_t sock, struct bufferevent *raw, struct sockaddr *sockaddr, ev_socklen_t *socklen);
 
 #ifdef HAVE_SSL_CTX_SET_KEYLOG_CALLBACK
 void ssl_keylog_callback(const SSL *ssl, const char *line);
