@@ -423,7 +423,7 @@ static void udp_timeout_cb(evutil_socket_t sock, short event, void *ctx) {
     if (event & EV_TIMEOUT) {
         struct bufferevent *raw = ctx;
         LOGD("udp timeout for peer %d", get_peer_port(raw));
-        raw_event_cb(raw, BEV_EVENT_EOF, get_wss(raw));
+        raw->errorcb(raw, BEV_EVENT_EOF, get_wss(raw));
     }
 }
 
@@ -465,6 +465,7 @@ static void udp_read_cb_client(evutil_socket_t sock, short event, void *ctx) {
     struct udp_context *context = ctx;
     struct bufferevent_udp key, *data;
     struct udp_frame udp_frame;
+    struct timeval one_minute = {60, 0};
     (void) event;
     key.sockaddr = (struct sockaddr *) &(key.sockaddr_storage);
     for (;;) {
@@ -477,6 +478,7 @@ static void udp_read_cb_client(evutil_socket_t sock, short event, void *ctx) {
             break;
         }
         evbuffer_add(data->be.input, &udp_frame, size + UDP_FRAME_LENGTH_SIZE);
+        event_add(&(data->be.ev_read), &one_minute);
     }
 }
 
@@ -597,8 +599,8 @@ int main() {
     }
 
     extra_port = find_option_port("extra-listen-port", 0);
+    memset(&extra_server_context, 0, sizeof(server_context));
     if (extra_port > 0) {
-        memset(&extra_server_context, 0, sizeof(server_context));
         memcpy(&extra_raw_addr, &raw_addr, socklen);
         set_port(&extra_raw_addr, extra_port);
         if (init_server_context(&extra_server_context, base, &wss_context,

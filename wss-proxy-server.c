@@ -112,11 +112,12 @@ static void udp_read_cb_server(evutil_socket_t sock, short event, void *ctx) {
     struct evhttp_connection *wss = get_wss(raw);
     if (event & EV_TIMEOUT) {
         LOGD("udp timeout for peer %d", get_http_port(wss));
-        raw_event_cb(raw, BEV_EVENT_EOF, wss);
+        raw->errorcb(raw, BEV_EVENT_EOF, wss);
     } else if (event & EV_READ) {
         struct udp_frame udp_frame;
         ev_socklen_t socklen;
         struct sockaddr_storage sockaddr;
+        struct timeval one_minute = {60, 0};
         for (;;) {
             ssize_t size;
             socklen = sizeof(struct sockaddr_storage);
@@ -124,6 +125,7 @@ static void udp_read_cb_server(evutil_socket_t sock, short event, void *ctx) {
                 break;
             }
             evbuffer_add(raw->input, &udp_frame, size + UDP_FRAME_LENGTH_SIZE);
+            event_add(&(raw->ev_read), &one_minute);
         }
     }
 }
