@@ -22,7 +22,7 @@ jobs:
     strategy:
       matrix:
         # https://github.com/actions/runner-images
-        os: [ubuntu-latest, ubuntu-20.04, macos-latest, macos-13]
+        os: [ubuntu-latest, ubuntu-20.04, macos-latest, macos-13, macos-12]
 
     steps:
     - uses: actions/checkout@v3
@@ -51,6 +51,9 @@ jobs:
     - name: Install shadowsocks on macos
       if: ${{ startsWith(matrix.os, 'macos') }}
       run: brew install shadowsocks-libev v2ray-plugin
+
+    - name: Install PySocks
+      run: pip3 install PySocks
 
     - name: Test
       working-directory: ${{github.workspace}}/build
