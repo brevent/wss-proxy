@@ -50,7 +50,7 @@ jobs:
 
     - name: Install shadowsocks on macos
       if: ${{ startsWith(matrix.os, 'macos') }}
-      run: brew install shadowsocks-libev v2ray-plugin
+      run: brew install shadowsocks-libev shadowsocks-rust v2ray-plugin
 
     - name: Install PySocks
       run: pip3 install PySocks
