@@ -62,3 +62,4 @@ install(TARGETS wss-proxy-server DESTINATION bin)
 
 include(CTest)
 add_test(NAME run-test COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run-test.sh)
+add_test(NAME run-test-udp COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run-test-udp.sh)

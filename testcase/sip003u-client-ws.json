@@ -1,0 +1,13 @@
+{
+  "local_address": "127.0.0.1",
+  "local_port": 1081,
+  "method": "chacha20-ietf-poly1305",
+  "mode": "tcp_and_udp",
+  "password": "sip003u",
+  "plugin": "./wss-proxy-client",
+  "plugin_mode": "tcp_and_udp",
+  "plugin_opts": "mux=0;loglevel=debug",
+  "server": "127.0.0.1",
+  "server_port": 8888,
+  "timeout": 60
+}
