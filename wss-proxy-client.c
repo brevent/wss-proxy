@@ -462,31 +462,21 @@ static struct bufferevent_udp *init_udp_client(struct bufferevent_udp *key, stru
 }
 
 static void udp_read_cb_client(evutil_socket_t sock, short event, void *ctx) {
-    char buffer[1];
     struct udp_context *context = ctx;
     struct bufferevent_udp key, *data;
+    struct udp_frame udp_frame;
     (void) event;
     key.sockaddr = (struct sockaddr *) &(key.sockaddr_storage);
     for (;;) {
+        ssize_t size;
         key.socklen = sizeof(struct sockaddr_storage);
-        if (recvfrom(sock, &buffer, 1, MSG_PEEK, key.sockaddr, &(key.socklen)) < 0) {
-            int socket_error = evutil_socket_geterror(sock);
-            if (!EVUTIL_ERR_RW_RETRIABLE(socket_error)) {
-                LOGE("cannot recvfrom udp when check addr: %s", evutil_socket_error_to_string(socket_error));
-            }
+        if ((size = udp_read(sock, &udp_frame, key.sockaddr, &(key.socklen))) < 0) {
             break;
         }
         if ((data = init_udp_client(&key, context, sock, get_port(key.sockaddr))) == NULL) {
             break;
         }
-        if (!data->be.readcb) {
-            // wait for tunnel ok
-            break;
-        }
-        key.socklen = sizeof(struct sockaddr_storage);
-        if (udp_read_cb(sock, (struct bufferevent *) data, key.sockaddr, &(key.socklen)) < 0) {
-            break;
-        }
+        evbuffer_add(data->be.input, &udp_frame, size + 2);
     }
 }
 

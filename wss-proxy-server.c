@@ -114,13 +114,16 @@ static void udp_read_cb_server(evutil_socket_t sock, short event, void *ctx) {
         LOGD("udp timeout for peer %d", get_http_port(wss));
         raw_event_cb(raw, BEV_EVENT_EOF, wss);
     } else if (event & EV_READ) {
+        struct udp_frame udp_frame;
         ev_socklen_t socklen;
         struct sockaddr_storage sockaddr;
         for (;;) {
+            ssize_t size;
             socklen = sizeof(struct sockaddr_storage);
-            if (udp_read_cb(sock, raw, (struct sockaddr *) &sockaddr, &socklen) < 0) {
+            if ((size = udp_read(sock, &udp_frame, (struct sockaddr *) &sockaddr, &socklen)) < 0) {
                 break;
             }
+            evbuffer_add(raw->input, &udp_frame, size + 2);
         }
     }
 }

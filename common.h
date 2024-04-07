@@ -52,14 +52,10 @@ enum log_level {
 };
 
 #define MAX_UDP_FRAME_SIZE 65535
+#define UDP_FRAME_LENGTH_SIZE 2
 struct udp_frame {
-    union {
-        struct {
-            uint16_t length;
-            char buffer[MAX_UDP_FRAME_SIZE];
-        } raw;
-        char buffer[MAX_UDP_FRAME_SIZE];
-    };
+    uint16_t length;
+    char buffer[MAX_UDP_FRAME_SIZE];
 };
 #define MAX_WSS_PAYLOAD_SIZE MAX_UDP_FRAME_SIZE
 
@@ -168,9 +164,11 @@ void tunnel_ss(struct bufferevent *raw, struct evhttp_connection *wss);
 #define SOCK_TYPE_UDP "udp"
 #define IS_UDP(x) (x != NULL && !evutil_ascii_strcasecmp(x, SOCK_TYPE_UDP))
 
-void udp_send_cb(struct evbuffer *buf, const struct evbuffer_cb_info *info, void *arg);
+ssize_t udp_read(evutil_socket_t sock, struct udp_frame *udp_frame, struct sockaddr *sockaddr, ev_socklen_t *socklen);
 
-int udp_read_cb(evutil_socket_t sock, struct bufferevent *raw, struct sockaddr *sockaddr, ev_socklen_t *socklen);
+void udp_read_cb(struct evbuffer *buf, const struct evbuffer_cb_info *info, void *arg);
+
+void udp_send_cb(struct evbuffer *buf, const struct evbuffer_cb_info *info, void *arg);
 
 #ifdef HAVE_SSL_CTX_SET_KEYLOG_CALLBACK
 void ssl_keylog_callback(const SSL *ssl, const char *line);
