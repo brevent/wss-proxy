@@ -248,7 +248,7 @@ int init_event_signal(struct event_base *base, struct event **event_parent, stru
     signal(SIGUSR2, on_native_signal);
     signal(SIGPIPE, on_native_signal);
     *event_sigquit = evsignal_new(base, SIGQUIT, sigquit_cb, base);
-    if (!event_sigquit) {
+    if (!*event_sigquit) {
         LOGE("cannot event sigquit");
         return -1;
     } else {
