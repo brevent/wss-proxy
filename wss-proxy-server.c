@@ -107,7 +107,7 @@ static int do_websocket_handshake(struct evhttp_request *req, char *sec_websocke
     return 1;
 }
 
-static void udp_read_cb_server(evutil_socket_t sock, short event, void *ctx) {
+static void udp_read_cb_client(evutil_socket_t sock, short event, void *ctx) {
     struct bufferevent *raw = ctx;
     struct evhttp_connection *wss = get_wss(raw);
     if (event & EV_TIMEOUT) {
@@ -166,7 +166,7 @@ static struct bufferevent *init_udp_client(struct event_base *base, struct raw_s
     raw->input = evbuffer_new();
     raw->output = evbuffer_new();
     evbuffer_add_cb(raw->output, udp_send_cb, raw);
-    event_assign(&(raw->ev_read), base, sock, EV_READ | EV_PERSIST, udp_read_cb_server, raw);
+    event_assign(&(raw->ev_read), base, sock, EV_READ | EV_PERSIST, udp_read_cb_client, raw);
     event_add(&(raw->ev_read), &one_minute);
     return raw;
 error:

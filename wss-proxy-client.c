@@ -427,7 +427,7 @@ static void udp_timeout_cb(evutil_socket_t sock, short event, void *ctx) {
     }
 }
 
-static struct bufferevent_udp *init_udp_client(struct bufferevent_udp *key, struct udp_context *context,
+static struct bufferevent_udp *init_udp_server(struct bufferevent_udp *key, struct udp_context *context,
                                                evutil_socket_t sock, int port) {
     struct bufferevent_udp *data;
     struct bufferevent *raw;
@@ -461,7 +461,7 @@ static struct bufferevent_udp *init_udp_client(struct bufferevent_udp *key, stru
     return data;
 }
 
-static void udp_read_cb_client(evutil_socket_t sock, short event, void *ctx) {
+static void udp_read_cb_server(evutil_socket_t sock, short event, void *ctx) {
     struct udp_context *context = ctx;
     struct bufferevent_udp key, *data;
     struct udp_frame udp_frame;
@@ -474,7 +474,7 @@ static void udp_read_cb_client(evutil_socket_t sock, short event, void *ctx) {
         if ((size = udp_read(sock, &udp_frame, key.sockaddr, &(key.socklen))) < 0) {
             break;
         }
-        if ((data = init_udp_client(&key, context, sock, get_port(key.sockaddr))) == NULL) {
+        if ((data = init_udp_server(&key, context, sock, get_port(key.sockaddr))) == NULL) {
             break;
         }
         evbuffer_add(data->be.input, &udp_frame, size + UDP_FRAME_LENGTH_SIZE);
@@ -520,7 +520,7 @@ static int init_server_context(struct server_context *server_context, struct eve
     server_context->udp_context.base = base;
     server_context->udp_context.wss_context = wss_context;
 
-    server_context->udp_event = event_new(base, server_context->udp_sock, EV_READ | EV_PERSIST, udp_read_cb_client,
+    server_context->udp_event = event_new(base, server_context->udp_sock, EV_READ | EV_PERSIST, udp_read_cb_server,
                                           &(server_context->udp_context));
     if (!server_context->udp_event) {
         LOGE("cannot create event for %d", get_port(sockaddr));
