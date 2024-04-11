@@ -124,6 +124,10 @@ static void udp_read_cb_client(evutil_socket_t sock, short event, void *ctx) {
             if ((size = udp_read(sock, &udp_frame, (struct sockaddr *) &sockaddr, &socklen)) < 0) {
                 break;
             }
+            if (size == 0) {
+                LOGW("udp read empty from %d", get_port((const struct sockaddr *) &sockaddr));
+                continue;
+            }
             evbuffer_add(raw->input, &udp_frame, size + UDP_FRAME_LENGTH_SIZE);
             event_add(&(raw->ev_read), &one_minute);
         }

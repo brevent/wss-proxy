@@ -474,6 +474,10 @@ static void udp_read_cb_server(evutil_socket_t sock, short event, void *ctx) {
         if ((size = udp_read(sock, &udp_frame, key.sockaddr, &(key.socklen))) < 0) {
             break;
         }
+        if (size == 0) {
+            LOGW("udp read empty from %d", get_port(key.sockaddr));
+            continue;
+        }
         if ((data = init_udp_server(&key, context, sock, get_port(key.sockaddr))) == NULL) {
             break;
         }

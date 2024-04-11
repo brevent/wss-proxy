@@ -600,6 +600,10 @@ static void raw_forward_cb(struct bufferevent *raw, void *wss) {
             }
             total_size -= UDP_FRAME_LENGTH_SIZE;
             payload_size = htons(payload_size);
+            if (payload_size == 0) {
+                LOGW("payload size is 0");
+                continue;
+            }
         }
         size = evbuffer_remove(src, wss_frame_data.buffer, payload_size);
         if (size <= 0) {
