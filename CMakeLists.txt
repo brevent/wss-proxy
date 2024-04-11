@@ -23,6 +23,12 @@ endif()
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra -Werror")
 
+include(CheckSymbolExists)
+check_symbol_exists(syslog "syslog.h" HAVE_SYSLOG)
+if (HAVE_SYSLOG)
+    add_definitions(-DHAVE_SYSLOG)
+endif()
+
 include(CheckFunctionExists)
 
 find_package(OpenSSL 1.1.1 REQUIRED)

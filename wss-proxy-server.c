@@ -328,5 +328,6 @@ error:
     if (cfg) {
         event_config_free(cfg);
     }
+    close_syslog();
     return code;
 }

@@ -120,12 +120,14 @@ void log_callback(int severity, const char *msg) {
 }
 
 #ifndef NDEBUG
-static enum log_level log_level = DEBUG;
+static volatile int log_level = DEBUG;
 #else
-static enum log_level log_level = INFO;
+static volatile int log_level = INFO;
 #endif
 
-static void set_log_level(enum log_level level) {
+static volatile int log_to_syslog = -1;
+
+static void set_log_level(int level) {
     log_level = level;
 }
 
@@ -141,8 +143,30 @@ void init_log_level(const char *loglevel) {
     }
 }
 
-enum log_level get_log_level() {
+int get_log_level() {
     return log_level;
+}
+
+int use_syslog(void) {
+    if (log_to_syslog == -1) {
+#ifdef HAVE_SYSLOG
+        log_to_syslog = find_option(getenv("SS_PLUGIN_OPTIONS"), "syslog", "1") != NULL;
+        if (log_to_syslog) {
+            openlog(LOGGER_NAME, LOG_PID | LOG_CONS, LOG_DAEMON);
+        }
+#else
+        log_to_syslog = 0;
+#endif
+    }
+    return log_to_syslog;
+}
+
+void close_syslog(void) {
+#ifdef HAVE_SYSLOG
+    if (log_to_syslog) {
+        closelog();
+    }
+#endif
 }
 
 const char *find_option(const char *options, const char *key, const char *no_value) {

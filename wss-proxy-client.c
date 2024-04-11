@@ -655,5 +655,6 @@ error:
     if (wss_context.server.path) {
         free((char *) wss_context.server.path);
     }
+    close_syslog();
     return code;
 }

@@ -12,6 +12,11 @@
 #ifdef WSS_PROXY_CLIENT
 #include <openssl/lhash.h>
 #endif
+#ifdef HAVE_SYSLOG
+#include <syslog.h>
+#else
+#define syslog(x, y, ...) do {} while (0)
+#endif
 #include "ws-header.h"
 
 #ifndef WSS_PAYLOAD_SIZE
@@ -44,12 +49,17 @@
 
 #define TIME_FORMAT "%Y-%m-%d %H:%M:%S"
 
-enum log_level {
-    DEBUG,
-    INFO,
-    WARN,
-    ERROR,
-};
+#ifdef HAVE_SYSLOG
+#define DEBUG   LOG_DEBUG
+#define INFO    LOG_INFO
+#define WARN    LOG_WARNING
+#define ERROR   LOG_ERR
+#else
+#define DEBUG   7
+#define INFO    6
+#define WARN    4
+#define ERROR   3
+#endif
 
 #define MAX_UDP_FRAME_SIZE 65535
 #define UDP_FRAME_LENGTH_SIZE 2
@@ -109,18 +119,26 @@ void log_callback(int severity, const char *msg);
 
 void init_log_level(const char *loglevel);
 
-enum log_level get_log_level(void);
+int get_log_level(void);
 
-#define LOG(format, stream, level, ...)                                             \
-    do {                                                                            \
-        if (get_log_level() <= level) {                                             \
-            time_t now = time(NULL);                                                \
-            char timestr[20];                                                       \
-            strftime(timestr, 20, TIME_FORMAT, localtime(&now));                    \
-            fprintf(stream, " %s " #level " " LOGGER_NAME " " format "\n", timestr, \
-                        ## __VA_ARGS__);                                            \
-            fflush(stream);                                                         \
-        }                                                                           \
+int use_syslog(void);
+
+void close_syslog(void);
+
+#define LOG(format, stream, level, ...)                                         \
+    do {                                                                        \
+        if (get_log_level() >= level) {                                         \
+            if (use_syslog()) {                                                 \
+                syslog(level, format,  ## __VA_ARGS__);                         \
+            } else {                                                            \
+                time_t now = time(NULL);                                        \
+                char timestr[20];                                               \
+                strftime(timestr, 20, TIME_FORMAT, localtime(&now));            \
+                fprintf(stream, " %s " #level " " LOGGER_NAME " " format "\n",  \
+                        timestr, ## __VA_ARGS__);                               \
+                fflush(stream);                                                 \
+            }                                                                   \
+        }                                                                       \
     } while (0)
 
 #define LOGD(format, ...) LOG(format, stdout, DEBUG, ## __VA_ARGS__)
