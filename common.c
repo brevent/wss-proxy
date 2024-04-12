@@ -583,30 +583,47 @@ static void raw_forward_cb(struct bufferevent *raw, void *wss) {
         // should we use continuation fame?
         uint8_t *wss_header, wss_header_size;
         struct wss_frame_data {
-            char header[MAX_WS_HEADER_SIZE];
+            union {
+                char header[MAX_WS_HEADER_SIZE];
+                struct {
+                    char unused[MAX_WS_HEADER_SIZE - UDP_FRAME_LENGTH_SIZE];
+                    uint16_t length;
+                };
+            };
             char buffer[MAX_WSS_PAYLOAD_SIZE];
         } wss_frame_data;
-        int size, payload_size;
+        int size;
         if (raw->be_ops) {
-            payload_size = WSS_PAYLOAD_SIZE;
-        } else {
-            if (evbuffer_remove(src, &payload_size, UDP_FRAME_LENGTH_SIZE) != UDP_FRAME_LENGTH_SIZE) {
-                LOGE("cannot remove 2 from src for payload_size");
+            size = evbuffer_remove(src, wss_frame_data.buffer, WSS_PAYLOAD_SIZE);
+            if (size <= 0) {
+                LOGE("remove %d from src, total size: %d", size, (int) total_size);
                 break;
             }
-            total_size -= UDP_FRAME_LENGTH_SIZE;
-            payload_size = htons(payload_size);
-            if (payload_size == 0) {
-                LOGW("payload size is 0");
-                continue;
+            total_size -= size;
+        } else {
+            size_t udp_frame_size;
+            if (total_size < UDP_FRAME_LENGTH_SIZE) {
+                LOGW("total size too small: %d", (int) total_size);
+                break;
             }
+            if (evbuffer_copyout(src, &(wss_frame_data.length), UDP_FRAME_LENGTH_SIZE) != UDP_FRAME_LENGTH_SIZE) {
+                LOGE("cannot copy 2 from src for payload, total size: %d", (int) total_size);
+                break;
+            }
+            size = htons(wss_frame_data.length);
+            udp_frame_size = size + UDP_FRAME_LENGTH_SIZE;
+            if (total_size < udp_frame_size) {
+                LOGE("total size too small: %d, payload: %d", (int) total_size, (int) size);
+                break;
+            }
+            if (evbuffer_copyout(src, &(wss_frame_data.length), udp_frame_size) != (int) udp_frame_size) {
+                LOGE("cannot copy %d from src for wss_frame_data, total size: %d",
+                     (int) udp_frame_size, (int) total_size);
+                break;
+            }
+            evbuffer_drain(src, udp_frame_size);
+            total_size -= udp_frame_size;
         }
-        size = evbuffer_remove(src, wss_frame_data.buffer, payload_size);
-        if (size <= 0) {
-            LOGE("cannot remove %d from src", payload_size);
-            break;
-        }
-        total_size -= size;
         wss_header = build_ws_frame(OP_BINARY, &(wss_frame_data.buffer), (uint16_t) size, &wss_header_size);
         evbuffer_add(dst, wss_header, (uint16_t) size + wss_header_size);
     }
