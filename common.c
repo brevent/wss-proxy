@@ -326,14 +326,10 @@ static void send_pong(struct evbuffer *src, uint16_t payload_size, uint32_t mask
         char header[MAX_WS_HEADER_SIZE];
         char buffer[MAX_CONTROL_FRAME_SIZE];
     } wss_frame_pong;
-    uint16_t remain_size, size = 0;
+    uint16_t size = 0;
     if (payload_size > 0) {
-        size = evbuffer_remove(src, wss_frame_pong.buffer, MIN(MAX_CONTROL_FRAME_SIZE, payload_size));
-    }
-    if ((remain_size = payload_size - size) > 0) {
-        evbuffer_drain(src, remain_size);
-        LOGD("pong frame too large: %u", payload_size);
-        return;
+        size = evbuffer_copyout(src, wss_frame_pong.buffer, MIN(MAX_CONTROL_FRAME_SIZE, payload_size));
+        evbuffer_drain(src, payload_size);
     }
 #ifdef WSS_PROXY_CLIENT
     (void) mask_key;
