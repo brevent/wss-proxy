@@ -41,7 +41,9 @@ cmake --build build
 
 #### Options for `wss-proxy-client` only
 - `ws` (since 0.2.6, [e7b7f36](https://github.com/brevent/wss-proxy/commit/e7b7f36)), default `1` to use websocket after handshake, `0` to use raw shadowsocks after handshake
+  - don't use it if you're unsure
 - `extra-listen-port` (since 0.3.0, [689f0e7](https://github.com/brevent/wss-proxy/commit/689f0e7)), extra listen port for shadowsocks client without sip003u
+- `syslog` (since 0.3.3, [47d4681](https://github.com/brevent/wss-proxy/commit/47d4681)), log to syslog if supported
 
 ### Server
 
@@ -70,3 +72,4 @@ Unsupported options:
 #### Options for `wss-proxy-server` only
 - `udp-port`, udp port to shadowsocks server without sip003u
   - There is no `tcp-port`, which is environment `SS_LOCAL_PORT`.
+- `syslog` (since 0.3.3, [47d4681](https://github.com/brevent/wss-proxy/commit/47d4681)), log to syslog if supported
