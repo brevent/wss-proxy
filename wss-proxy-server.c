@@ -214,6 +214,14 @@ static void generic_request_handler(struct evhttp_request *req, void *ctx) {
     udp = IS_UDP(evhttp_find_header(evhttp_request_get_input_headers(req), X_SOCK_TYPE));
     if (udp) {
         raw = init_udp_client(base, raw_server_info);
+        if (raw->be_ops) {
+            LOGE("native udp bufferevent is not supported");
+            bufferevent_udp_free(raw);
+            if (raw->be_ops) {
+                free(raw);
+            }
+            goto error;
+        }
     } else {
         raw = init_tcp_client(base, raw_server_info);
     }
