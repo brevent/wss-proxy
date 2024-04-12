@@ -261,11 +261,14 @@ int main() {
     struct evhttp *http_server = NULL;
     const char *addr;
     int port;
+    struct sockaddr_storage sockaddr_storage;
+    int socklen;
+    struct evconnlistener *listener = NULL;
     struct raw_server_info raw_server_info;
 
     memset(&raw_server_info, 0, sizeof(raw_server_info));
     if (init_raw_info(&raw_server_info)) {
-        return 1;
+        goto error;
     }
     raw_server_info.socklen = sizeof(struct sockaddr_storage);
     if (evutil_parse_sockaddr_port(raw_server_info.addr, (struct sockaddr *) &(raw_server_info.sockaddr),
@@ -280,7 +283,7 @@ int main() {
     }
 
     if (init_ws_info(&addr, &port)) {
-        return 1;
+        goto error;
     }
 
     event_set_log_callback(log_callback);
@@ -306,8 +309,21 @@ int main() {
         LOGE("cannot create http server");
         goto error;
     }
-    if (evhttp_bind_socket(http_server, addr, (ev_uint16_t) port)) {
+    socklen = sizeof(struct sockaddr_storage);
+    if (evutil_parse_sockaddr_port(addr, (struct sockaddr *) &(sockaddr_storage), &socklen) < 0) {
+        LOGE("cannot parse %s", addr);
+        goto error;
+    }
+    set_port(&(sockaddr_storage), port);
+    listener = evconnlistener_new_bind(base, NULL, NULL, WSS_LISTEN_FLAGS, WSS_LISTEN_BACKLOG,
+                                       (const struct sockaddr *) &(sockaddr_storage), socklen);
+    if (listener == NULL) {
+        LOGE("cannot listen to %s:%d", addr, port);
+        goto error;
+    }
+    if (evhttp_bind_listener(http_server, listener) == NULL) {
         LOGE("cannot bind http server to %s:%u", addr, (uint16_t) port);
+        evconnlistener_free(listener);
         goto error;
     }
     evhttp_set_gencb(http_server, generic_request_handler, &raw_server_info);

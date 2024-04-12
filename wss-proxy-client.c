@@ -503,8 +503,8 @@ static void server_context_free(const struct server_context *server_context) {
 
 static int init_server_context(struct server_context *server_context, struct event_base *base,
                                struct wss_proxy_context *wss_context, struct sockaddr *sockaddr, int socklen) {
-    unsigned flags = LEV_OPT_CLOSE_ON_FREE | LEV_OPT_CLOSE_ON_EXEC | LEV_OPT_REUSEABLE;
-    server_context->listener = evconnlistener_new_bind(base, accept_conn_cb, wss_context, flags, -1,
+    server_context->listener = evconnlistener_new_bind(base, accept_conn_cb, wss_context,
+                                                       WSS_LISTEN_FLAGS, WSS_LISTEN_BACKLOG,
                                                        sockaddr, socklen);
     if (!server_context->listener) {
         LOGE("cannot listen to raw for %d", get_port(sockaddr));
