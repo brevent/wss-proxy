@@ -486,6 +486,15 @@ static void udp_read_cb_server(evutil_socket_t sock, short event, void *ctx) {
     }
 }
 
+static void free_udp(bufferevent_udp *udp) {
+    struct bufferevent *raw = (struct bufferevent *) udp;
+    LOGD("free udp for peer %d", get_peer_port(raw));
+    if (raw->errorcb != raw_event_cb) {
+        send_close(raw, CLOSE_GOING_AWAY);
+    }
+    raw->errorcb(raw, BEV_EVENT_EOF, get_wss(raw));
+}
+
 static void server_context_free(const struct server_context *server_context) {
     if (server_context->listener) {
         evconnlistener_free(server_context->listener);
@@ -494,6 +503,7 @@ static void server_context_free(const struct server_context *server_context) {
         evutil_closesocket(server_context->udp_sock);
     }
     if (server_context->udp_context.hash) {
+        lh_bufferevent_udp_doall(server_context->udp_context.hash, free_udp);
         lh_bufferevent_udp_free(server_context->udp_context.hash);
     }
     if (server_context->udp_event) {

@@ -566,7 +566,7 @@ static void close_wss(struct bufferevent *raw, enum close_reason close_reason, s
         struct bufferevent *tev = evhttp_connection_get_bufferevent(wss);
         bufferevent_setcb(tev, close_wss_data_cb, NULL, close_wss_event_cb, wss);
     } else {
-        LOGD("close wss %p as close was send", wss);
+        LOGD("close wss %p as close was sent", wss);
         evhttp_connection_free(wss);
     }
 }
