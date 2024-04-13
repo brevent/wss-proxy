@@ -38,6 +38,9 @@ void bufferevent_udp_free(struct bufferevent *raw) {
 #ifdef WSS_PROXY_CLIENT
     lh_bufferevent_udp_delete(((struct bufferevent_udp *) raw)->hash, ((struct bufferevent_udp *) raw));
 #endif
+#ifdef WSS_PROXY_SERVER
+    evutil_closesocket(((struct bufferevent_udp *) raw)->sock);
+#endif
     free(raw);
 }
 
