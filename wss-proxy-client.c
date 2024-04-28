@@ -16,6 +16,7 @@
 struct wss_server_info {
     uint8_t tls: 1;
     uint8_t ws: 1;
+    uint8_t ipv6: 1;
     uint16_t port;
     const char *addr;
     const char *host;
@@ -150,6 +151,11 @@ static int init_wss_addr(struct wss_server_info *server) {
         server->ws = 1;
     }
 
+    // ipv6
+    if ((value = find_option(options, "ipv6", "1")) != NULL) {
+        server->ipv6 = (int) strtol(value, NULL, 10);
+    }
+
     // strip
     server->host = strdup(server->host);
     if ((end = strchr(server->host, ';')) != NULL) {
@@ -173,7 +179,7 @@ static int init_wss_addr(struct wss_server_info *server) {
             wss = "ss";
         }
     }
-    LOGI("wss client %s:%d (%s://%s%s)", remote_host, port, wss, server->host, server->path);
+    LOGI("wss client%s %s:%d (%s://%s%s)", server->ipv6 ? "6" : "", remote_host, port, wss, server->host, server->path);
     if (server->ws && mux) {
         LOGW("mux %d is unsupported", mux);
     }
@@ -301,6 +307,10 @@ static struct evhttp_connection *connect_wss(struct wss_proxy_context *context, 
     if (!wss) {
         LOGE("cannot connect to wss for peer %d", port);
         goto error;
+    }
+
+    if (context->server.ipv6) {
+        evhttp_connection_set_family(wss, AF_INET6);
     }
 
     evhttp_connection_set_timeout(wss, WSS_TIMEOUT);
