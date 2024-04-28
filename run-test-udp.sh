@@ -15,7 +15,7 @@ else
     ssserver=./ssserver
 fi
 
-python3 ../testcase/udp-echo-server.py &
+/usr/bin/python3 ../testcase/udp-echo-server.py &
 echo_server_pid=$!
 
 $ssserver -c ../testcase/sip003u-server.json &
@@ -32,7 +32,7 @@ echo wss-proxy udp client - ss
 $sslocal -c ../testcase/sip003u-client-ss.json &
 lpid=$!
 sleep 1
-if ! python3 ../testcase/check-udp.py; then
+if ! /usr/bin/python3 ../testcase/check-udp.py; then
   exit 1
 fi
 
@@ -42,6 +42,6 @@ echo wss-proxy udp client - wss
 $sslocal -c ../testcase/sip003u-client-ws.json &
 lpid=$!
 sleep 1
-if ! python3 ../testcase/check-udp.py; then
+if ! /usr/bin/python3 ../testcase/check-udp.py; then
   exit 1
 fi
