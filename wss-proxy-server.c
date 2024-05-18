@@ -224,6 +224,7 @@ static void generic_request_handler(struct evhttp_request *req, void *ctx) {
         }
     } else {
         raw = init_tcp_client(base, raw_server_info);
+        bufferevent_setwatermark(raw, EV_READ, 0, 64 * 1024);
     }
     if (raw == NULL) {
         goto error;
