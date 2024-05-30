@@ -100,6 +100,15 @@ struct bufferevent_udp {
 #endif
 };
 
+struct bufferevent_context {
+    void *ev_writecb;
+    void (*free)(struct bufferevent_context *ptr);
+};
+
+void bufferevent_set_context(struct bufferevent *bev, struct bufferevent_context *context);
+
+struct bufferevent_context *bufferevent_get_context(struct bufferevent *bev);
+
 void safe_bufferevent_free(struct bufferevent *bufev);
 
 void bufferevent_udp_free(struct bufferevent *bufev);
@@ -161,7 +170,8 @@ int calc_websocket_accept(const char *websocket_key, char *websocket_accept);
 
 void raw_event_cb(struct bufferevent *raw, short event, void *wss);
 
-void tunnel_wss(struct bufferevent *raw, struct bufferevent *tev);
+
+void tunnel_wss(struct bufferevent *raw, struct bufferevent *tev, bufferevent_filter_cb output_filter);
 
 /**
  * @return whether close frame is sent

@@ -10,24 +10,9 @@
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include "common.h"
+#include "wss-client.h"
 
 #define bufferevent_free safe_bufferevent_free
-
-struct wss_server_info {
-    uint8_t tls: 1;
-    uint8_t ws: 1;
-    uint8_t ipv6: 1;
-    uint16_t port;
-    const char *addr;
-    const char *host;
-    const char *path;
-};
-
-struct wss_proxy_context {
-    SSL_CTX *ssl_ctx;
-    struct wss_server_info server;
-    char user_agent[80];
-};
 
 struct udp_context {
     LHASH_OF(bufferevent_udp) *hash;
@@ -132,6 +117,14 @@ static int init_wss_addr(struct wss_server_info *server) {
     if ((value = find_option(options, "tls", "1")) != NULL) {
         server->tls = (int) strtol(value, NULL, 10);
     }
+    // http2
+    if (find_option(options, "http2", "1")) {
+        server->http2 = 1;
+    }
+    // http3
+    if (find_option(options, "http3", "1")) {
+        server->http3 = 1;
+    }
     // loglevel
     if ((value = find_option(options, "loglevel", NULL)) != NULL) {
         init_log_level(value);
@@ -166,6 +159,20 @@ static int init_wss_addr(struct wss_server_info *server) {
         *end = '\0';
     }
 
+    if (server->http3 && server->http2) {
+        server->http2 = 0;
+    }
+
+    if (server->http3 || server->http2) {
+        server->tls = 1;
+        server->ws = 1;
+        server->mux = 1;
+        LOGI("%s (tls%s ws)", server->http3 ? "http3" : "http2", server->mux ? " mux" : "");
+    } else if (server->ws && mux) {
+        server->mux = 0;
+        LOGW("mux %d is unsupported", mux);
+    }
+
     if (server->ws) {
         if (server->tls) {
             wss = "wss";
@@ -180,9 +187,6 @@ static int init_wss_addr(struct wss_server_info *server) {
         }
     }
     LOGI("wss client%s %s:%d (%s://%s%s)", server->ipv6 ? "6" : "", remote_host, port, wss, server->host, server->path);
-    if (server->ws && mux) {
-        LOGW("mux %d is unsupported", mux);
-    }
     return 0;
 }
 
@@ -210,7 +214,7 @@ static void http_response_cb(struct bufferevent *tev, void *raw) {
         if (strcasestr(buffer, X_UPGRADE ": " SHADOWSOCKS "\r\n")) {
             tunnel_ss(raw, tev);
         } else {
-            tunnel_wss(raw, tev);
+            tunnel_wss(raw, tev, NULL);
         }
     } else {
         buffer[0xc] = '\0';
@@ -246,83 +250,235 @@ static size_t build_http_request(struct wss_proxy_context *context, int udp, cha
     return request - start;
 }
 
-static void tev_raw_event_cb(struct bufferevent *tev, short event, void *raw) {
-    uint16_t port;
+static enum bufferevent_filter_result wss_output_filter_v2(struct evbuffer *src, struct evbuffer *dst,
+                                                           ev_ssize_t dst_limit, enum bufferevent_flush_mode mode,
+                                                           void *tev) {
+    size_t length, frame_header_length;
+    uint8_t buffer[9 + MAX_WS_HEADER_SIZE + MAX_WSS_PAYLOAD_SIZE];
+    struct bufferevent_context_ssl *context_ssl;
 
-    port = get_peer_port(raw);
-    if (event & (BEV_EVENT_EOF | BEV_EVENT_ERROR)) {
-        LOGD("connection %u closed for wss %p, event: 0x%02x", port, tev, event);
-        bufferevent_free(tev);
-        bufferevent_free(raw);
+    (void) dst_limit;
+    (void) mode;
+    context_ssl = (struct bufferevent_context_ssl *) bufferevent_get_context(tev);
+    if (context_ssl == NULL) {
+        return BEV_ERROR;
     }
-    if (event & (BEV_EVENT_CONNECTED)) {
-        LOGD("connection %u connected for wss %p, event: 0x%02x", port, tev, event);
+    if (evbuffer_get_length(src) > MAX_WS_HEADER_SIZE + MAX_WSS_PAYLOAD_SIZE) {
+        return BEV_ERROR;
     }
-    if (event & BEV_EVENT_TIMEOUT) {
-        LOGW("connection %u timeout for wss %p, event: 0x%02x", port, tev, event);
-        bufferevent_free(tev);
-        bufferevent_free(raw);
-    }
+    length = evbuffer_copyout(src, &buffer[9], MAX_WS_HEADER_SIZE + MAX_WSS_PAYLOAD_SIZE);
+    frame_header_length = build_http2_frame(buffer, length, 0, 0, context_ssl->stream_id);
+    evbuffer_add(dst, buffer, length + frame_header_length);
+    evbuffer_drain(src, length);
+    return BEV_OK;
 }
 
-static struct bufferevent *connect_wss(struct wss_proxy_context *context, struct bufferevent *raw, uint16_t port) {
-    SSL *ssl = NULL;
+static void http_response_cb_v2(struct bufferevent *tev, void *raw) {
+    size_t length, header_length;
+    char buffer[9];
+    struct evbuffer *input;
+
+    input = bufferevent_get_input(tev);
+    length = evbuffer_get_length(input);
+    if (length < sizeof(buffer)) {
+        return;
+    }
+    evbuffer_copyout(input, buffer, sizeof(buffer));
+    header_length = (buffer[0] << 16) | (buffer[1] << 8) | buffer[2];
+    if (length < 9 + header_length) {
+        return;
+    }
+    evbuffer_drain(input, 9 + header_length);
+    if (buffer[3] != 0x1) {
+        return;
+    }
+    if (buffer[4] & 0x1) {
+        LOGD("stream is end");
+        goto error;
+    }
+    LOGD("wss is ready for peer %d, remain: %d", get_peer_port(raw), (int) evbuffer_get_length(input));
+    tunnel_wss(raw, tev, wss_output_filter_v2);
+    return;
+error:
+    bufferevent_free(raw);
+    bufferevent_free(tev);
+}
+
+static size_t build_http_request_v2(struct wss_proxy_context *context, int udp, char *request, uint32_t stream_id) {
+    uint8_t *buffer, *header;
+    size_t header_length;
+
+    buffer = (uint8_t *) request;
+
+    header = buffer;
+    // reserved for headers
+    buffer += 9;
+
+    // :method = CONNECT
+    buffer = memcpy(buffer, "\x02\x07" "CONNECT", 9) + 9;
+    // :protocol = websocket
+    buffer = memcpy(buffer, "\x00\x09:protocol\x09websocket", 21) + 21;
+    // :scheme = https
+    *buffer++ = 0x87;
+#define min(a, b) ((a > b) ? (b) : (a))
+    // :path = ..., max 127
+    buffer += snprintf((char *) buffer, 0x7f + 2, "\x04%c%s",
+                       (char) min(strlen(context->server.path), 0x7f), context->server.path);
+    // :authority = ..., max 127
+    buffer += snprintf((char *) buffer, 0x7f + 2, "\x01%c%s",
+                       (char) min(strlen(context->server.host), 0x7f), context->server.host);
+    // sec-websocket-version = 13
+    buffer = memcpy(buffer, "\x00\x15sec-websocket-version\x02\x31\x33", 26) + 26;
+    // user-agent = ..., max 127
+    buffer += snprintf((char *) buffer, 0x7f + 2, "\x0f\x2b%c%s",
+                       (char) min(strlen(context->user_agent), 0x7f),
+                       context->user_agent);
+    if (udp) {
+        buffer = memcpy(buffer, "\x00\x0bx-sock-type\x03udp", 17) + 17;
+    }
+    header_length = buffer - header - 9;
+    build_http2_frame(header, header_length, 1, 4, stream_id);
+    buffer += build_http2_frame(buffer, 0x4, 0x8, 0, stream_id);
+    memcpy(buffer, "\x7f\xff\x00\x00", 4);
+    buffer += 4;
+    return (char *) buffer - request;
+}
+
+
+static enum bufferevent_filter_result wss_output_filter_v3(struct evbuffer *src, struct evbuffer *dst,
+                                                           ev_ssize_t dst_limit, enum bufferevent_flush_mode mode,
+                                                           void *tev) {
+    size_t length, frame_header_length;
+    uint8_t buffer[5 + MAX_WS_HEADER_SIZE + MAX_WSS_PAYLOAD_SIZE];
+
+    (void) dst_limit;
+    (void) mode;
+    (void) tev;
+    if (evbuffer_get_length(src) > MAX_WS_HEADER_SIZE + MAX_WSS_PAYLOAD_SIZE) {
+        return BEV_ERROR;
+    }
+    length = evbuffer_copyout(src, &buffer[5], MAX_WS_HEADER_SIZE + MAX_WSS_PAYLOAD_SIZE);
+    frame_header_length = build_http3_frame(buffer, 0, length);
+    if (frame_header_length == 0) {
+        return BEV_ERROR;
+    }
+    if (frame_header_length != 5) {
+        memmove(buffer + (5 - frame_header_length), buffer, frame_header_length);
+    }
+    evbuffer_add(dst, buffer + (5 - frame_header_length), length + frame_header_length);
+    evbuffer_drain(src, length);
+    return BEV_OK;
+}
+
+static void http_response_cb_v3(struct bufferevent *tev, void *raw) {
+    size_t length, frame_length;
+    uint8_t buffer[9];
+    struct evbuffer *input;
+
+    input = bufferevent_get_input(tev);
+    frame_length = evbuffer_copyout(input, buffer, sizeof(buffer));
+    frame_length = parse_http3_frame(buffer, frame_length, NULL);
+    length = evbuffer_get_length(input);
+    if (frame_length == 0 || length < frame_length) {
+        return;
+    }
+    if (buffer[0] != 0x1) {
+        LOGW("invalid frame %d, expect headers (0x1)", buffer[0]);
+        goto error;
+    }
+    if (frame_length != length) {
+        LOGW("invalid response, frame length %d, headers length: %d",
+             (int) frame_length, (int) length);
+        goto error;
+    }
+    evbuffer_drain(input, frame_length);
+    LOGD("wss is ready for peer %d, remain: %d", get_peer_port(raw), (int) evbuffer_get_length(input));
+    tunnel_wss(raw, tev, wss_output_filter_v3);
+    return;
+error:
+    bufferevent_free(raw);
+    bufferevent_free(tev);
+}
+
+static size_t build_http_request_v3(struct wss_proxy_context *context, int udp, char *request) {
+    uint8_t *buffer;
+    size_t length;
+    buffer = (uint8_t *) request;
+    *buffer++ = 0x01; // headers frame
+    buffer += 2;      // reserve for length
+    *buffer++ = 0;
+    *buffer++ = 0;
+    // :method = CONNECT
+    *buffer++ = 0xc0 | 15;
+    // :protocol = websocket
+    buffer = memcpy(buffer, "\x27\x02:protocol\x09websocket", 21) + 21;
+    // :scheme = https
+    *buffer++ = 0xc0 | 23;
+#define min(a, b) ((a > b) ? (b) : (a))
+    // :path = ..., max 127
+    buffer += snprintf((char *) buffer, 0x7f + 2, "\x51%c%s",
+                       (char) min(strlen(context->server.path), 0x7f), context->server.path);
+    // :authority = ..., max 127
+    buffer += snprintf((char *) buffer, 0x7f + 2, "\x50%c%s",
+                       (char) min(strlen(context->server.host), 0x7f), context->server.host);
+    // sec-websocket-version = 13
+    buffer = memcpy(buffer, "\x27\x0esec-websocket-version\x02\x31\x33", 26) + 26;
+    // user-agent = ..., max 127
+    buffer += snprintf((char *) buffer, 0x7f + 3, "\x5f\x50%c%s",
+                       (char) min(strlen(context->user_agent), 0x7f),
+                       context->user_agent);
+    if (udp) {
+        buffer = memcpy(buffer, "\x27\x04x-sock-type\x03udp", 17) + 17;
+    }
+    length = (char *) buffer - request - 3;
+    if (length < 64) {
+        request[1] = (char) length;
+        memmove(&request[2], &request[3], length);
+        length += 2;
+    } else {
+        request[1] = (char) (length >> 8 | 0x40);
+        request[2] = (char) (length & 0xff);
+        length += 3;
+    }
+    return length;
+}
+
+static void tev_raw_event_cb(struct bufferevent *tev, short event, void *raw) {
+    return raw_event_cb(raw, event, tev);
+}
+
+static struct bufferevent *connect_wss(struct wss_proxy_context *context, struct bufferevent *raw) {
     size_t length;
     char request[1024];
-    struct bufferevent *tev = NULL;
-    struct event_base *base;
-    struct timeval tv = {10, 0};
+    struct bufferevent *tev;
+    bufferevent_data_cb cb;
+    struct timeval tv = {WSS_TIMEOUT, 0};
 
-    base = bufferevent_get_base(raw);
-    if (context->server.tls) {
-        ssl = SSL_new(context->ssl_ctx);
-        if (!ssl) {
-            LOGE("cannot create ssl for peer %d", port);
-            goto error;
-        }
-
-        if (!SSL_set_tlsext_host_name(ssl, context->server.host)) {
-            LOGE("cannot set sni extension for peer %d", port);
-            goto error;
-        }
-        if (!SSL_set1_host(ssl, context->server.host)) {
-            LOGE("cannot set certificate verification hostname for peer %d", port);
-            goto error;
-        }
-        tev = bufferevent_openssl_socket_new(base, -1, ssl, BUFFEREVENT_SSL_CONNECTING, BEV_OPT_CLOSE_ON_FREE);
-    } else {
-        tev = bufferevent_socket_new(base, -1, BEV_OPT_CLOSE_ON_FREE);
-    }
-
+    tev = bufferevent_new(context, raw);
     if (!tev) {
-        LOGE("cannot create wss for peer %d", port);
-        goto error;
-    }
-    bufferevent_set_timeouts(tev, &tv, &tv);
-    if (bufferevent_socket_connect_hostname(tev, NULL,
-                                            context->server.ipv6 ? AF_INET6 : AF_UNSPEC,
-                                            context->server.addr, context->server.port)) {
-        LOGE("cannot connect server at %s:%u", context->server.addr, context->server.port);
-        goto error;
+        return NULL;
     }
     if (raw->be_ops) {
         bufferevent_setcb(raw, NULL, NULL, raw_event_cb, tev);
     } else {
         raw->cbarg = tev;
     }
-    length = build_http_request(context, !raw->be_ops, request);
-    bufferevent_setcb(tev, http_response_cb, NULL, tev_raw_event_cb, raw);
+    if (context->server.http3) {
+        length = build_http_request_v3(context, !raw->be_ops, request);
+        cb = http_response_cb_v3;
+    } else if (context->server.http2) {
+        uint32_t stream_id = ((struct bufferevent_context_ssl *) bufferevent_get_context(tev))->stream_id;
+        length = build_http_request_v2(context, !raw->be_ops, request, stream_id);
+        cb = http_response_cb_v2;
+    } else {
+        length = build_http_request(context, !raw->be_ops, request);
+        cb = http_response_cb;
+    }
+    bufferevent_set_timeouts(tev, &tv, &tv);
+    bufferevent_setcb(tev, cb, NULL, tev_raw_event_cb, raw);
     bufferevent_enable(tev, EV_READ | EV_WRITE);
     bufferevent_write(tev, request, length);
     return tev;
-error:
-    if (ssl) {
-        SSL_free(ssl);
-    }
-    if (tev) {
-        bufferevent_free(tev);
-    }
-    return NULL;
 }
 
 static void accept_conn_cb(struct evconnlistener *listener, evutil_socket_t fd,
@@ -339,7 +495,7 @@ static void accept_conn_cb(struct evconnlistener *listener, evutil_socket_t fd,
     }
     port = get_port(address);
     LOGD("new connection from %d", port);
-    if (!connect_wss(ctx, raw, port)) {
+    if (!connect_wss(ctx, raw)) {
         goto error;
     }
     return;
@@ -408,7 +564,7 @@ static struct bufferevent_udp *init_udp_server(struct bufferevent_udp *key, stru
     data->hash = context->hash;
     raw = (struct bufferevent *) data;
     raw->ev_base = context->base;
-    if (!connect_wss(context->wss_context, raw, port)) {
+    if (!connect_wss(context->wss_context, raw)) {
         LOGE("cannot connect to wss for peer %d", port);
         free(data);
         return NULL;
@@ -525,7 +681,16 @@ int main() {
     }
 
     if (wss_context.server.tls) {
-        wss_context.ssl_ctx = SSL_CTX_new(TLS_client_method());
+        if (wss_context.server.http3) {
+#ifdef HAVE_OSSL_QUIC_CLIENT_METHOD
+            wss_context.ssl_ctx = SSL_CTX_new(OSSL_QUIC_client_method());
+#else
+            LOGE("http3 is unsupported");
+            return 1;
+#endif
+        } else {
+            wss_context.ssl_ctx = SSL_CTX_new(TLS_client_method());
+        }
         if (!wss_context.ssl_ctx) {
             LOGE("cannot create ssl context");
             return 1;
@@ -535,7 +700,8 @@ int main() {
             LOGE("cannot set default trusted certificate store");
             return 1;
         }
-        if (!SSL_CTX_set_min_proto_version(wss_context.ssl_ctx, TLS1_2_VERSION)) {
+        if (!wss_context.server.http3
+            && !SSL_CTX_set_min_proto_version(wss_context.ssl_ctx, TLS1_2_VERSION)) {
             LOGE("cannot set minimum TLS to 1.2");
             return 1;
         }
@@ -607,6 +773,7 @@ int main() {
 
     code = 0;
 error:
+    free_context_ssl(&wss_context);
     if (event_parent) {
         event_free(event_parent);
     }

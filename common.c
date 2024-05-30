@@ -28,6 +28,11 @@ static void close_wss(struct bufferevent *tev, enum close_reason close_reason, s
 void safe_bufferevent_free(struct bufferevent *bev) {
     LOGD("free %p", bev);
     if (bev->be_ops) {
+        struct bufferevent_context *context = (struct bufferevent_context *) bev->wm_write.low;
+        if (context != NULL && context->free != NULL) {
+            context->free(context);
+            bev->wm_write.low = (size_t) NULL;
+        }
         bufferevent_free(bev);
     } else {
         bufferevent_udp_free(bev);
@@ -53,6 +58,28 @@ void bufferevent_udp_free(struct bufferevent *raw) {
     evutil_closesocket(((struct bufferevent_udp *) raw)->sock);
 #endif
     free(raw);
+}
+
+static struct bufferevent *get_underlying(struct bufferevent *bev) {
+    struct bufferevent *underlying;
+    underlying = bufferevent_get_underlying(bev);
+    if (underlying == NULL) {
+        return bev;
+    } else {
+        return get_underlying(underlying);
+    }
+}
+
+void bufferevent_set_context(struct bufferevent *bev, struct bufferevent_context *context) {
+    struct bufferevent *underlying = get_underlying(bev);
+    if (context && underlying->ev_write.ev_evcallback.evcb_cb_union.evcb_callback == context->ev_writecb) {
+        underlying->wm_write.low = (size_t) context;
+    }
+}
+
+struct bufferevent_context *bufferevent_get_context(struct bufferevent *bev) {
+    struct bufferevent *underlying = get_underlying(bev);
+    return (void *) underlying->wm_write.low;
 }
 
 uint16_t get_peer_port(struct bufferevent *bev) {
@@ -732,11 +759,13 @@ static void wss_event_cb(struct bufferevent *wev, short event, void *raw) {
 #endif
 }
 
-void tunnel_wss(struct bufferevent *raw, struct bufferevent *tev) {
+void tunnel_wss(struct bufferevent *raw, struct bufferevent *tev, bufferevent_filter_cb output_filter) {
     struct bufferevent *wev;
-    bufferevent_filter_cb tev_input_filter;
+    bufferevent_filter_cb tev_input_filter, tev_output_filter;
+
     tev_input_filter = raw->be_ops ? wss_input_filter : wss_input_filter_udp;
-    wev = bufferevent_filter_new(tev, tev_input_filter, wss_output_filter, 0, NULL, tev);
+    tev_output_filter = output_filter ? output_filter : wss_output_filter;
+    wev = bufferevent_filter_new(tev, tev_input_filter, tev_output_filter, 0, NULL, tev);
     LOGD("wev: %p, tev: %p, raw: %p", wev, tev, raw);
 
     bufferevent_enable(wev, EV_READ | EV_WRITE);

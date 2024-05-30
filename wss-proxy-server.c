@@ -262,7 +262,7 @@ static void http_request_cb(struct bufferevent *tev, void *ctx) {
     if (ss) {
         tunnel_ss(raw, tev);
     } else {
-        tunnel_wss(raw, tev);
+        tunnel_wss(raw, tev, NULL);
     }
     return;
 error:
