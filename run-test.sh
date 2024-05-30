@@ -60,7 +60,7 @@ function cleanup() {
 trap cleanup SIGINT SIGTERM ERR EXIT
 
 echo wss-proxy client - v2ray-plugin server
-ss-local -l $lport -s 127.0.0.1 -p $sport -m chacha20-ietf-poly1305 -k sip003 --plugin ./wss-proxy-client --plugin-opts "mux=0" &
+ss-local -l $lport -s 127.0.0.1 -p $sport -m chacha20-ietf-poly1305 -k sip003 --plugin ./wss-proxy-client --plugin-opts "mux=0;loglevel=debug" &
 lpid=$!
 ss-server -s 127.0.0.1 -p $sport -m chacha20-ietf-poly1305 -k sip003 --plugin $v2ray_plugin --plugin-opts "server;mux=0" &
 spid=$!
@@ -74,7 +74,7 @@ sleep 1
 kill $spid
 sleep 1
 echo wss-proxy client - wss-proxy server
-ss-server -s 127.0.0.1 -p $sport -m chacha20-ietf-poly1305 -k sip003 --plugin ./wss-proxy-server --plugin-opts "mux=0" &
+ss-server -s 127.0.0.1 -p $sport -m chacha20-ietf-poly1305 -k sip003 --plugin ./wss-proxy-server --plugin-opts "mux=0;loglevel=debug" &
 spid=$!
 sleep 1
 if ! check; then
@@ -86,7 +86,7 @@ sleep 1
 kill $lpid
 sleep 1
 echo v2ray-plugin client - wss-proxy server
-ss-local -l $lport -s 127.0.0.1 -p $sport -m chacha20-ietf-poly1305 -k sip003 --plugin $v2ray_plugin --plugin-opts "mux=0" &
+ss-local -l $lport -s 127.0.0.1 -p $sport -m chacha20-ietf-poly1305 -k sip003 --plugin $v2ray_plugin --plugin-opts "mux=0;loglevel=debug" &
 lpid=$!
 sleep 1
 if ! check; then
@@ -98,7 +98,7 @@ sleep 1
 kill $lpid
 sleep 1
 echo wss-proxy client - wss-proxy server - ss
-ss-local -l $lport -s 127.0.0.1 -p $sport -m chacha20-ietf-poly1305 -k sip003 --plugin ./wss-proxy-client --plugin-opts "mux=0;ws=0" &
+ss-local -l $lport -s 127.0.0.1 -p $sport -m chacha20-ietf-poly1305 -k sip003 --plugin ./wss-proxy-client --plugin-opts "mux=0;ws=0;loglevel=debug" &
 lpid=$!
 sleep 1
 if ! check; then

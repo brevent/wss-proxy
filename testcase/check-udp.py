@@ -6,6 +6,7 @@ if __name__ == '__main__':
     for x in range(4):
         sock = socks.socksocket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.set_proxy(socks.SOCKS5, "localhost", 1081)
+        sock.settimeout(10)
         reqs = []
         for y in range(10):
             data = ("deadbeef_%d_%d_1" % (x, y))
@@ -36,7 +37,11 @@ if __name__ == '__main__':
                 print('length %d ko' % len(req))
                 sock.close()
                 break
-            (res, addr) = sock.recvfrom(65535)
+            try:
+                (res, addr) = sock.recvfrom(65535)
+            except socket.timeout:
+                print('length %d ko (timeout)' % len(req))
+                raise
             print('length %d ok' % len(req))
             if req != res:
                 raise ValueError()
