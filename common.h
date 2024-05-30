@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <time.h>
+#include <event2/buffer.h>
 #include <event2/bufferevent.h>
 #include <event2/bufferevent_struct.h>
 #include <event2/http.h>
@@ -109,13 +110,7 @@ void bufferevent_udp_free(struct bufferevent *bufev);
 #define EVUTIL_ERR_RW_RETRIABLE(e) ((e) == WSAEINTR || (e) == WSAEWOULDBLOCK)
 #endif
 
-#ifdef WSS_PROXY_CLIENT
 uint16_t get_peer_port(struct bufferevent *bev);
-#endif
-
-#ifdef WSS_PROXY_SERVER
-uint16_t get_http_port(struct evhttp_connection *evcon);
-#endif
 
 uint16_t get_port(const struct sockaddr *sockaddr);
 
@@ -162,11 +157,11 @@ int is_websocket_key(const char *websocket_key);
 
 int calc_websocket_accept(const char *websocket_key, char *websocket_accept);
 
-#define get_wss(raw) ((struct evhttp_connection *) (((struct bufferevent *) raw)->cbarg))
+#define get_cbarg(bev) (((struct bufferevent *) bev)->cbarg)
 
 void raw_event_cb(struct bufferevent *raw, short event, void *wss);
 
-void tunnel_wss(struct bufferevent *raw, struct evhttp_connection *wss);
+void tunnel_wss(struct bufferevent *raw, struct bufferevent *tev);
 
 /**
  * @return whether close frame is sent
@@ -181,12 +176,15 @@ void set_ping_timeout(struct bufferevent *wev, int sec);
 
 #define X_UPGRADE "X-Upgrade"
 #define SHADOWSOCKS "shadowsocks"
-#define IS_SHADOWSOCKS(x) (x != NULL && !evutil_ascii_strcasecmp(x, SHADOWSOCKS))
-void tunnel_ss(struct bufferevent *raw, struct evhttp_connection *wss);
+void tunnel_ss(struct bufferevent *raw, struct bufferevent *tev);
 
 #define X_SOCK_TYPE "X-Sock-Type"
 #define SOCK_TYPE_UDP "udp"
-#define IS_UDP(x) (x != NULL && !evutil_ascii_strcasecmp(x, SOCK_TYPE_UDP))
+
+#define append_line(request, x) do { \
+    memcpy(request, (x), sizeof(x) - 1); \
+    request += sizeof(x) - 1; \
+} while (0)
 
 ssize_t udp_read(evutil_socket_t sock, struct udp_frame *udp_frame, struct sockaddr *sockaddr, ev_socklen_t *socklen);
 

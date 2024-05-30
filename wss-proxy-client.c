@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -5,7 +6,6 @@
 #include <unistd.h>
 #include <event2/buffer.h>
 #include <event2/bufferevent_ssl.h>
-#include <event2/http.h>
 #include <event2/listener.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
@@ -89,8 +89,8 @@ static int init_raw_addr(struct sockaddr_storage *sockaddr, int *socklen) {
 
 static int init_wss_addr(struct wss_server_info *server) {
     int port, mux;
-    char *end, *wss;
-    const char *value;
+    char *end;
+    const char *value, *wss;
     const char *remote_host = getenv("SS_REMOTE_HOST");
     const char *remote_port = getenv("SS_REMOTE_PORT");
     const char *options = getenv("SS_PLUGIN_OPTIONS");
@@ -186,97 +186,94 @@ static int init_wss_addr(struct wss_server_info *server) {
     return 0;
 }
 
-static int is_websocket_handshake(struct evhttp_request *req) {
-    const char *accept;
-    const char *key;
-    char base64_accept[29];
-    key = evhttp_find_header(evhttp_request_get_output_headers(req), "Sec-WebSocket-Key");
-    accept = evhttp_find_header(evhttp_request_get_input_headers(req), "Sec-WebSocket-Accept");
-    if (is_websocket_key(key)
-        && calc_websocket_accept(key, base64_accept) > 0
-        && strcmp(accept, base64_accept) == 0) {
-        return 1;
-    }
-    LOGW("hand shake fail, key: %s, accept: %s", key, accept);
-    return 0;
-}
+static void http_response_cb(struct bufferevent *tev, void *raw) {
+    size_t length;
+    char buffer[1024];
+    struct evbuffer *input;
 
-static void http_error_cb(enum evhttp_request_error error, void *raw) {
-    int socket_error = EVUTIL_SOCKET_ERROR();
-    uint16_t port = get_peer_port(raw);
-    switch (error) {
-        case EVREQ_HTTP_TIMEOUT:
-            LOGE("http timeout for peer %d", port);
-            break;
-        case EVREQ_HTTP_EOF:
-            LOGE("http eof for peer %d", port);
-            break;
-        case EVREQ_HTTP_INVALID_HEADER:
-            LOGE("http invalid header for peer %d", port);
-            break;
-        case EVREQ_HTTP_BUFFER_ERROR:
-            LOGE("http buffer error for peer %d", port);
-            break;
-        case EVREQ_HTTP_REQUEST_CANCEL:
-            LOGE("http request cancel for peer %d", port);
-            break;
-        case EVREQ_HTTP_DATA_TOO_LONG:
-            LOGE("http data too long for peer %d", port);
-            break;
-        default:
-            LOGE("http unknown reason %d for peer %d", error, port);
-            break;
+    memset(buffer, 0, sizeof(buffer));
+    input = bufferevent_get_input(tev);
+    length = evbuffer_get_length(input);
+    if (length == 0) {
+        return;
     }
-    EVUTIL_SET_SOCKET_ERROR(socket_error);
-}
-
-static void show_http_error(struct bufferevent *raw, struct evhttp_connection *wss, int socket_error, int show_unknown) {
-    unsigned long tls_error;
-    char error_buffer[256];
-    uint16_t port = get_peer_port(raw);
-    if ((tls_error = bufferevent_get_openssl_error(evhttp_connection_get_bufferevent(wss)))) {
-        memset(error_buffer, 0, sizeof(error_buffer));
-        ERR_error_string_n(tls_error, error_buffer, sizeof(error_buffer));
-        LOGE("tls fail for peer %d: %s", port, error_buffer);
-    } else if (socket_error == EWOULDBLOCK) {
-        LOGE("wss fail for peer %d: socket timeout", port);
-    } else if (socket_error) {
-        LOGE("wss fail for peer %d: %s", port, evutil_socket_error_to_string(socket_error));
-    } else if (show_unknown) {
-        LOGE("wss fail for peer %d: unknown reason", port);
+    evbuffer_copyout(input, buffer, sizeof(buffer));
+    if (strstr(buffer, "\r\n\r\n") == NULL) {
+        LOGW("uncompleted response: %s", buffer);
+        return;
     }
-}
-
-static void http_request_cb(struct evhttp_request *req, void *raw) {
-    struct evhttp_connection *wss = get_wss(raw);
-    int socket_error = EVUTIL_SOCKET_ERROR();
-    int status = req == NULL ? -1 : evhttp_request_get_response_code(req);
-    if (status == 101 && is_websocket_handshake(req)) {
+    evbuffer_drain(input, length);
+    // HTTP/1.1 xxx
+    // 0123456789abc
+    if (memcmp(&buffer[9], "101 ", 4) == 0) {
         LOGD("wss is ready for peer %d", get_peer_port(raw));
-        if (IS_SHADOWSOCKS(evhttp_find_header(evhttp_request_get_input_headers(req), X_UPGRADE))) {
-            tunnel_ss(raw, wss);
+        if (strcasestr(buffer, X_UPGRADE ": " SHADOWSOCKS "\r\n")) {
+            tunnel_ss(raw, tev);
         } else {
-            tunnel_wss(raw, wss);
+            tunnel_wss(raw, tev);
         }
     } else {
-        if (status > 0) {
-            LOGE("wss fail for peer %d, status: %d", get_peer_port(raw), status);
-        } else {
-            show_http_error(raw, wss, socket_error, req != NULL);
-        }
+        buffer[0xc] = '\0';
+        LOGE("wss fail for peer %d, status: %s", get_peer_port(raw), &buffer[9]);
         bufferevent_free(raw);
-        evhttp_connection_free(wss);
+        bufferevent_free(tev);
     }
 }
 
-static struct evhttp_connection *connect_wss(struct wss_proxy_context *context, struct event_base *base,
-                                             struct bufferevent *raw, uint16_t port) {
-    SSL *ssl = NULL;
-    struct bufferevent *tev = NULL;
-    struct evhttp_connection *wss = NULL;
-    struct evkeyvalq *output_headers = NULL;
-    struct evhttp_request *req = NULL;
+static size_t build_http_request(struct wss_proxy_context *context, int udp, char *request) {
+    char *start;
+    unsigned char key[16], sec_websocket_key[25];
 
+    start = request;
+    evutil_secure_rng_get_bytes(key, 16);
+    EVP_EncodeBlock(sec_websocket_key, key, 16);
+    request += sprintf(request, "GET %s HTTP/1.1\r\n"
+                                "Host: %s\r\n"
+                                "Upgrade: websocket\r\n"
+                                "Connection: Upgrade\r\n"
+                                "Sec-WebSocket-Key: %s\r\n"
+                                "Sec-WebSocket-Version: 13\r\n"
+                                "User-Agent: %s\r\n",
+                       context->server.path, context->server.host,
+                       sec_websocket_key, context->user_agent);
+    if (udp) {
+        append_line(request, X_SOCK_TYPE ": " SOCK_TYPE_UDP "\r\n");
+    }
+    if (!context->server.ws) {
+        append_line(request, X_UPGRADE ": " SHADOWSOCKS "\r\n");
+    }
+    append_line(request, "\r\n");
+    return request - start;
+}
+
+static void tev_raw_event_cb(struct bufferevent *tev, short event, void *raw) {
+    uint16_t port;
+
+    port = get_peer_port(raw);
+    if (event & (BEV_EVENT_EOF | BEV_EVENT_ERROR)) {
+        LOGD("connection %u closed for wss %p, event: 0x%02x", port, tev, event);
+        bufferevent_free(tev);
+        bufferevent_free(raw);
+    }
+    if (event & (BEV_EVENT_CONNECTED)) {
+        LOGD("connection %u connected for wss %p, event: 0x%02x", port, tev, event);
+    }
+    if (event & BEV_EVENT_TIMEOUT) {
+        LOGW("connection %u timeout for wss %p, event: 0x%02x", port, tev, event);
+        bufferevent_free(tev);
+        bufferevent_free(raw);
+    }
+}
+
+static struct bufferevent *connect_wss(struct wss_proxy_context *context, struct bufferevent *raw, uint16_t port) {
+    SSL *ssl = NULL;
+    size_t length;
+    char request[1024];
+    struct bufferevent *tev = NULL;
+    struct event_base *base;
+    struct timeval tv = {10, 0};
+
+    base = bufferevent_get_base(raw);
     if (context->server.tls) {
         ssl = SSL_new(context->ssl_ctx);
         if (!ssl) {
@@ -301,75 +298,29 @@ static struct evhttp_connection *connect_wss(struct wss_proxy_context *context, 
         LOGE("cannot create wss for peer %d", port);
         goto error;
     }
-
-    wss = evhttp_connection_base_bufferevent_new(base, NULL, tev,
-                                                 context->server.addr, context->server.port);
-    if (!wss) {
-        LOGE("cannot connect to wss for peer %d", port);
+    bufferevent_set_timeouts(tev, &tv, &tv);
+    if (bufferevent_socket_connect_hostname(tev, NULL,
+                                            context->server.ipv6 ? AF_INET6 : AF_UNSPEC,
+                                            context->server.addr, context->server.port)) {
+        LOGE("cannot connect server at %s:%u", context->server.addr, context->server.port);
         goto error;
     }
-
-    if (context->server.ipv6) {
-        evhttp_connection_set_family(wss, AF_INET6);
-    }
-
-    evhttp_connection_set_timeout(wss, WSS_TIMEOUT);
     if (raw->be_ops) {
-        bufferevent_setcb(raw, NULL, NULL, raw_event_cb, wss);
+        bufferevent_setcb(raw, NULL, NULL, raw_event_cb, tev);
     } else {
-        raw->cbarg = wss;
+        raw->cbarg = tev;
     }
-
-    req = evhttp_request_new(http_request_cb, raw);
-    if (!req) {
-        LOGE("cannot new http request for peer %d", port);
-        goto error;
-    }
-    evhttp_request_set_error_cb(req, http_error_cb);
-
-    output_headers = evhttp_request_get_output_headers(req);
-    if (!output_headers) {
-        LOGE("cannot get output headers for peer %d", port);
-        goto error;
-    }
-    evhttp_add_header(output_headers, "Host", context->server.host);
-    evhttp_add_header(output_headers, "Upgrade", "websocket");
-    evhttp_add_header(output_headers, "Connection", "Upgrade");
-#ifndef WSS_MOCK_KEY
-    {
-        char websocket_key[25];
-        unsigned char key[16];
-        evutil_secure_rng_get_bytes(key, 16);
-        EVP_EncodeBlock((unsigned char *) websocket_key, key, 16);
-        evhttp_add_header(output_headers, "Sec-WebSocket-Key", websocket_key);
-    }
-#else
-    evhttp_add_header(output_headers, "Sec-WebSocket-Key", "d3NzLXByb3h5LWNsaWVudA==");
-#endif
-    evhttp_add_header(output_headers, "Sec-WebSocket-Version", "13");
-    evhttp_add_header(output_headers, "User-Agent", context->user_agent);
-    if (!raw->be_ops) {
-        evhttp_add_header(output_headers, X_SOCK_TYPE, SOCK_TYPE_UDP);
-    }
-    if (!context->server.ws) {
-        evhttp_add_header(output_headers, X_UPGRADE, SHADOWSOCKS);
-    }
-
-    if (evhttp_make_request(wss, req, EVHTTP_REQ_GET, context->server.path)) {
-        LOGE("cannot make http request for peer %d", port);
-        goto error;
-    }
-    return wss;
+    length = build_http_request(context, !raw->be_ops, request);
+    bufferevent_setcb(tev, http_response_cb, NULL, tev_raw_event_cb, raw);
+    bufferevent_enable(tev, EV_READ | EV_WRITE);
+    bufferevent_write(tev, request, length);
+    return tev;
 error:
-    // should we close req?
-    if (ssl != NULL) {
+    if (ssl) {
         SSL_free(ssl);
     }
-    if (tev != NULL) {
+    if (tev) {
         bufferevent_free(tev);
-    }
-    if (wss != NULL) {
-        evhttp_connection_free(wss);
     }
     return NULL;
 }
@@ -388,7 +339,7 @@ static void accept_conn_cb(struct evconnlistener *listener, evutil_socket_t fd,
     }
     port = get_port(address);
     LOGD("new connection from %d", port);
-    if (!connect_wss(ctx, base, raw, port)) {
+    if (!connect_wss(ctx, raw, port)) {
         goto error;
     }
     return;
@@ -433,7 +384,7 @@ static void udp_timeout_cb(evutil_socket_t sock, short event, void *ctx) {
     if (event & EV_TIMEOUT) {
         struct bufferevent *raw = ctx;
         LOGD("udp timeout for peer %d", get_peer_port(raw));
-        raw->errorcb(raw, BEV_EVENT_EOF, get_wss(raw));
+        raw->errorcb(raw, BEV_EVENT_EOF, get_cbarg(raw));
     }
 }
 
@@ -456,12 +407,12 @@ static struct bufferevent_udp *init_udp_server(struct bufferevent_udp *key, stru
     data->sockaddr = (struct sockaddr *) &(data->sockaddr_storage);
     data->hash = context->hash;
     raw = (struct bufferevent *) data;
-    if (!connect_wss(context->wss_context, context->base, raw, port)) {
+    raw->ev_base = context->base;
+    if (!connect_wss(context->wss_context, raw, port)) {
         LOGE("cannot connect to wss for peer %d", port);
         free(data);
         return NULL;
     }
-    raw->ev_base = context->base;
     raw->input = evbuffer_new();
     raw->output = evbuffer_new();
     evbuffer_add_cb(raw->output, udp_send_cb, data);
@@ -502,7 +453,7 @@ static void free_udp(bufferevent_udp *udp) {
     if (raw->errorcb != raw_event_cb) {
         send_close(raw, CLOSE_GOING_AWAY);
     }
-    raw->errorcb(raw, BEV_EVENT_EOF, get_wss(raw));
+    raw->errorcb(raw, BEV_EVENT_EOF, get_cbarg(raw));
 }
 
 static void server_context_free(const struct server_context *server_context) {
@@ -628,7 +579,7 @@ int main() {
         memcpy(&extra_raw_addr, &raw_addr, socklen);
         set_port(&extra_raw_addr, extra_port);
         if (init_server_context(&extra_server_context, base, &wss_context,
-                                 (struct sockaddr *) &extra_raw_addr, socklen)) {
+                                (struct sockaddr *) &extra_raw_addr, socklen)) {
             LOGW("cannot listen to extra port %d", extra_port);
         } else {
             LOGI("extra raw server %s:%d", getenv("SS_LOCAL_HOST"), extra_port);

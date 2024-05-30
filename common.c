@@ -17,7 +17,16 @@
 #endif
 #include "common.h"
 
+enum close_reason {
+    close_reason_raw,
+    close_reason_wss,
+    close_reason_rfc,
+};
+
+static void close_wss(struct bufferevent *tev, enum close_reason close_reason, short event);
+
 void safe_bufferevent_free(struct bufferevent *bev) {
+    LOGD("free %p", bev);
     if (bev->be_ops) {
         bufferevent_free(bev);
     } else {
@@ -25,12 +34,14 @@ void safe_bufferevent_free(struct bufferevent *bev) {
     }
 }
 
+#define bufferevent_free safe_bufferevent_free
+
 void bufferevent_udp_free(struct bufferevent *raw) {
 #ifdef WSS_PROXY_CLIENT
     LOGD("udp eof for peer %d", get_peer_port(raw));
 #endif
 #ifdef WSS_PROXY_SERVER
-    LOGD("udp eof for peer %d", get_http_port(get_wss(raw)));
+    LOGD("udp eof for peer %d", get_peer_port(raw->cbarg));
 #endif
     event_del(&(raw->ev_read));
     evbuffer_free(raw->output);
@@ -44,9 +55,6 @@ void bufferevent_udp_free(struct bufferevent *raw) {
     free(raw);
 }
 
-#define bufferevent_free safe_bufferevent_free
-
-#ifdef WSS_PROXY_CLIENT
 uint16_t get_peer_port(struct bufferevent *bev) {
     evutil_socket_t sock;
     ev_socklen_t socklen;
@@ -63,18 +71,8 @@ uint16_t get_peer_port(struct bufferevent *bev) {
     if (getpeername(sock, (struct sockaddr *) &sockaddr, &socklen) == -1) {
         return 0;
     }
-    return get_port((struct sockaddr *)&sockaddr);
+    return get_port((struct sockaddr *) &sockaddr);
 }
-#endif
-
-#ifdef WSS_PROXY_SERVER
-uint16_t get_http_port(struct evhttp_connection *evcon) {
-    char *address;
-    uint16_t port;
-    evhttp_connection_get_peer(evcon, &address, &port);
-    return port;
-}
-#endif
 
 uint16_t get_port(const struct sockaddr *sockaddr) {
     if (sockaddr->sa_family == AF_INET6) {
@@ -286,8 +284,9 @@ int init_event_signal(struct event_base *base, struct event **event_parent, stru
 
 int is_websocket_key(const char *websocket_key) {
     unsigned char buffer[19];
-    if (websocket_key != NULL && strlen((char *) websocket_key) == 24
+    if (websocket_key != NULL && strlen(websocket_key) >= 26
         && websocket_key[22] == '=' && websocket_key[23] == '='
+        && websocket_key[24] == '\r' && websocket_key[25] == '\n'
         && EVP_DecodeBlock(buffer, (unsigned char *) websocket_key, 24) > 15) {
         return 1;
     } else {
@@ -298,7 +297,7 @@ int is_websocket_key(const char *websocket_key) {
 int calc_websocket_accept(const char *websocket_key, char *websocket_accept) {
     char buffer[61];
     unsigned char sha1[SHA_DIGEST_LENGTH];
-    sprintf(buffer, "%s258EAFA5-E914-47DA-95CA-C5AB0DC85B11", websocket_key);
+    snprintf(buffer, 61, "%s258EAFA5-E914-47DA-95CA-C5AB0DC85B11", websocket_key);
     SHA1((unsigned char *) buffer, 60, sha1);
     return EVP_EncodeBlock((unsigned char *) websocket_accept, sha1, SHA_DIGEST_LENGTH);
 }
@@ -321,9 +320,7 @@ static uint8_t *build_ws_frame(enum ws_op op, void *payload, uint16_t size, uint
     return header;
 }
 
-static void send_pong(struct evbuffer *src, uint16_t payload_size, uint32_t mask_key, struct bufferevent *raw) {
-    struct bufferevent *tev;
-    struct evhttp_connection *wss;
+static void send_pong(struct evbuffer *src, uint16_t payload_size, uint32_t mask_key, struct bufferevent *tev, enum ws_op op) {
     uint8_t *wss_header, header_size;
     struct wss_frame_pong {
         char header[MAX_WS_HEADER_SIZE];
@@ -340,13 +337,11 @@ static void send_pong(struct evbuffer *src, uint16_t payload_size, uint32_t mask
 #ifdef WSS_PROXY_SERVER
     unmask(wss_frame_pong.buffer, (uint16_t) size, mask_key);
 #endif
-    wss_header = build_ws_frame(OP_PONG, &(wss_frame_pong.buffer), size, &header_size);
-    wss = get_wss(raw);
-    tev = evhttp_connection_get_bufferevent(wss);
-    evbuffer_add(bufferevent_get_output(tev), wss_header, size + header_size);
+    wss_header = build_ws_frame(op, &(wss_frame_pong.buffer), size, &header_size);
+    evbuffer_add(bufferevent_get_output(tev->cbarg), wss_header, size + header_size);
 }
 
-static void reply_close(struct evbuffer *src, uint16_t payload_size, uint32_t mask_key, struct bufferevent *raw) {
+static void reply_close(struct evbuffer *src, uint16_t payload_size, uint32_t mask_key, struct bufferevent *tev) {
     uint16_t reason = CLOSE_NORMAL_CLOSURE;
     if (payload_size >= 2) {
         evbuffer_copyout(src, &reason, 2);
@@ -359,7 +354,7 @@ static void reply_close(struct evbuffer *src, uint16_t payload_size, uint32_t ma
         reason = htons(reason);
     }
     evbuffer_drain(src, payload_size);
-    send_close(raw, reason);
+    close_wss(tev, close_reason_rfc, (short) reason);
 }
 
 #ifdef WSS_ENABLE_PING
@@ -369,7 +364,7 @@ void send_ping(struct bufferevent *tev, const char *payload, uint8_t size) {
         char header[MAX_WS_HEADER_SIZE];
         char buffer[MAX_CONTROL_FRAME_SIZE];
     } wss_frame_ping;
-    payload_size = size > 0 ? MIN(size, MAX_WS_HEADER_SIZE): 0;
+    payload_size = size > 0 ? MIN(size, MAX_WS_HEADER_SIZE) : 0;
     if (payload_size > 0) {
         memcpy(wss_frame_ping.buffer, payload, payload_size);
     }
@@ -385,17 +380,13 @@ void set_ping_timeout(struct bufferevent *wev, int sec) {
 }
 #endif
 
-static enum bufferevent_filter_result wss_input_filter(struct evbuffer *src, struct evbuffer *dst,
-                                                       ev_ssize_t dst_limit, enum bufferevent_flush_mode mode,
-                                                       void *raw) {
+static enum bufferevent_filter_result common_wss_input_filter(struct evbuffer *src, struct evbuffer *dst,
+                                                              void *tev, int tcp) {
     uint8_t header[MAX_WS_HEADER_SIZE];
     ssize_t header_size;
     int result;
     struct ws_header_info info;
     struct udp_frame udp_frame;
-
-    (void) dst_limit;
-    (void) mode;
 
     header_size = evbuffer_copyout(src, header, MAX_WS_HEADER_SIZE);
     if (header_size < WS_HEADER_SIZE) {
@@ -405,19 +396,19 @@ static enum bufferevent_filter_result wss_input_filter(struct evbuffer *src, str
     result = parse_ws_header(header, header_size, &info);
     if (result < 0) {
         LOGW("payload length 64K+ is unsupported");
-        send_close(raw, CLOSE_MESSAGE_TOO_BIG);
+        send_close(tev, CLOSE_MESSAGE_TOO_BIG);
         return BEV_ERROR;
     } else if (result > 0) {
         return BEV_NEED_MORE;
     }
     if (!info.fin) {
         LOGW("fin should be 1 (fragments is unsupported)");
-        send_close(raw, CLOSE_PROTOCOL_ERROR);
+        send_close(tev, CLOSE_PROTOCOL_ERROR);
         return BEV_ERROR;
     }
     if (info.rsv) {
         LOGW("rsv should be 0");
-        send_close(raw, CLOSE_PROTOCOL_ERROR);
+        send_close(tev, CLOSE_PROTOCOL_ERROR);
         return BEV_ERROR;
     }
 #ifdef WSS_PROXY_CLIENT
@@ -429,19 +420,16 @@ static enum bufferevent_filter_result wss_input_filter(struct evbuffer *src, str
 #ifdef WSS_PROXY_SERVER
     if (!info.mask) {
         LOGW("client request should mask");
-        send_close(raw, CLOSE_PROTOCOL_ERROR);
+        send_close(tev, CLOSE_PROTOCOL_ERROR);
         return BEV_ERROR;
     }
 #endif
     switch (info.op) {
         case OP_CONTINUATION:
             LOGW("continuation frame is unsupported");
-            send_close(raw, CLOSE_UNSUPPORTED_DATA);
+            send_close(tev, CLOSE_UNSUPPORTED_DATA);
             return BEV_ERROR;
         case OP_TEXT:
-            LOGW("text frame is unsupported");
-            send_close(raw, CLOSE_UNSUPPORTED_DATA);
-            return BEV_ERROR;
         case OP_BINARY:
             break;
         case OP_CLOSE:
@@ -470,7 +458,7 @@ static enum bufferevent_filter_result wss_input_filter(struct evbuffer *src, str
             break;
         default:
             LOGW("op 0x%x is unsupported", info.op);
-            send_close(raw, CLOSE_PROTOCOL_ERROR);
+            send_close(tev, CLOSE_PROTOCOL_ERROR);
             return BEV_ERROR;
     }
     if (evbuffer_get_length(src) < (uint32_t) info.header_size + info.payload_size) {
@@ -482,22 +470,26 @@ static enum bufferevent_filter_result wss_input_filter(struct evbuffer *src, str
     }
     evbuffer_drain(src, info.header_size);
     if (info.op == OP_PING) {
-        send_pong(src, info.payload_size, info.mask_key, raw);
+        send_pong(src, info.payload_size, info.mask_key, tev, OP_PONG);
+        return BEV_OK;
+    }
+    if (info.op == OP_TEXT) {
+        send_pong(src, info.payload_size, info.mask_key, tev, OP_TEXT);
         return BEV_OK;
     }
     if (info.op == OP_CLOSE) {
-        reply_close(src, info.payload_size, info.mask_key, raw);
+        reply_close(src, info.payload_size, info.mask_key, tev);
         return BEV_ERROR;
     }
     if (evbuffer_remove(src, udp_frame.buffer, info.payload_size) != info.payload_size) {
         LOGW("cannot read more data");
-        send_close(raw, CLOSE_INTERNAL_ERROR);
+        send_close(tev, CLOSE_INTERNAL_ERROR);
         return BEV_ERROR;
     }
     if (info.mask_key) {
         unmask(udp_frame.buffer, info.payload_size, info.mask_key);
     }
-    if (((struct bufferevent *) raw)->be_ops) {
+    if (tcp) {
         evbuffer_add(dst, udp_frame.buffer, info.payload_size);
     } else {
         udp_frame.length = ntohs(info.payload_size);
@@ -506,28 +498,52 @@ static enum bufferevent_filter_result wss_input_filter(struct evbuffer *src, str
     return BEV_OK;
 }
 
-static void close_wss_data_cb(struct bufferevent *tev, void *wss) {
-    (void) tev;
-    LOGD("close wss %p in read callback", wss);
-    evhttp_connection_free(wss);
+static enum bufferevent_filter_result wss_input_filter(struct evbuffer *src, struct evbuffer *dst,
+                                                       ev_ssize_t dst_limit, enum bufferevent_flush_mode mode,
+                                                       void *tev) {
+    (void) dst_limit;
+    (void) mode;
+    return common_wss_input_filter(src, dst, tev, 1);
 }
 
-static void close_wss_event_cb(struct bufferevent *tev, short event, void *wss) {
-    (void) tev;
-    LOGD("close wss %p in event callback, event: 0x%02x", wss, event);
-    evhttp_connection_free(wss);
+static enum bufferevent_filter_result wss_input_filter_udp(struct evbuffer *src, struct evbuffer *dst,
+                                                           ev_ssize_t dst_limit, enum bufferevent_flush_mode mode,
+                                                           void *tev) {
+    (void) dst_limit;
+    (void) mode;
+    return common_wss_input_filter(src, dst, tev, 0);
 }
 
-static void wss_closed_write_cb(struct bufferevent *raw, void *wss) {
-    (void) raw;
-    (void) wss;
+static void close_wev(struct bufferevent *wev) {
+    if (wev->cbarg) {
+        bufferevent_free(wev->cbarg);
+    }
+    bufferevent_free(wev);
 }
 
-int send_close(struct bufferevent *raw, uint16_t reason) {
-    struct bufferevent *tev;
-    struct evhttp_connection *wss = get_wss(raw);
-    if (raw->writecb == wss_closed_write_cb) {
-        LOGD("wss %p closed", wss);
+static void do_close_wss(struct bufferevent *tev) {
+    if (tev->cbarg) {
+        close_wev(tev->cbarg);
+    }
+    bufferevent_free(tev);
+}
+
+static void close_wss_data_cb(struct bufferevent *tev, void *arg) {
+    (void) arg;
+    LOGD("close wss %p in data callback", tev);
+    do_close_wss(tev);
+}
+
+static void close_wss_event_cb(struct bufferevent *tev, short event, void *arg) {
+    (void) arg;
+    LOGD("close wss %p in event callback, event: 0x%02x", tev, event);
+    do_close_wss(tev);
+}
+
+int send_close(struct bufferevent *tev, uint16_t reason) {
+    struct bufferevent *wev = tev->cbarg;
+    if (wev == NULL) {
+        LOGD("wss %p closed", tev);
         return 0;
     } else {
         uint8_t *wss_header, header_size;
@@ -535,49 +551,46 @@ int send_close(struct bufferevent *raw, uint16_t reason) {
             char header[MAX_WS_HEADER_SIZE];
             uint16_t reason;
         } wss_frame_close;
-        raw->writecb = wss_closed_write_cb;
         wss_frame_close.reason = ntohs(reason);
         wss_header = build_ws_frame(OP_CLOSE, &(wss_frame_close.reason), 2, &header_size);
-        tev = evhttp_connection_get_bufferevent(wss);
-        evbuffer_add(bufferevent_get_output(tev), wss_header, 2 + header_size);
+        evbuffer_add(bufferevent_get_output(tev->cbarg), wss_header, 2 + header_size);
         return 1;
     }
 }
 
-enum close_reason {
-    close_reason_raw,
-    close_reason_wss,
-};
+static void close_wss(struct bufferevent *tev, enum close_reason close_reason, short event) {
+    int close_later;
+    struct bufferevent *wev;
 
-static void close_wss(struct bufferevent *raw, enum close_reason close_reason, short event) {
-    int sent;
-    struct evhttp_connection *wss = get_wss(raw);
     if (close_reason == close_reason_raw) {
-        sent = send_close(raw, CLOSE_GOING_AWAY);
+        close_later = send_close(tev, CLOSE_GOING_AWAY);
+    } else if (close_reason == close_reason_rfc) {
+        close_later = send_close(tev, (uint16_t) event);
     } else if (event & BEV_EVENT_EOF) {
         // we can do nothing
-        sent = 0;
+        close_later = 0;
     } else {
         // we should have sent out
-        sent = send_close(raw, CLOSE_INTERNAL_ERROR);
+        close_later = send_close(tev, CLOSE_INTERNAL_ERROR);
     }
-    bufferevent_free(raw);
-    if (sent) {
-        struct bufferevent *tev = evhttp_connection_get_bufferevent(wss);
-        bufferevent_setcb(tev, close_wss_data_cb, NULL, close_wss_event_cb, wss);
+    wev = tev->cbarg;
+    if (close_later) {
+        LOGD("close wss %p later", tev);
+        bufferevent_setcb(tev, close_wss_data_cb, NULL, close_wss_event_cb, NULL);
+        if (wev) {
+            close_wev(wev);
+        }
     } else {
-        LOGD("close wss %p as close was sent", wss);
-        evhttp_connection_free(wss);
+        LOGD("close wss %p", tev);
+        do_close_wss(tev);
     }
 }
 
-static void raw_forward_cb(struct bufferevent *raw, void *wss) {
+static void raw_forward_cb(struct bufferevent *raw, void *tev) {
     struct evbuffer *src;
     struct evbuffer *dst;
-    struct bufferevent *tev;
     size_t total_size;
 
-    tev = evhttp_connection_get_bufferevent(wss);
     src = bufferevent_get_input(raw);
     dst = bufferevent_get_output(tev);
 
@@ -632,32 +645,54 @@ static void raw_forward_cb(struct bufferevent *raw, void *wss) {
     }
 }
 
-void raw_event_cb(struct bufferevent *raw, short event, void *wss) {
+static enum bufferevent_filter_result wss_output_filter(struct evbuffer *src, struct evbuffer *dst,
+                                                        ev_ssize_t dst_limit, enum bufferevent_flush_mode mode,
+                                                        void *tev) {
+    (void) dst_limit;
+    (void) mode;
+    (void) tev;
+    evbuffer_add_buffer(dst, src);
+    return BEV_OK;
+}
+
+void raw_event_cb(struct bufferevent *raw, short event, void *tev) {
     uint16_t port;
-    if (event & (BEV_EVENT_EOF | BEV_EVENT_ERROR)) {
+
 #ifdef WSS_PROXY_CLIENT
-        port = get_peer_port(raw);
+    port = get_peer_port(raw);
 #endif
 #ifdef WSS_PROXY_SERVER
-        port = get_http_port(wss);
+    (void) raw;
+    port = get_peer_port(tev);
 #endif
-        LOGD("connection %u closed for wss, event: 0x%02x", port, event);
-        bufferevent_free(raw);
-        evhttp_connection_free(wss);
+    if (event & (BEV_EVENT_EOF | BEV_EVENT_ERROR)) {
+        LOGD("connection %u closed for wss %p, event: 0x%02x", port, tev, event);
+        do_close_wss(tev);
+    } else if (event & BEV_EVENT_TIMEOUT) {
+        LOGW("connection %u timeout for wss %p, event: 0x%02x", port, tev, event);
+        do_close_wss(tev);
     }
 }
 
-static void raw_event_cb_wss(struct bufferevent *raw, short event, void *wss) {
+static void raw_event_cb_wss(struct bufferevent *raw, short event, void *wev) {
     uint16_t port;
+    struct bufferevent *tev;
+
+    (void) raw;
+    tev = bufferevent_get_underlying(wev);
     if (event & (BEV_EVENT_EOF | BEV_EVENT_ERROR)) {
 #ifdef WSS_PROXY_CLIENT
         port = get_peer_port(raw);
 #endif
 #ifdef WSS_PROXY_SERVER
-        port = get_http_port(wss);
+        port = get_peer_port(tev);
 #endif
-        LOGD("connection %u closed for wss %p, event: 0x%02x", port, wss, event);
-        close_wss(raw, close_reason_raw, event);
+        LOGD("connection %u closed for wss %p, event: 0x%02x", port, tev, event);
+        if (tev && tev->cbarg) {
+            close_wss(tev, close_reason_raw, event);
+        } else {
+            bufferevent_free(raw);
+        }
     }
 }
 
@@ -675,41 +710,34 @@ static void wss_forward_cb(struct bufferevent *wev, void *raw) {
 
 static void wss_event_cb(struct bufferevent *wev, short event, void *raw) {
     uint16_t port;
-    struct evhttp_connection *wss;
-    (void) wev;
+    struct bufferevent *tev;
+
+    tev = bufferevent_get_underlying(wev);
     if (event & (BEV_EVENT_EOF | BEV_EVENT_ERROR)) {
-        wss = get_wss(raw);
 #ifdef WSS_PROXY_CLIENT
         port = get_peer_port(raw);
 #endif
 #ifdef WSS_PROXY_SERVER
-        port = get_http_port(wss);
+        port = get_peer_port(tev);
 #endif
-        LOGD("connection %u closing from wss %p, event: 0x%02x", port, wss, event);
-        close_wss(raw, close_reason_wss, event);
+        LOGD("connection %u closing from wss %p, event: 0x%02x", port, get_cbarg(raw), event);
+        close_wss(tev, close_reason_wss, event);
     }
 #ifdef WSS_ENABLE_PING
     if (event & BEV_EVENT_TIMEOUT) {
-        struct bufferevent *tev = bufferevent_get_underlying(wev);
         bufferevent_enable(tev, EV_READ | EV_WRITE);
         LOGD("timeout, send ping, event: 0x%x", event);
-        send_ping(tev, NULL, 0);
+        send_ping(wev, NULL, 0);
     }
 #endif
 }
 
-static void wss_close_cb(struct evhttp_connection *wss, void *wev) {
-    LOGD("wss %p closed", wss);
-    bufferevent_free(wev);
-}
-
-void tunnel_wss(struct bufferevent *raw, struct evhttp_connection *wss) {
-    struct bufferevent *tev;
+void tunnel_wss(struct bufferevent *raw, struct bufferevent *tev) {
     struct bufferevent *wev;
-
-    tev = evhttp_connection_get_bufferevent(wss);
-    wev = bufferevent_filter_new(tev, wss_input_filter, NULL, 0, NULL, raw);
-    evhttp_connection_set_closecb(wss, wss_close_cb, wev);
+    bufferevent_filter_cb tev_input_filter;
+    tev_input_filter = raw->be_ops ? wss_input_filter : wss_input_filter_udp;
+    wev = bufferevent_filter_new(tev, tev_input_filter, wss_output_filter, 0, NULL, tev);
+    LOGD("wev: %p, tev: %p, raw: %p", wev, tev, raw);
 
     bufferevent_enable(wev, EV_READ | EV_WRITE);
     bufferevent_setcb(wev, wss_forward_cb, NULL, wss_event_cb, raw);
@@ -719,12 +747,12 @@ void tunnel_wss(struct bufferevent *raw, struct evhttp_connection *wss) {
 
     if (raw->be_ops) {
         bufferevent_enable(raw, EV_READ | EV_WRITE);
-        bufferevent_setcb(raw, raw_forward_cb, NULL, raw_event_cb_wss, wss);
+        bufferevent_setcb(raw, raw_forward_cb, NULL, raw_event_cb_wss, wev);
     } else {
         raw->enabled = EV_READ | EV_WRITE;
         raw->readcb = raw_forward_cb;
         raw->errorcb = raw_event_cb_wss;
-        raw->cbarg = wss;
+        raw->cbarg = wev;
         evbuffer_add_cb(raw->input, udp_read_cb, raw);
         raw->readcb(raw, raw->cbarg);
     }
@@ -732,23 +760,20 @@ void tunnel_wss(struct bufferevent *raw, struct evhttp_connection *wss) {
 
 static void wss_event_cb_ss(struct bufferevent *tev, short event, void *raw) {
     uint16_t port;
-    struct evhttp_connection *wss;
-    (void) tev;
     if (event & (BEV_EVENT_EOF | BEV_EVENT_ERROR)) {
-        wss = get_wss(raw);
 #ifdef WSS_PROXY_CLIENT
         port = get_peer_port(raw);
 #endif
 #ifdef WSS_PROXY_SERVER
-        port = get_http_port(wss);
+        (void) raw;
+        port = get_peer_port(tev);
 #endif
-        LOGD("connection %u closing from wss, event: 0x%02x", port, event);
-        bufferevent_free(raw);
-        evhttp_connection_free(wss);
+        LOGD("connection %u closing from wss %p, event: 0x%02x", port, tev, event);
+        do_close_wss(tev);
     }
 }
 
-static void raw_forward_cb_ss(struct bufferevent *raw, void *wss) {
+static void raw_forward_cb_ss(struct bufferevent *raw, void *tev) {
     struct evbuffer *src;
     struct evbuffer *dst;
 
@@ -756,25 +781,22 @@ static void raw_forward_cb_ss(struct bufferevent *raw, void *wss) {
     if (!evbuffer_get_length(src)) {
         return;
     }
-    dst = bufferevent_get_output(evhttp_connection_get_bufferevent(wss));
+    dst = bufferevent_get_output(tev);
     evbuffer_add_buffer(dst, src);
 }
 
-void tunnel_ss(struct bufferevent *raw, struct evhttp_connection *wss) {
-    struct bufferevent *tev;
-
-    tev = evhttp_connection_get_bufferevent(wss);
+void tunnel_ss(struct bufferevent *raw, struct bufferevent *tev) {
     bufferevent_enable(tev, EV_READ | EV_WRITE);
     bufferevent_setcb(tev, wss_forward_cb, NULL, wss_event_cb_ss, raw);
 
     if (raw->be_ops) {
         bufferevent_enable(raw, EV_READ | EV_WRITE);
-        bufferevent_setcb(raw, raw_forward_cb_ss, NULL, raw_event_cb, wss);
+        bufferevent_setcb(raw, raw_forward_cb_ss, NULL, raw_event_cb, tev);
     } else {
         raw->enabled = EV_READ | EV_WRITE;
         raw->readcb = raw_forward_cb_ss;
         raw->errorcb = raw_event_cb;
-        raw->cbarg = wss;
+        raw->cbarg = tev;
         evbuffer_add_cb(raw->input, udp_read_cb, raw);
         raw->readcb(raw, raw->cbarg);
     }
@@ -804,7 +826,7 @@ void udp_send_cb(struct evbuffer *buf, const struct evbuffer_cb_info *info, void
         }
         if (evbuffer_copyout(buf, &udp_frame, UDP_FRAME_LENGTH_SIZE) != UDP_FRAME_LENGTH_SIZE) {
             LOGE("cannot copy udp to get payload length for %d", get_port(bev_udp->sockaddr));
-            raw->errorcb(raw, BEV_EVENT_ERROR, get_wss(raw));
+            raw->errorcb(raw, BEV_EVENT_ERROR, raw->cbarg);
             break;
         }
         payload_length = htons(udp_frame.length);
@@ -814,14 +836,14 @@ void udp_send_cb(struct evbuffer *buf, const struct evbuffer_cb_info *info, void
         }
         if (evbuffer_copyout(buf, &udp_frame, length) != (int) length) {
             LOGE("cannot copy udp %d for %d", (int) length, get_port(bev_udp->sockaddr));
-            raw->errorcb(raw, BEV_EVENT_ERROR, get_wss(raw));
+            raw->errorcb(raw, BEV_EVENT_ERROR, raw->cbarg);
             break;
         }
         if (sendto(bev_udp->sock, udp_frame.buffer, payload_length, 0, bev_udp->sockaddr, bev_udp->socklen) < 0) {
             // is there any chance to sendto later?
             int socket_error = evutil_socket_geterror(bev_udp->sock);
             LOGE("cannot send udp to %d: %s", get_port(bev_udp->sockaddr), evutil_socket_error_to_string(socket_error));
-            raw->errorcb(raw, BEV_EVENT_ERROR, get_wss(raw));
+            raw->errorcb(raw, BEV_EVENT_ERROR, raw->cbarg);
             break;
         }
         LOGD("udp sent %d to peer %d", payload_length, get_port(bev_udp->sockaddr));

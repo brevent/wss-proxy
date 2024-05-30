@@ -1,10 +1,10 @@
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
 #include <unistd.h>
 #include <event2/buffer.h>
-#include <event2/http.h>
 #include <event2/listener.h>
 #include "common.h"
 
@@ -83,36 +83,39 @@ static int init_raw_info(struct raw_server_info *raw_server_info) {
     return 0;
 }
 
-static int do_websocket_handshake(struct evhttp_request *req, char *sec_websocket_accept) {
-    const char *value;
-    struct evkeyvalq *headers = evhttp_request_get_input_headers(req);
-#define HAS_HEADER(key, expected) ((value = evhttp_find_header(headers, key)) != NULL \
-    && evutil_ascii_strcasecmp(value, expected) == 0)
-    if (!HAS_HEADER("Upgrade", "websocket") ||
-        !HAS_HEADER("Connection", "Upgrade") ||
-        !HAS_HEADER("Sec-WebSocket-Version", "13")) {
-        LOGW("handshake fail, invalid headers");
-        LOGD("Upgrade: %s, Connection: %s, Sec-WebSocket-Version: %s",
-             evhttp_find_header(headers, "Upgrade"),
-             evhttp_find_header(headers, "Connection"),
-             evhttp_find_header(headers, "Sec-WebSocket-Version"));
+static int do_websocket_handshake(char *request, char *sec_websocket_accept) {
+    char *sec_websocket_key;
+    if (memcmp(request, "GET ", 4) != 0) {
+        LOGW("handshake fail, invalid method: %s", request);
         return 0;
     }
-    value = evhttp_find_header(headers, "Sec-WebSocket-Key");
-    if (!is_websocket_key(value)) {
-        LOGW("handshake fail, invalid Sec-WebSocket-Key: %s", value);
+    if (!strcasestr(request, "\r\nUpgrade: websocket\r\n") ||
+        !strcasestr(request, "\r\nConnection: Upgrade\r\n") ||
+        !strcasestr(request, "\r\nSec-WebSocket-Version: 13\r\n")) {
+        LOGW("handshake fail, invalid request: %s", request);
         return 0;
     }
-    calc_websocket_accept(value, sec_websocket_accept);
+    sec_websocket_key = strcasestr(request, "\r\nSec-WebSocket-Key: ");
+    if (sec_websocket_key == NULL || strlen(sec_websocket_key) <= 47) {
+        LOGW("handshake fail, no Sec-WebSocket-Key: %s", request);
+        return 0;
+    }
+    sec_websocket_key += sizeof("\r\nSec-WebSocket-Key: ") - 1;
+    if (!is_websocket_key(sec_websocket_key)) {
+        LOGW("handshake fail, invalid Sec-WebSocket-Key: %s", request);
+        return 0;
+    }
+    sec_websocket_key[24] = '\0';
+    calc_websocket_accept(sec_websocket_key, sec_websocket_accept);
+    sec_websocket_key[24] = '\r';
     return 1;
 }
 
 static void udp_read_cb_client(evutil_socket_t sock, short event, void *ctx) {
     struct bufferevent *raw = ctx;
-    struct evhttp_connection *wss = get_wss(raw);
     if (event & EV_TIMEOUT) {
-        LOGD("udp timeout for peer %d", get_http_port(wss));
-        raw->errorcb(raw, BEV_EVENT_EOF, wss);
+        LOGD("udp timeout for peer %d", get_peer_port(raw->cbarg));
+        raw->errorcb(raw, BEV_EVENT_EOF, raw->cbarg);
     } else if (event & EV_READ) {
         struct udp_frame udp_frame;
         ev_socklen_t socklen;
@@ -194,24 +197,34 @@ static struct bufferevent *init_tcp_client(struct event_base *base, struct raw_s
     return raw;
 }
 
-static void generic_request_handler(struct evhttp_request *req, void *ctx) {
+static void http_request_cb(struct bufferevent *tev, void *ctx) {
+    size_t length;
     struct event_base *base;
-    struct bufferevent *raw = NULL;
-    struct evhttp_connection *wss = NULL;
+    struct evbuffer *input;
+    struct bufferevent *raw;
     struct raw_server_info *raw_server_info = ctx;
-    char sec_websocket_accept[29];
-    struct evkeyvalq *headers = evhttp_request_get_output_headers(req);
-    int ss;
-    int udp;
+    char request[1024], sec_websocket_accept[29], *buffer;
+    int ss, udp;
 
-    if (!do_websocket_handshake(req, sec_websocket_accept)) {
+    memset(request, 0, sizeof(request));
+    input = bufferevent_get_input(tev);
+    length = evbuffer_get_length(input);
+    if (length == 0) {
+        LOGW("no request data");
         goto error;
     }
-
-    wss = evhttp_request_get_connection(req);
-    LOGD("new connection from %d", get_http_port(wss));
-    base = evhttp_connection_get_base(wss);
-    udp = IS_UDP(evhttp_find_header(evhttp_request_get_input_headers(req), X_SOCK_TYPE));
+    evbuffer_copyout(input, request, sizeof(request));
+    if (strstr(request, "\r\n\r\n") == NULL) {
+        LOGW("uncompleted response: %s", request);
+        goto error;
+    }
+    if (!do_websocket_handshake(request, sec_websocket_accept)) {
+        goto error;
+    }
+    evbuffer_drain(input, length);
+    LOGD("new connection from %d", get_peer_port(tev));
+    base = bufferevent_get_base(tev);
+    udp = strcasestr(request, "\r\n" X_SOCK_TYPE ": " SOCK_TYPE_UDP "\r\n") != NULL;
     if (udp) {
         raw = init_udp_client(base, raw_server_info);
         if (raw->be_ops) {
@@ -229,28 +242,59 @@ static void generic_request_handler(struct evhttp_request *req, void *ctx) {
         goto error;
     }
     if (raw->be_ops) {
-        bufferevent_setcb(raw, NULL, NULL, raw_event_cb, wss);
+        bufferevent_setcb(raw, NULL, NULL, raw_event_cb, tev);
     } else {
-        raw->cbarg = wss;
+        raw->cbarg = tev;
     }
 
-    evhttp_add_header(headers, "Upgrade", "websocket");
-    evhttp_add_header(headers, "Connection", "Upgrade");
-    evhttp_add_header(headers, "Sec-WebSocket-Accept", (char *) sec_websocket_accept);
-    ss = IS_SHADOWSOCKS(evhttp_find_header(evhttp_request_get_input_headers(req), X_UPGRADE));
+    buffer = request;
+    buffer += snprintf(buffer, 128, "HTTP/1.1 101 Switching Protocols\r\n"
+                                    "Upgrade: websocket\r\n"
+                                    "Connection: Upgrade\r\n"
+                                    "Sec-WebSocket-Accept: %s\r\n", sec_websocket_accept);
+    ss = strcasestr(request, "\r\n" X_UPGRADE ": " SHADOWSOCKS "\r\n") != NULL;
     if (ss) {
-        evhttp_add_header(headers, X_UPGRADE, SHADOWSOCKS);
+        append_line(buffer, X_UPGRADE ": " SHADOWSOCKS "\r\n");
     }
-    evhttp_send_reply(req, 101, "Switching Protocols", NULL);
+    append_line(buffer, "\r\n");
+    bufferevent_write(tev, request, buffer - request);
 
     if (ss) {
-        tunnel_ss(raw, wss);
+        tunnel_ss(raw, tev);
     } else {
-        tunnel_wss(raw, wss);
+        tunnel_wss(raw, tev);
     }
     return;
 error:
-    evhttp_send_error(req, HTTP_BADREQUEST, "Bad Request");
+    bufferevent_write(tev, "HTTP/1.1 400 Bad Request\r\n\r\n", sizeof("400 Bad Request\r\n\r\n") - 1);
+    bufferevent_free(tev);
+}
+
+static void client_event_cb(struct bufferevent *tev, short event, void *ctx) {
+    uint16_t port;
+    (void) ctx;
+    if (event & (BEV_EVENT_EOF | BEV_EVENT_ERROR)) {
+        port = get_peer_port(tev);
+        LOGD("connection %u closed for wss, event: 0x%02x", port, event);
+        bufferevent_free(tev);
+    }
+}
+
+static void accept_conn_cb(struct evconnlistener *listener, evutil_socket_t fd,
+                           struct sockaddr *address, int socklen, void *ctx) {
+    struct event_base *base;
+    struct bufferevent *tev;
+
+    (void) socklen;
+    base = evconnlistener_get_base(listener);
+    tev = bufferevent_socket_new(base, fd, BEV_OPT_CLOSE_ON_FREE);
+    if (tev == NULL) {
+        LOGW("cannot handle request from port %d", get_port(address));
+        evutil_closesocket(fd);
+    } else {
+        bufferevent_enable(tev, EV_READ | EV_WRITE);
+        bufferevent_setcb(tev, http_request_cb, NULL, client_event_cb, ctx);
+    }
 }
 
 int main() {
@@ -258,7 +302,6 @@ int main() {
     struct event_base *base = NULL;
     struct event_config *cfg = NULL;
     struct event *event_parent = NULL, *event_sigquit = NULL;
-    struct evhttp *http_server = NULL;
     const char *addr;
     int port;
     struct sockaddr_storage sockaddr_storage;
@@ -304,29 +347,19 @@ int main() {
         goto error;
     }
 
-    http_server = evhttp_new(base);
-    if (!http_server) {
-        LOGE("cannot create http server");
-        goto error;
-    }
     socklen = sizeof(struct sockaddr_storage);
     if (evutil_parse_sockaddr_port(addr, (struct sockaddr *) &(sockaddr_storage), &socklen) < 0) {
         LOGE("cannot parse %s", addr);
         goto error;
     }
     set_port(&(sockaddr_storage), port);
-    listener = evconnlistener_new_bind(base, NULL, NULL, WSS_LISTEN_FLAGS, WSS_LISTEN_BACKLOG,
+    listener = evconnlistener_new_bind(base, accept_conn_cb, &raw_server_info,
+                                       WSS_LISTEN_FLAGS, WSS_LISTEN_BACKLOG,
                                        (const struct sockaddr *) &(sockaddr_storage), socklen);
     if (listener == NULL) {
         LOGE("cannot listen to %s:%d", addr, port);
         goto error;
     }
-    if (evhttp_bind_listener(http_server, listener) == NULL) {
-        LOGE("cannot bind http server to %s:%u", addr, (uint16_t) port);
-        evconnlistener_free(listener);
-        goto error;
-    }
-    evhttp_set_gencb(http_server, generic_request_handler, &raw_server_info);
 
     if (init_event_signal(base, &event_parent, &event_sigquit)) {
         goto error;
@@ -347,8 +380,8 @@ error:
     if (event_sigquit) {
         event_free(event_sigquit);
     }
-    if (http_server) {
-        evhttp_free(http_server);
+    if (listener) {
+        evconnlistener_free(listener);
     }
     if (base) {
         event_base_free(base);
