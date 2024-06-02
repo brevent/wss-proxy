@@ -30,6 +30,23 @@ if __name__ == '__main__':
         print(b', '.join(reqs).decode('utf8'))
         print(b', '.join(ress).decode('utf8'))
         for y in range(1, 10):
+            z = '%s' % y
+            req = ((z * 8688) + 'end of websocket').encode('utf8')
+            try:
+                sock.sendto(req, ('127.0.0.1', 1235))
+            except OSError:
+                print('%s, length %d ko' % (z, len(req)))
+                sock.close()
+                break
+            try:
+                (res, addr) = sock.recvfrom(65535)
+            except socket.timeout:
+                print('%s, length %d ko (timeout)' % (z, len(req)))
+                raise
+            print('%s, length %d ok' % (z, len(req)))
+            if req != res:
+                raise ValueError()
+        for y in range(1, 10):
             req = ('c' * 1024 * y).encode('utf8')
             try:
                 sock.sendto(req, ('127.0.0.1', 1235))
