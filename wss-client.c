@@ -732,10 +732,12 @@ error:
             if (context_ssl->http == http3) {
                 return check_stream_error(SSL_get_stream_read_state(ssl));
             }
+            break;
 #endif
         default:
-            return check_ssl_error(context_ssl, ssl, 1, ret);
+            break;
     }
+    return check_ssl_error(context_ssl, ssl, 1, ret);
 }
 
 static ssize_t do_ssl_write(struct bufferevent_context_ssl *context_ssl, uint8_t *buffer, size_t size) {
@@ -785,10 +787,12 @@ error:
             if (context_ssl->http == http3) {
                 return check_stream_error(SSL_get_stream_write_state(ssl));
             }
+            break;
 #endif
         default:
-            return check_ssl_error(context_ssl, ssl, 0, ret);
+            break;
     }
+    return check_ssl_error(context_ssl, ssl, 0, ret);
 }
 
 static ssize_t check_socket_error(ssize_t n, evutil_socket_t fd) {
@@ -802,7 +806,7 @@ static ssize_t check_socket_error(ssize_t n, evutil_socket_t fd) {
     if (EVUTIL_ERR_RW_RETRIABLE(err)) {
         return WSS_AGAIN;
     } else {
-        LOGW("socker error: %s (%d)", evutil_socket_error_to_string(err), err);
+        LOGW("socket error: %s (%d)", evutil_socket_error_to_string(err), err);
         return WSS_ERROR;
     }
 }
@@ -815,12 +819,14 @@ static ssize_t do_read(struct bufferevent *bev, evutil_socket_t fd) {
     context_ssl = (struct bufferevent_context_ssl *) bufferevent_get_context(bev);
     if (context_ssl) {
         return do_ssl_read(context_ssl, bev);
-    } else {
+    } else if (fd > 0) {
         res = check_socket_error(recv(fd, buffer, sizeof(buffer), 0), fd);
         if (res > 0) {
             evbuffer_add(bev->input, buffer, res);
         }
         return res;
+    } else {
+        return WSS_ERROR;
     }
 }
 
@@ -850,7 +856,7 @@ static void free_http_stream(struct bufferevent_http_stream *http_stream) {
 }
 
 void free_context_ssl(struct wss_proxy_context *proxy_context) {
-    struct event * event;
+    struct event *event;
     if (!proxy_context->ssl) {
         return;
     }
@@ -970,8 +976,6 @@ static void bufferevent_writecb(evutil_socket_t fd, short event, void *arg) {
     short what = BEV_EVENT_WRITING;
     struct bufferevent *bev = arg;
 
-    bufferevent_incref(bev);
-
     if (event == EV_TIMEOUT) {
         what |= BEV_EVENT_TIMEOUT;
         goto error;
@@ -1022,7 +1026,7 @@ error:
     }
 
 done:
-    bufferevent_decref(bev);
+    return;
 }
 
 static int init_ssl_sock(struct wss_proxy_context *context, struct event_base *base, SSL **ssl1) {
