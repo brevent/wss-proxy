@@ -37,6 +37,7 @@ DEFINE_LHASH_OF(bufferevent_http_stream);
 struct wss_proxy_context {
     SSL_CTX *ssl_ctx;
     SSL *ssl;
+    SSL *stream;
     LHASH_OF(bufferevent_http_stream) *http_streams;
     struct evbuffer *input;
     struct evbuffer *output;
@@ -44,7 +45,6 @@ struct wss_proxy_context {
     uint8_t settings_sent: 1;
     uint32_t next_stream_id: 23;
     uint32_t initial_window_size;
-    uint8_t want_read: 1;
     struct wss_server_info server;
     char user_agent[80];
 };
@@ -54,6 +54,8 @@ struct bufferevent_context_ssl {
     struct wss_proxy_context *proxy_context;
     enum http http: 2;
     uint8_t upgrade: 1;
+    uint8_t read_only: 1;
+    uint8_t has_error: 1;
     struct evbuffer *frame;
     uint32_t stream_id;
     uint32_t send_window;

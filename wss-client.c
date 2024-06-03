@@ -44,6 +44,7 @@ static void bufferevent_context_ssl_free(struct bufferevent_context *context) {
 #ifdef HAVE_OSSL_QUIC_CLIENT_METHOD
         LOGD("conclude stream: %p", context_ssl->stream);
         SSL_stream_conclude(context_ssl->stream, 0);
+        SSL_free(context_ssl->stream);
 #endif
     } else if (context_ssl->http == http2) {
         size = build_http2_frame(frame, 0, 0, 1, context_ssl->stream_id);
@@ -51,14 +52,13 @@ static void bufferevent_context_ssl_free(struct bufferevent_context *context) {
             evbuffer_add(context_ssl->proxy_context->output, frame, size);
         }
     } else if (context_ssl->http == http1) {
-        LOGD("ssl_free ssl: %p", context_ssl->ssl);
         SSL_free(context_ssl->ssl);
     }
     if (context_ssl->proxy_context->http_streams) {
         key.stream_id = context_ssl->stream_id;
         http_stream = lh_bufferevent_http_stream_retrieve(context_ssl->proxy_context->http_streams, &key);
-        lh_bufferevent_http_stream_delete(context_ssl->proxy_context->http_streams, &key);
         if (http_stream) {
+            lh_bufferevent_http_stream_delete(context_ssl->proxy_context->http_streams, &key);
             free(http_stream);
         }
         LOGD("remove http stream %lu: %p", (unsigned long) key.stream_id, http_stream);
@@ -192,18 +192,20 @@ static void read_http_stream(struct bufferevent_http_stream *http_stream, void *
     struct bufferevent_context_ssl *context_ssl;
 
     enabled = bufferevent_get_enabled(http_stream->bev) & EV_READ;
-    if (!enabled) {
+    if (!enabled || !http_stream->bev->cbarg) {
         return;
     }
     sock_event = arg;
     context_ssl = (struct bufferevent_context_ssl *) bufferevent_get_context(http_stream->bev);
     total = context_ssl->total;
+    context_ssl->read_only = 1;
     bufferevent_readcb(sock_event->sock, sock_event->event, http_stream->bev);
     sock_event->total += (context_ssl->total - total);
 }
 
 static void http3_eventcb(evutil_socket_t sock, short event, void *context) {
     int is_infinite;
+    unsigned long streams;
     SSL *ssl;
     struct timeval tv;
     struct wss_proxy_context *proxy_context;
@@ -212,25 +214,44 @@ static void http3_eventcb(evutil_socket_t sock, short event, void *context) {
     (void) event;
     proxy_context = context;
     ssl = proxy_context->ssl;
+    streams = lh_bufferevent_http_stream_num_items(proxy_context->http_streams);
     for (;;) {
         if (!SSL_get_event_timeout(ssl, &tv, &is_infinite)) {
             LOGW("cannot SSL_get_event_timeout");
             break;
         }
         if (is_infinite) {
-            LOGD("infinite, remove timer and free context");
+            LOGI("infinite, remove timer and free context");
             event_remove_timer(proxy_context->event_quic);
             free_context_ssl(proxy_context);
             break;
         }
         if (tv.tv_sec || tv.tv_usec) {
+            if (streams && (tv.tv_sec > 1 || tv.tv_usec > 15000)) {
+                tv.tv_sec = 0;
+                tv.tv_usec = 15000;
+            }
             event_add(proxy_context->event_quic, &tv);
             break;
         }
         SSL_handle_events(ssl);
     }
-    if (proxy_context->want_read) {
+    if (streams) {
         event_active(SSL_get_app_data(proxy_context->ssl), EV_READ | EV_FINALIZE, 0);
+    }
+}
+
+static void close_http_stream(struct bufferevent_http_stream *http_stream) {
+    struct bufferevent_context_ssl *context_ssl;
+
+    context_ssl = (struct bufferevent_context_ssl *) bufferevent_get_context(http_stream->bev);
+    if (!context_ssl) {
+        return;
+    }
+    context_ssl->read_only = 0;
+    if (context_ssl->has_error || !http_stream->bev->cbarg) {
+        // trigger read to close stream
+        event_active(&http_stream->bev->ev_read, EV_READ, 0);
     }
 }
 
@@ -254,7 +275,7 @@ static void http3_readcb(evutil_socket_t sock, short event, void *context) {
             break;
         }
     }
-    proxy_context->want_read = total != 0;
+    lh_bufferevent_http_stream_doall(http_streams, close_http_stream);
     if (!lh_bufferevent_http_stream_num_items(http_streams)) {
         event_del(SSL_get_app_data(proxy_context->ssl));
     }
@@ -320,16 +341,10 @@ error:
     return 1;
 }
 
-static int send_h3_settings(SSL *ssl) {
+static int send_h3_settings(SSL *stream) {
     int ret;
-    SSL *stream;
     size_t written;
 
-    stream = SSL_new_stream(ssl, SSL_STREAM_FLAG_ADVANCE | SSL_STREAM_FLAG_UNI);
-    if (stream == NULL) {
-        LOGW("cannot make new quic stream");
-        return 1;
-    }
     if (SSL_write_ex(stream, "\x00\x04\x00", 3, &written)) {
         return 0;
     }
@@ -474,10 +489,6 @@ static SSL *init_ssl(struct wss_proxy_context *context, struct event_base *base,
         event_add(event, NULL);
     }
     if (context->server.http2 || context->server.http3) {
-        if (context->http_streams) {
-            LOGW("there are http_streams");
-            lh_bufferevent_http_stream_free(context->http_streams);
-        }
         context->http_streams = lh_bufferevent_http_stream_new(bufferevent_http_stream_hash,
                                                                bufferevent_http_stream_cmp);
         if (!context->http_streams) {
@@ -494,6 +505,17 @@ error:
     if (context->output) {
         evbuffer_free(context->output);
         context->output = NULL;
+    }
+    if (context->http_streams) {
+        lh_bufferevent_http_stream_free(context->http_streams);
+        context->http_streams = NULL;
+    }
+    if (context->event_quic) {
+        event_free(context->event_quic);
+        context->event_quic = NULL;
+    }
+    if (event) {
+        event_free(event);
     }
     SSL_free(ssl);
     return NULL;
@@ -857,9 +879,6 @@ static void free_http_stream(struct bufferevent_http_stream *http_stream) {
 
 void free_context_ssl(struct wss_proxy_context *proxy_context) {
     struct event *event;
-    if (!proxy_context->ssl) {
-        return;
-    }
     if (proxy_context->http_streams) {
         lh_bufferevent_http_stream_doall(proxy_context->http_streams, free_http_stream);
         lh_bufferevent_http_stream_free(proxy_context->http_streams);
@@ -877,12 +896,18 @@ void free_context_ssl(struct wss_proxy_context *proxy_context) {
         event_free(proxy_context->event_quic);
         proxy_context->event_quic = NULL;
     }
-    event = SSL_get_app_data(proxy_context->ssl);
-    if (event) {
-        event_free(event);
+    if (proxy_context->ssl) {
+        event = SSL_get_app_data(proxy_context->ssl);
+        if (event) {
+            event_free(event);
+        }
+        SSL_free(proxy_context->ssl);
+        proxy_context->ssl = NULL;
     }
-    SSL_free(proxy_context->ssl);
-    proxy_context->ssl = NULL;
+    if (proxy_context->stream) {
+        SSL_free(proxy_context->stream);
+        proxy_context->stream = NULL;
+    }
 }
 
 static void http2_readcb(evutil_socket_t sock, short event, void *context) {
@@ -931,6 +956,7 @@ static void bufferevent_readcb(evutil_socket_t fd, short event, void *arg) {
     ssize_t res;
     short what = BEV_EVENT_READING;
     struct bufferevent *bev = arg;
+    struct bufferevent_context_ssl *context_ssl;
 
     if (event == EV_TIMEOUT) {
         what |= BEV_EVENT_TIMEOUT;
@@ -961,6 +987,11 @@ reschedule:
     goto done;
 
 error:
+    context_ssl = (struct bufferevent_context_ssl *) bufferevent_get_context(bev);
+    if (context_ssl && context_ssl->read_only) {
+        context_ssl->has_error = 1;
+        goto done;
+    }
     bufferevent_disable(bev, EV_READ);
     if (bev->errorcb) {
         bev->errorcb(bev, what, bev->cbarg);
@@ -1031,7 +1062,7 @@ done:
 
 static int init_ssl_sock(struct wss_proxy_context *context, struct event_base *base, SSL **ssl1) {
     int sock;
-    SSL *ssl;
+    SSL *ssl, *stream = NULL;
     socklen_t socklen;
     struct sockaddr_storage sockaddr;
 
@@ -1081,9 +1112,15 @@ static int init_ssl_sock(struct wss_proxy_context *context, struct event_base *b
         if (set_peer_addr(ssl, (struct sockaddr *) &sockaddr, context->server.port)) {
             goto error;
         }
-        if (send_h3_settings(ssl)) {
+        stream = SSL_new_stream(ssl, SSL_STREAM_FLAG_ADVANCE | SSL_STREAM_FLAG_UNI);
+        if (stream == NULL) {
+            LOGW("cannot make new quic stream");
             goto error;
         }
+        if (send_h3_settings(stream)) {
+            goto error;
+        }
+        context->stream = stream;
         LOGD("send h3 settings");
 #endif
     }
@@ -1098,6 +1135,9 @@ error:
     }
     if (ssl != NULL) {
         SSL_free(ssl);
+    }
+    if (stream != NULL) {
+        SSL_free(stream);
     }
     return -1;
 }
