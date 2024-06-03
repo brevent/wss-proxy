@@ -676,6 +676,9 @@ int main() {
     struct wss_proxy_context wss_context;
 
     memset(&wss_context, 0, sizeof(wss_context));
+    memset(&server_context, 0, sizeof(server_context));
+    memset(&extra_server_context, 0, sizeof(server_context));
+
     if (init_wss_addr(&wss_context.server)) {
         return 1;
     }
@@ -686,24 +689,24 @@ int main() {
             wss_context.ssl_ctx = SSL_CTX_new(OSSL_QUIC_client_method());
 #else
             LOGE("http3 is unsupported");
-            return 1;
+            goto error;
 #endif
         } else {
             wss_context.ssl_ctx = SSL_CTX_new(TLS_client_method());
         }
         if (!wss_context.ssl_ctx) {
             LOGE("cannot create ssl context");
-            return 1;
+            goto error;
         }
         SSL_CTX_set_verify(wss_context.ssl_ctx, SSL_VERIFY_PEER, NULL);
         if (!SSL_CTX_set_default_verify_paths(wss_context.ssl_ctx)) {
             LOGE("cannot set default trusted certificate store");
-            return 1;
+            goto error;
         }
         if (!wss_context.server.http3
             && !SSL_CTX_set_min_proto_version(wss_context.ssl_ctx, TLS1_2_VERSION)) {
             LOGE("cannot set minimum TLS to 1.2");
-            return 1;
+            goto error;
         }
 #ifdef HAVE_SSL_CTX_SET_KEYLOG_CALLBACK
         SSL_CTX_set_keylog_callback(wss_context.ssl_ctx, ssl_keylog_callback);
@@ -713,7 +716,7 @@ int main() {
     socklen = sizeof(raw_addr);
     memset(&raw_addr, 0, socklen);
     if (init_raw_addr(&raw_addr, &socklen)) {
-        return 1;
+        goto error;
     }
 
     event_set_log_callback(log_callback);
@@ -734,13 +737,11 @@ int main() {
         goto error;
     }
 
-    memset(&server_context, 0, sizeof(server_context));
     if (init_server_context(&server_context, base, &wss_context, (struct sockaddr *) &raw_addr, socklen)) {
         goto error;
     }
 
     extra_port = find_option_port("extra-listen-port", 0);
-    memset(&extra_server_context, 0, sizeof(server_context));
     if (extra_port > 0) {
         memcpy(&extra_raw_addr, &raw_addr, socklen);
         set_port(&extra_raw_addr, extra_port);
