@@ -541,16 +541,17 @@ static enum bufferevent_filter_result wss_input_filter_udp(struct evbuffer *src,
     return common_wss_input_filter(src, dst, tev, 0);
 }
 
-static void close_wev(struct bufferevent *wev) {
-    if (wev->cbarg) {
+static void close_wev(struct bufferevent *wev, struct bufferevent *tev) {
+    if (wev->cbarg && wev->cbarg != tev) {
         bufferevent_free(wev->cbarg);
+        wev->cbarg = NULL;
     }
     bufferevent_free(wev);
 }
 
 static void do_close_wss(struct bufferevent *tev) {
     if (tev->cbarg) {
-        close_wev(tev->cbarg);
+        close_wev(tev->cbarg, tev);
     }
     bufferevent_free(tev);
 }
@@ -605,7 +606,7 @@ static void close_wss(struct bufferevent *tev, enum close_reason close_reason, s
         LOGD("close wss %p later", tev);
         bufferevent_setcb(tev, close_wss_data_cb, NULL, close_wss_event_cb, NULL);
         if (wev) {
-            close_wev(wev);
+            close_wev(wev, tev);
         }
     } else {
         LOGD("close wss %p", tev);
