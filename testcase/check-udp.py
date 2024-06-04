@@ -1,11 +1,13 @@
+import sys
 import socket
 import socks
 import time
 
 if __name__ == '__main__':
+    port = len(sys.argv) > 1 and int(sys.argv[1]) or 1081
     for x in range(4):
         sock = socks.socksocket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.set_proxy(socks.SOCKS5, "localhost", 1081)
+        sock.set_proxy(socks.SOCKS5, "localhost", port)
         sock.settimeout(10)
         reqs = []
         for y in range(10):
