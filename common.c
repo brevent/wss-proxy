@@ -632,6 +632,30 @@ static void raw_forward_cb(struct bufferevent *raw, void *wss) {
     }
 }
 
+#define MAX_PROXY_BUFFER (512 * 1024)
+#define MIN_PROXY_BUFFER (64 * 1024)
+static void tev_write_cb(struct evbuffer *buffer, const struct evbuffer_cb_info *info, void *arg) {
+    size_t length;
+    struct bufferevent *raw;
+
+    raw = arg;
+    if (!raw->be_ops) {
+        return;
+    }
+    length = evbuffer_get_length(buffer);
+    if (info->n_deleted) {
+        if (length <= MIN_PROXY_BUFFER && length + info->n_deleted > MIN_PROXY_BUFFER) {
+            LOGD("enable raw for read, length: %lu", length);
+            bufferevent_enable(raw, EV_READ);
+        }
+    } else if (info->n_added) {
+        if (length >= MAX_PROXY_BUFFER && length - info->n_added < MAX_PROXY_BUFFER) {
+            LOGD("disable raw for read, length: %lu", length);
+            bufferevent_disable(raw, EV_READ);
+        }
+    }
+}
+
 void raw_event_cb(struct bufferevent *raw, short event, void *wss) {
     uint16_t port;
     if (event & (BEV_EVENT_EOF | BEV_EVENT_ERROR)) {
@@ -708,6 +732,7 @@ void tunnel_wss(struct bufferevent *raw, struct evhttp_connection *wss) {
     struct bufferevent *wev;
 
     tev = evhttp_connection_get_bufferevent(wss);
+    evbuffer_add_cb(tev->output, tev_write_cb, raw);
     wev = bufferevent_filter_new(tev, wss_input_filter, NULL, 0, NULL, raw);
     evhttp_connection_set_closecb(wss, wss_close_cb, wev);
 
@@ -764,6 +789,7 @@ void tunnel_ss(struct bufferevent *raw, struct evhttp_connection *wss) {
     struct bufferevent *tev;
 
     tev = evhttp_connection_get_bufferevent(wss);
+    evbuffer_add_cb(tev->output, tev_write_cb, raw);
     bufferevent_enable(tev, EV_READ | EV_WRITE);
     bufferevent_setcb(tev, wss_forward_cb, NULL, wss_event_cb_ss, raw);
 
