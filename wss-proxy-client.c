@@ -444,7 +444,19 @@ static size_t build_http_request_v3(struct wss_proxy_context *context, int udp, 
 }
 
 static void tev_raw_event_cb(struct bufferevent *tev, short event, void *raw) {
-    return raw_event_cb(raw, event, tev);
+    struct bufferevent_context_ssl *context_ssl;
+    struct wss_proxy_context *proxy_context = NULL;
+
+    context_ssl = (struct bufferevent_context_ssl *) tev->wm_write.low;
+    if (context_ssl && (context_ssl->http == http2 || context_ssl->http == http3)) {
+        proxy_context = context_ssl->proxy_context;
+    }
+    raw_event_cb(raw, event, tev);
+    if (proxy_context && (event & BEV_EVENT_TIMEOUT)) {
+        LOGW("http mux connection timeout, close");
+        free_context_ssl(proxy_context);
+        tev->wm_write.low = (size_t) NULL;
+    }
 }
 
 static struct bufferevent *connect_wss(struct wss_proxy_context *context, struct bufferevent *raw) {

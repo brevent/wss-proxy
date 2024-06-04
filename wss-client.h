@@ -54,8 +54,6 @@ struct bufferevent_context_ssl {
     struct wss_proxy_context *proxy_context;
     enum http http: 2;
     uint8_t upgrade: 1;
-    uint8_t read_only: 1;
-    uint8_t has_error: 1;
     struct evbuffer *frame;
     uint32_t stream_id;
     uint32_t send_window;

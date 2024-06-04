@@ -18,6 +18,8 @@ static void http2_writecb(struct evbuffer *output, const struct evbuffer_cb_info
 struct bufferevent_http_stream {
     uint64_t stream_id;
     struct bufferevent *bev;
+    uint8_t skip_free: 1;
+    uint8_t mark_free: 1;
 };
 
 static unsigned long bufferevent_http_stream_hash(const bufferevent_http_stream *a) {
@@ -58,10 +60,15 @@ static void bufferevent_context_ssl_free(struct bufferevent_context *context) {
         key.stream_id = context_ssl->stream_id;
         http_stream = lh_bufferevent_http_stream_retrieve(context_ssl->proxy_context->http_streams, &key);
         if (http_stream) {
-            lh_bufferevent_http_stream_delete(context_ssl->proxy_context->http_streams, &key);
-            free(http_stream);
+            if (http_stream->skip_free) {
+                http_stream->mark_free = 1;
+                LOGD("ignore remove http stream %lu: %p", (unsigned long) key.stream_id, http_stream);
+            } else {
+                LOGD("remove http stream %lu: %p", (unsigned long) key.stream_id, http_stream);
+                lh_bufferevent_http_stream_delete(context_ssl->proxy_context->http_streams, &key);
+                free(http_stream);
+            }
         }
-        LOGD("remove http stream %lu: %p", (unsigned long) key.stream_id, http_stream);
     }
     if (context_ssl->frame != NULL) {
         evbuffer_free(context_ssl->frame);
@@ -179,33 +186,8 @@ static ssize_t check_ssl_error(struct bufferevent_context_ssl *context_ssl,
 }
 
 #if HAVE_OSSL_QUIC_CLIENT_METHOD
-struct sock_event {
-    evutil_socket_t sock;
-    short event;
-    uint64_t total;
-};
-
-static void read_http_stream(struct bufferevent_http_stream *http_stream, void *arg) {
-    int enabled;
-    uint64_t total;
-    struct sock_event *sock_event;
-    struct bufferevent_context_ssl *context_ssl;
-
-    enabled = bufferevent_get_enabled(http_stream->bev) & EV_READ;
-    if (!enabled || !http_stream->bev->cbarg) {
-        return;
-    }
-    sock_event = arg;
-    context_ssl = (struct bufferevent_context_ssl *) bufferevent_get_context(http_stream->bev);
-    total = context_ssl->total;
-    context_ssl->read_only = 1;
-    bufferevent_readcb(sock_event->sock, sock_event->event, http_stream->bev);
-    sock_event->total += (context_ssl->total - total);
-}
-
 static void http3_eventcb(evutil_socket_t sock, short event, void *context) {
-    int is_infinite;
-    unsigned long streams;
+    int i, is_infinite;
     SSL *ssl;
     struct timeval tv;
     struct wss_proxy_context *proxy_context;
@@ -214,8 +196,7 @@ static void http3_eventcb(evutil_socket_t sock, short event, void *context) {
     (void) event;
     proxy_context = context;
     ssl = proxy_context->ssl;
-    streams = lh_bufferevent_http_stream_num_items(proxy_context->http_streams);
-    for (;;) {
+    for (i = 0; i < 0x3; i++) {
         if (!SSL_get_event_timeout(ssl, &tv, &is_infinite)) {
             LOGW("cannot SSL_get_event_timeout");
             break;
@@ -227,59 +208,74 @@ static void http3_eventcb(evutil_socket_t sock, short event, void *context) {
             break;
         }
         if (tv.tv_sec || tv.tv_usec) {
-            if (streams && (tv.tv_sec > 1 || tv.tv_usec > 15000)) {
-                tv.tv_sec = 0;
-                tv.tv_usec = 15000;
-            }
             event_add(proxy_context->event_quic, &tv);
+            LOGD("handled %d, would handle events %lu.%03d later", i, tv.tv_sec, (int) tv.tv_usec / 1000);
             break;
         }
         SSL_handle_events(ssl);
     }
-    if (streams) {
-        event_active(SSL_get_app_data(proxy_context->ssl), EV_READ | EV_FINALIZE, 0);
+}
+
+struct sock_event {
+    evutil_socket_t sock;
+    short event;
+    uint8_t evicted: 1;
+};
+
+static void read_http_stream(struct bufferevent_http_stream *http_stream, void *arg) {
+    int enabled;
+    struct sock_event *sock_event;
+    struct bufferevent_context_ssl *context_ssl;
+
+    enabled = bufferevent_get_enabled(http_stream->bev) & EV_READ;
+    context_ssl = (struct bufferevent_context_ssl *) http_stream->bev->wm_write.low;
+    if (!enabled || !context_ssl) {
+        return;
+    }
+    sock_event = arg;
+    http_stream->skip_free = 1;
+    bufferevent_readcb(sock_event->sock, sock_event->event, http_stream->bev);
+    if (http_stream->mark_free) {
+        sock_event->evicted = 1;
     }
 }
 
-static void close_http_stream(struct bufferevent_http_stream *http_stream) {
-    struct bufferevent_context_ssl *context_ssl;
-
-    context_ssl = (struct bufferevent_context_ssl *) bufferevent_get_context(http_stream->bev);
-    if (!context_ssl) {
-        return;
-    }
-    context_ssl->read_only = 0;
-    if (context_ssl->has_error || !http_stream->bev->cbarg) {
-        // trigger read to close stream
-        event_active(&http_stream->bev->ev_read, EV_READ, 0);
+static void close_http_stream(struct bufferevent_http_stream *http_stream, void *http_streams) {
+    if (http_stream->mark_free) {
+        lh_bufferevent_http_stream_delete(http_streams, http_stream);
+        LOGD("free http stream %p", http_stream);
+        free(http_stream);
     }
 }
 
 static void http3_readcb(evutil_socket_t sock, short event, void *context) {
-    int i;
-    uint64_t total;
+    unsigned long hash_factor;
+    struct timeval tv = {0, 15000};
     struct sock_event sock_event;
     struct wss_proxy_context *proxy_context;
     LHASH_OF(bufferevent_http_stream) *http_streams;
 
     sock_event.sock = sock;
-    sock_event.event = (short) (event & ~EV_FINALIZE);
+    sock_event.evicted = 0;
+    sock_event.event = (short) ((event & ~EV_TIMEOUT) | EV_READ);
     proxy_context = context;
     http_streams = proxy_context->http_streams;
-    total = 0;
-    for (i = 0; i < 0x3; i++) {
-        sock_event.total = 0;
-        lh_bufferevent_http_stream_doall_arg(http_streams, read_http_stream, &sock_event);
-        total += sock_event.total;
-        if (!sock_event.total) {
-            break;
-        }
+    // cannot close in doall, so do it again
+    lh_bufferevent_http_stream_doall_arg(http_streams, read_http_stream, &sock_event);
+    if (sock_event.evicted) {
+        hash_factor = lh_bufferevent_http_stream_get_down_load(http_streams);
+        lh_bufferevent_http_stream_set_down_load(http_streams, 0);
+        lh_bufferevent_http_stream_doall_arg(http_streams, close_http_stream, http_streams);
+        lh_bufferevent_http_stream_set_down_load(http_streams, hash_factor);
     }
-    lh_bufferevent_http_stream_doall(http_streams, close_http_stream);
     if (!lh_bufferevent_http_stream_num_items(http_streams)) {
+        LOGD("all streams are completed");
         event_del(SSL_get_app_data(proxy_context->ssl));
+    } else {
+        // seems bug of openssl 3.2.X, need to try later
+        event_add(SSL_get_app_data(proxy_context->ssl), &tv);
     }
-    if (total) {
+    if (!event_pending(proxy_context->event_quic, EV_TIMEOUT, NULL)) {
         event_active(proxy_context->event_quic, EV_TIMEOUT, 0);
     }
 }
@@ -864,16 +860,16 @@ static ssize_t do_write(struct bufferevent *bev, evutil_socket_t fd, uint8_t *bu
 }
 
 static void free_http_stream(struct bufferevent_http_stream *http_stream) {
-    struct bufferevent *bev;
+    struct bufferevent *tev;
+    struct bufferevent_context_ssl *context_ssl;
 
-    bev = http_stream->bev;
-    if (bev) {
-        if (bev->errorcb) {
-            bev->errorcb(bev, BEV_EVENT_READING | BEV_EVENT_ERROR, bev->cbarg);
-        } else {
-            bufferevent_free(http_stream->bev);
-        }
+    http_stream->skip_free = 1;
+    tev = http_stream->bev;
+    context_ssl = (struct bufferevent_context_ssl *) tev->wm_write.low;
+    if (context_ssl && context_ssl->stream_id == http_stream->stream_id && tev->errorcb) {
+        tev->errorcb(tev, BEV_EVENT_READING | BEV_EVENT_ERROR, tev->cbarg);
     }
+    LOGD("free http stream %p", http_stream);
     free(http_stream);
 }
 
@@ -956,7 +952,6 @@ static void bufferevent_readcb(evutil_socket_t fd, short event, void *arg) {
     ssize_t res;
     short what = BEV_EVENT_READING;
     struct bufferevent *bev = arg;
-    struct bufferevent_context_ssl *context_ssl;
 
     if (event == EV_TIMEOUT) {
         what |= BEV_EVENT_TIMEOUT;
@@ -987,11 +982,6 @@ reschedule:
     goto done;
 
 error:
-    context_ssl = (struct bufferevent_context_ssl *) bufferevent_get_context(bev);
-    if (context_ssl && context_ssl->read_only) {
-        context_ssl->has_error = 1;
-        goto done;
-    }
     bufferevent_disable(bev, EV_READ);
     if (bev->errorcb) {
         bev->errorcb(bev, what, bev->cbarg);
@@ -1243,7 +1233,8 @@ start:
                 event_add(SSL_get_app_data(context->ssl), NULL);
                 LOGD("add event for read");
             }
-            LOGD("http stream %lu: %p", (unsigned long) http_stream->stream_id, http_stream);
+            LOGD("http stream %lu: %p, total: %lu", (unsigned long) http_stream->stream_id, http_stream,
+                 lh_bufferevent_http_stream_num_items(context->http_streams));
         }
     }
     LOGD("bufferevent_new, tev: %p, raw: %p", tev, raw);
