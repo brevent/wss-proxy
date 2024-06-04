@@ -173,10 +173,14 @@ void raw_event_cb(struct bufferevent *raw, short event, void *wss);
 
 void tunnel_wss(struct bufferevent *raw, struct bufferevent *tev, bufferevent_filter_cb output_filter);
 
-/**
- * @return whether close frame is sent
- */
-int send_close(struct bufferevent *raw, uint16_t reason);
+enum close_reason {
+    close_reason_raw,
+    close_reason_wss,
+    close_reason_rfc,
+    close_reason_eof,
+};
+
+void close_wss(struct bufferevent *tev, enum close_reason close_reason, short event);
 
 #ifdef WSS_ENABLE_PING
 void send_ping(struct bufferevent *tev, const char *payload, uint8_t size);

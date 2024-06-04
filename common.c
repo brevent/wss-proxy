@@ -17,13 +17,7 @@
 #endif
 #include "common.h"
 
-enum close_reason {
-    close_reason_raw,
-    close_reason_wss,
-    close_reason_rfc,
-};
-
-static void close_wss(struct bufferevent *tev, enum close_reason close_reason, short event);
+static int send_close(struct bufferevent *tev, uint16_t reason);
 
 void safe_bufferevent_free(struct bufferevent *bev) {
     LOGD("free %p", bev);
@@ -568,7 +562,7 @@ static void close_wss_event_cb(struct bufferevent *tev, short event, void *arg) 
     do_close_wss(tev);
 }
 
-int send_close(struct bufferevent *tev, uint16_t reason) {
+static int send_close(struct bufferevent *tev, uint16_t reason) {
     struct bufferevent *wev = tev->cbarg;
     if (wev == NULL) {
         LOGD("wss %p closed", tev);
@@ -586,12 +580,15 @@ int send_close(struct bufferevent *tev, uint16_t reason) {
     }
 }
 
-static void close_wss(struct bufferevent *tev, enum close_reason close_reason, short event) {
+void close_wss(struct bufferevent *tev, enum close_reason close_reason, short event) {
     int close_later;
     struct bufferevent *wev;
 
     if (close_reason == close_reason_raw) {
         close_later = send_close(tev, CLOSE_GOING_AWAY);
+    } else if (close_reason == close_reason_eof) {
+        send_close(tev, CLOSE_GOING_AWAY);
+        close_later = 0;
     } else if (close_reason == close_reason_rfc) {
         close_later = send_close(tev, (uint16_t) event);
     } else if (event & BEV_EVENT_EOF) {

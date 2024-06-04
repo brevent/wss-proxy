@@ -616,12 +616,17 @@ static void udp_read_cb_server(evutil_socket_t sock, short event, void *ctx) {
 }
 
 static void free_udp(bufferevent_udp *udp) {
-    struct bufferevent *raw = (struct bufferevent *) udp;
-    LOGD("free udp for peer %d", get_peer_port(raw));
-    if (raw->errorcb != raw_event_cb) {
-        send_close(raw, CLOSE_GOING_AWAY);
+    struct bufferevent *raw, *wev, *tev;
+
+    raw = (struct bufferevent *) udp;
+    wev = raw->cbarg;
+    tev = wev ? bufferevent_get_underlying(wev) : NULL;
+    LOGD("free udp for peer %d, raw: %p, wev: %p, tev: %p", get_peer_port(raw), raw, wev, tev);
+    if (tev) {
+        close_wss(tev, close_reason_eof, BEV_EVENT_EOF);
+    } else {
+        raw->errorcb(raw, BEV_EVENT_EOF, get_cbarg(raw));
     }
-    raw->errorcb(raw, BEV_EVENT_EOF, get_cbarg(raw));
 }
 
 static void server_context_free(const struct server_context *server_context) {
@@ -632,6 +637,7 @@ static void server_context_free(const struct server_context *server_context) {
         evutil_closesocket(server_context->udp_sock);
     }
     if (server_context->udp_context.hash) {
+        lh_bufferevent_udp_set_down_load(server_context->udp_context.hash, 0);
         lh_bufferevent_udp_doall(server_context->udp_context.hash, free_udp);
         lh_bufferevent_udp_free(server_context->udp_context.hash);
     }
@@ -786,6 +792,8 @@ int main() {
 
     code = 0;
 error:
+    server_context_free(&server_context);
+    server_context_free(&extra_server_context);
     free_context_ssl(&wss_context);
     if (event_parent) {
         event_free(event_parent);
@@ -793,8 +801,6 @@ error:
     if (event_sigquit) {
         event_free(event_sigquit);
     }
-    server_context_free(&server_context);
-    server_context_free(&extra_server_context);
     if (base) {
         event_base_free(base);
     }
