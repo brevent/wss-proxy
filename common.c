@@ -19,6 +19,8 @@
 
 static int send_close(struct bufferevent *tev, uint16_t reason);
 
+static void tev_write_cb(struct evbuffer *buffer, const struct evbuffer_cb_info *info, void *arg);
+
 void safe_bufferevent_free(struct bufferevent *bev) {
     LOGD("free %p", bev);
     if (bev->be_ops) {
@@ -537,6 +539,7 @@ static enum bufferevent_filter_result wss_input_filter_udp(struct evbuffer *src,
 
 static void close_wev(struct bufferevent *wev, struct bufferevent *tev) {
     if (wev->cbarg && wev->cbarg != tev) {
+        evbuffer_remove_cb(tev->output, tev_write_cb, wev->cbarg);
         bufferevent_free(wev->cbarg);
         wev->cbarg = NULL;
     }
@@ -757,10 +760,35 @@ static void wss_event_cb(struct bufferevent *wev, short event, void *raw) {
 #endif
 }
 
+#define MAX_PROXY_BUFFER (512 * 1024)
+#define MIN_PROXY_BUFFER (64 * 1024)
+static void tev_write_cb(struct evbuffer *buffer, const struct evbuffer_cb_info *info, void *arg) {
+    size_t length;
+    struct bufferevent *raw;
+
+    raw = arg;
+    if (!raw->be_ops) {
+        return;
+    }
+    length = evbuffer_get_length(buffer);
+    if (info->n_deleted) {
+        if (length <= MIN_PROXY_BUFFER && length + info->n_deleted > MIN_PROXY_BUFFER) {
+            LOGD("enable raw for read, length: %lu", length);
+            bufferevent_enable(raw, EV_READ);
+        }
+    } else if (info->n_added) {
+        if (length >= MAX_PROXY_BUFFER && length - info->n_added < MAX_PROXY_BUFFER) {
+            LOGD("disable raw for read, length: %lu", length);
+            bufferevent_disable(raw, EV_READ);
+        }
+    }
+}
+
 void tunnel_wss(struct bufferevent *raw, struct bufferevent *tev, bufferevent_filter_cb output_filter) {
     struct bufferevent *wev;
     bufferevent_filter_cb tev_input_filter, tev_output_filter;
 
+    evbuffer_add_cb(tev->output, tev_write_cb, raw);
     tev_input_filter = raw->be_ops ? wss_input_filter : wss_input_filter_udp;
     tev_output_filter = output_filter ? output_filter : wss_output_filter;
     wev = bufferevent_filter_new(tev, tev_input_filter, tev_output_filter, 0, NULL, tev);
@@ -813,6 +841,7 @@ static void raw_forward_cb_ss(struct bufferevent *raw, void *tev) {
 }
 
 void tunnel_ss(struct bufferevent *raw, struct bufferevent *tev) {
+    evbuffer_add_cb(tev->output, tev_write_cb, raw);
     bufferevent_enable(tev, EV_READ | EV_WRITE);
     bufferevent_setcb(tev, wss_forward_cb, NULL, wss_event_cb_ss, raw);
 
