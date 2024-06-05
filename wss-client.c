@@ -228,7 +228,7 @@ static void read_http_stream(struct bufferevent_http_stream *http_stream, void *
     struct bufferevent_context_ssl *context_ssl;
 
     enabled = bufferevent_get_enabled(http_stream->bev) & EV_READ;
-    context_ssl = (struct bufferevent_context_ssl *) http_stream->bev->wm_write.low;
+    context_ssl = (void *) http_stream->bev->wm_write.low;
     if (!enabled || !context_ssl) {
         return;
     }
@@ -465,6 +465,9 @@ static SSL *init_ssl(struct wss_proxy_context *context, struct event_base *base,
             LOGW("cannot set h2 alpn");
             goto error;
         }
+        context->initial_window_size = DEFAULT_INITIAL_WINDOW_SIZE;
+        context->send_window = DEFAULT_INITIAL_WINDOW_SIZE;
+        context->recv_window = MAX_WINDOW_SIZE;
         context->next_stream_id = 1;
         context->settings_sent = 0;
         context->input = evbuffer_new();
@@ -523,12 +526,12 @@ static ssize_t parse_http3(struct bufferevent *bev, uint8_t *buffer, size_t size
     uint8_t frame_type, header[9];
     struct bufferevent_context_ssl *context_ssl;
 
-    context_ssl = (struct bufferevent_context_ssl *) bufferevent_get_context(bev);
+    context_ssl = (void *) bev->wm_write.low;
     evbuffer_add(context_ssl->frame, buffer, size);
     for (;;) {
         header_size = evbuffer_copyout(context_ssl->frame, header, 9);
-        if (header_size <= 0) {
-            return WSS_ERROR;
+        if (header_size < 2) {
+            return WSS_MORE;
         }
         frame_length = parse_http3_frame(header, header_size, &header_length);
         if (frame_length == 0) {
@@ -569,12 +572,14 @@ struct http2_frame {
 
 static void handle_http2_frame(struct bufferevent *bev, struct http2_frame *http2_frame, struct evbuffer *frame) {
     short what;
-    uint32_t offset;
+    uint32_t delta;
     uint8_t header[HTTP2_HEADER_LENGTH + 4];
     struct bufferevent_context_ssl *context_ssl;
+    struct wss_proxy_context *proxy_context;
 
     what = 0;
-    context_ssl = ((struct bufferevent_context_ssl *) bufferevent_get_context(bev));
+    context_ssl = (void *) bev->wm_write.low;
+    proxy_context = context_ssl->proxy_context;
     if (http2_frame->type == 1 && !context_ssl->upgrade) {
         evbuffer_remove_buffer(frame, bev->input, http2_frame->length + HTTP2_HEADER_LENGTH);
     } else if (http2_frame->type == 0) {
@@ -583,14 +588,30 @@ static void handle_http2_frame(struct bufferevent *bev, struct http2_frame *http
         if (http2_frame->flag & 1) {
             what = BEV_EVENT_EOF;
         }
+        context_ssl->recv_window -= http2_frame->length;
+        proxy_context->recv_window -= http2_frame->length;
+        if (context_ssl->recv_window < MAX_WINDOW_SIZE / 4) {
+            LOGD("stream %u recv window %lu", context_ssl->stream_id, context_ssl->recv_window);
+            build_http2_frame(header, 4, 8, 0, context_ssl->stream_id);
+            *((uint32_t *) (header + HTTP2_HEADER_LENGTH)) = htonl(MAX_WINDOW_SIZE - context_ssl->recv_window);
+            context_ssl->recv_window = MAX_WINDOW_SIZE;
+            evbuffer_add(context_ssl->proxy_context->output, header, HTTP2_HEADER_LENGTH + 4);
+        }
+        if (proxy_context->recv_window < MAX_WINDOW_SIZE / 4) {
+            LOGD("connection recv window %lu", proxy_context->recv_window);
+            build_http2_frame(header, 4, 8, 0, 0);
+            *((uint32_t *) (header + HTTP2_HEADER_LENGTH)) = htonl(MAX_WINDOW_SIZE - proxy_context->recv_window);
+            proxy_context->recv_window = MAX_WINDOW_SIZE;
+            evbuffer_add(context_ssl->proxy_context->output, header, HTTP2_HEADER_LENGTH + 4);
+        }
     } else {
         if (http2_frame->type == 3) {
             what = BEV_EVENT_EOF;
         } else if (http2_frame->type == 8 && http2_frame->length == 4) {
             evbuffer_copyout(frame, header, sizeof(header));
-            offset = ntohl(*((uint32_t *) (header + HTTP2_HEADER_LENGTH)));
-            context_ssl->send_window += offset;
-            LOGD("stream %u send window 0x%x", context_ssl->stream_id, context_ssl->send_window);
+            delta = ntohl(*((uint32_t *) (header + HTTP2_HEADER_LENGTH)));
+            context_ssl->send_window += delta;
+            LOGD("stream %u send window %ld, delta: 0x%x", context_ssl->stream_id, context_ssl->send_window, delta);
         } else {
             LOGW("unsupported frame type: %d", http2_frame->type);
             what = BEV_EVENT_ERROR;
@@ -608,7 +629,22 @@ static void handle_http2_frame(struct bufferevent *bev, struct http2_frame *http
     }
 }
 
-static void show_settings(struct wss_proxy_context *context, uint8_t *header, size_t length) {
+static void update_http_stream_window_size(struct bufferevent_http_stream *http_stream, void *arg) {
+    struct wss_proxy_context *context;
+    struct bufferevent_context_ssl *context_ssl;
+
+    context = arg;
+    context_ssl = (void *) http_stream->bev->wm_write.low;
+    if (context_ssl && context_ssl->stream_id == http_stream->stream_id) {
+        LOGD("update stream %u, old initial_window_size: %u, new initial_window_size: %u",
+             (unsigned int) http_stream->stream_id, context_ssl->initial_window_size, context->initial_window_size);
+        context_ssl->send_window += context->initial_window_size - context_ssl->initial_window_size;
+        context_ssl->initial_window_size = context->initial_window_size;
+        LOGD("stream %u send window %ld", context_ssl->stream_id, context_ssl->send_window);
+    }
+}
+
+static void update_settings(struct wss_proxy_context *context, uint8_t *header, size_t length) {
     uint8_t *frame;
     short settings_type;
     uint32_t settings_value;
@@ -624,6 +660,7 @@ static void show_settings(struct wss_proxy_context *context, uint8_t *header, si
         } else if (settings_type == 0x4) {
             LOGD("initial window size: %u", settings_value);
             context->initial_window_size = settings_value;
+            lh_bufferevent_http_stream_doall_arg(context->http_streams, update_http_stream_window_size, context);
         } else if (settings_type == 0x5) {
             LOGD("max frame size: %u", settings_value);
         } else if (settings_type == 0x8) {
@@ -633,6 +670,14 @@ static void show_settings(struct wss_proxy_context *context, uint8_t *header, si
         }
         length -= 6;
     }
+}
+
+static void update_window_update(struct wss_proxy_context *context, const uint8_t *header) {
+    uint32_t delta;
+
+    delta = ntohl(*((uint32_t *) header));
+    context->send_window += delta;
+    LOGD("connection send window %ld, delta: 0x%x", context->send_window, delta);
 }
 
 static ssize_t parse_http2(struct wss_proxy_context *context, uint8_t *buffer, size_t size) {
@@ -659,6 +704,9 @@ static ssize_t parse_http2(struct wss_proxy_context *context, uint8_t *buffer, s
         http2_frame.type = *frame++;
         http2_frame.flag = *frame++;
         http2_frame.stream_id = ntohl(*((uint32_t *) frame));
+        if (evbuffer_get_length(context->input) < http2_frame.length + (size_t) HTTP2_HEADER_LENGTH) {
+            return WSS_MORE;
+        }
         if (http2_frame.stream_id & 1) {
             struct bufferevent_http_stream key, *http_stream;
             key.stream_id = http2_frame.stream_id;
@@ -684,11 +732,13 @@ static ssize_t parse_http2(struct wss_proxy_context *context, uint8_t *buffer, s
         } else {
             switch (http2_frame.type) {
                 case 4: // settings
-                    show_settings(context, header + HTTP2_HEADER_LENGTH, MIN(24, http2_frame.length));
+                    update_settings(context, header + HTTP2_HEADER_LENGTH, MIN(24, http2_frame.length));
                     break;
-                case 8: // send_window update
+                case 8: // window update
+                    update_window_update(context, header + HTTP2_HEADER_LENGTH);
                     break;
                 case 7: // goaway
+                    LOGW("sever send goway");
                     return WSS_EOF;
                 default:
                     LOGW("unknown control frame %d", http2_frame.type);
@@ -779,7 +829,7 @@ static ssize_t do_ssl_write(struct bufferevent_context_ssl *context_ssl, uint8_t
                          "\x00\x00\x00\x00"
                          "\x00\x02\x00\x00\x00\x00"
                          "\x00\x03\x00\x00\x00\xff"
-                         "\x00\x04\x00\x00\xff\xff"
+                         "\x00\x04\x00\x00\xff\xff" // DEFAULT_INITIAL_WINDOW_SIZE
                          "\x00\x00\x04\x08\x00\x00\x00\x00\x00\x7f\xff\x00\x00",
                          64, &written)) {
             context_ssl->proxy_context->settings_sent = 1;
@@ -844,6 +894,7 @@ static ssize_t do_read(struct bufferevent *bev, evutil_socket_t fd) {
         }
         return res;
     } else {
+        LOGW("no ssl and no fd");
         return WSS_ERROR;
     }
 }
@@ -865,7 +916,7 @@ static void free_http_stream(struct bufferevent_http_stream *http_stream) {
 
     http_stream->skip_free = 1;
     tev = http_stream->bev;
-    context_ssl = (struct bufferevent_context_ssl *) tev->wm_write.low;
+    context_ssl = (void *) tev->wm_write.low;
     if (context_ssl && context_ssl->stream_id == http_stream->stream_id && tev->errorcb) {
         tev->errorcb(tev, BEV_EVENT_READING | BEV_EVENT_ERROR, tev->cbarg);
     }
@@ -1172,8 +1223,12 @@ static struct bufferevent_context_ssl *init_ssl_context(struct wss_proxy_context
         context_ssl->http = http2;
         context_ssl->ssl = ssl;
         context_ssl->stream_id = context->next_stream_id;
-        context_ssl->send_window = MAX(context->initial_window_size, 65535);
+        context_ssl->initial_window_size = context->initial_window_size;
+        context_ssl->send_window = context->initial_window_size;
+        context_ssl->recv_window = DEFAULT_INITIAL_WINDOW_SIZE;
         context->next_stream_id += 2;
+        LOGD("stream %u send window %ld, recv window %lu",
+             context_ssl->stream_id, context_ssl->send_window, context_ssl->recv_window);
         LOGD("ssl: %p", ssl);
     } else {
         context_ssl->http = http1;

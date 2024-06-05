@@ -259,7 +259,7 @@ static enum bufferevent_filter_result wss_output_filter_v2(struct evbuffer *src,
 
     (void) dst_limit;
     (void) mode;
-    context_ssl = (struct bufferevent_context_ssl *) bufferevent_get_context(tev);
+    context_ssl = (void *) ((struct bufferevent *) tev)->wm_write.low;
     if (context_ssl == NULL) {
         return BEV_ERROR;
     }
@@ -270,6 +270,8 @@ static enum bufferevent_filter_result wss_output_filter_v2(struct evbuffer *src,
     frame_header_length = build_http2_frame(buffer, length, 0, 0, context_ssl->stream_id);
     evbuffer_add(dst, buffer, length + frame_header_length);
     evbuffer_drain(src, length);
+    context_ssl->send_window -= (ssize_t) length;
+    context_ssl->proxy_context->send_window -= (ssize_t) length;
     return BEV_OK;
 }
 
@@ -338,8 +340,8 @@ static size_t build_http_request_v2(struct wss_proxy_context *context, int udp, 
     }
     header_length = buffer - header - 9;
     build_http2_frame(header, header_length, 1, 4, stream_id);
-    buffer += build_http2_frame(buffer, 0x4, 0x8, 0, stream_id);
-    memcpy(buffer, "\x7f\xff\x00\x00", 4);
+    buffer += build_http2_frame(buffer, 0x4, 0x8, 0, stream_id); // window_update
+    *((uint32_t *) buffer) = htonl(MAX_WINDOW_SIZE - DEFAULT_INITIAL_WINDOW_SIZE);
     buffer += 4;
     return (char *) buffer - request;
 }
@@ -447,7 +449,7 @@ static void tev_raw_event_cb(struct bufferevent *tev, short event, void *raw) {
     struct bufferevent_context_ssl *context_ssl;
     struct wss_proxy_context *proxy_context = NULL;
 
-    context_ssl = (struct bufferevent_context_ssl *) tev->wm_write.low;
+    context_ssl = (void *) tev->wm_write.low;
     if (context_ssl && (context_ssl->http == http2 || context_ssl->http == http3)) {
         proxy_context = context_ssl->proxy_context;
     }
@@ -463,6 +465,7 @@ static struct bufferevent *connect_wss(struct wss_proxy_context *context, struct
     size_t length;
     char request[1024];
     struct bufferevent *tev;
+    struct bufferevent_context_ssl *context_ssl;
     bufferevent_data_cb cb;
     struct timeval tv = {WSS_TIMEOUT, 0};
 
@@ -479,8 +482,10 @@ static struct bufferevent *connect_wss(struct wss_proxy_context *context, struct
         length = build_http_request_v3(context, !raw->be_ops, request);
         cb = http_response_cb_v3;
     } else if (context->server.http2) {
-        uint32_t stream_id = ((struct bufferevent_context_ssl *) bufferevent_get_context(tev))->stream_id;
-        length = build_http_request_v2(context, !raw->be_ops, request, stream_id);
+        context_ssl = (void *) tev->wm_write.low;
+        length = build_http_request_v2(context, !raw->be_ops, request, context_ssl->stream_id);
+        context_ssl->recv_window = MAX_WINDOW_SIZE;
+        LOGD("stream %u recv window %lu", context_ssl->stream_id, context_ssl->recv_window);
         cb = http_response_cb_v2;
     } else {
         length = build_http_request(context, !raw->be_ops, request);

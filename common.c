@@ -22,9 +22,10 @@ static int send_close(struct bufferevent *tev, uint16_t reason);
 static void tev_write_cb(struct evbuffer *buffer, const struct evbuffer_cb_info *info, void *arg);
 
 void safe_bufferevent_free(struct bufferevent *bev) {
+    struct bufferevent_context *context;
     LOGD("free %p", bev);
     if (bev->be_ops) {
-        struct bufferevent_context *context = (struct bufferevent_context *) bev->wm_write.low;
+        context = (void *) bev->wm_write.low;
         if (context != NULL && context->free != NULL) {
             context->free(context);
             bev->wm_write.low = (size_t) NULL;
@@ -56,26 +57,21 @@ void bufferevent_udp_free(struct bufferevent *raw) {
     free(raw);
 }
 
-static struct bufferevent *get_underlying(struct bufferevent *bev) {
-    struct bufferevent *underlying;
-    underlying = bufferevent_get_underlying(bev);
-    if (underlying == NULL) {
-        return bev;
-    } else {
-        return get_underlying(underlying);
-    }
-}
-
 void bufferevent_set_context(struct bufferevent *bev, struct bufferevent_context *context) {
-    struct bufferevent *underlying = get_underlying(bev);
-    if (context && underlying->ev_write.ev_evcallback.evcb_cb_union.evcb_callback == context->ev_writecb) {
-        underlying->wm_write.low = (size_t) context;
+    if (context && context->ev_writecb == bev->ev_write.ev_evcallback.evcb_cb_union.evcb_callback) {
+        bev->wm_write.low = (size_t) context;
     }
 }
 
 struct bufferevent_context *bufferevent_get_context(struct bufferevent *bev) {
-    struct bufferevent *underlying = get_underlying(bev);
-    return (void *) underlying->wm_write.low;
+    struct bufferevent_context *context;
+
+    context = (void *) bev->wm_write.low;
+    if (context && context->ev_writecb == bev->ev_write.ev_evcallback.evcb_cb_union.evcb_callback) {
+        return context;
+    }
+
+    return NULL;
 }
 
 uint16_t get_peer_port(struct bufferevent *bev) {

@@ -45,6 +45,8 @@ struct wss_proxy_context {
     uint8_t settings_sent: 1;
     uint32_t next_stream_id: 23;
     uint32_t initial_window_size;
+    ssize_t send_window;
+    size_t recv_window;
     struct wss_server_info server;
     char user_agent[80];
 };
@@ -56,7 +58,9 @@ struct bufferevent_context_ssl {
     uint8_t upgrade: 1;
     struct evbuffer *frame;
     uint32_t stream_id;
-    uint32_t send_window;
+    uint32_t initial_window_size;
+    ssize_t send_window;
+    size_t recv_window;
     uint64_t total;
     union {
         SSL *ssl;
@@ -71,6 +75,9 @@ struct bufferevent_context_ssl {
 #ifndef MAX
 #define MAX(x, y) ((x) < (y) ? (y) : (x))
 #endif
+
+#define DEFAULT_INITIAL_WINDOW_SIZE 0xffff
+#define MAX_WINDOW_SIZE 0x7fffffff
 
 void free_context_ssl(struct wss_proxy_context *proxy_context);
 
