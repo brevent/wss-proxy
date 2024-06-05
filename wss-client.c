@@ -11,15 +11,22 @@ static void bufferevent_readcb(evutil_socket_t fd, short event, void *arg);
 
 static void bufferevent_writecb(evutil_socket_t fd, short event, void *arg);
 
+#define HTTP2_HEADER_LENGTH 9
+#define MAX_FRAME_SIZE (MAX_WSS_PAYLOAD_SIZE + MAX_WS_HEADER_SIZE + HTTP2_HEADER_LENGTH)
+
 static void http2_readcb(evutil_socket_t sock, short event, void *context);
 
 static void http2_writecb(struct evbuffer *output, const struct evbuffer_cb_info *info, void *context);
+
+static ssize_t do_http2_write(struct wss_proxy_context *context, struct evbuffer *output);
+
+static void free_all_http_streams(struct wss_proxy_context *proxy_context);
 
 struct bufferevent_http_stream {
     uint64_t stream_id;
     struct bufferevent *bev;
     uint8_t skip_free: 1;
-    uint8_t mark_free: 1;
+    volatile uint8_t mark_free: 1;
 };
 
 static unsigned long bufferevent_http_stream_hash(const bufferevent_http_stream *a) {
@@ -37,35 +44,34 @@ static int bufferevent_http_stream_cmp(const bufferevent_http_stream *a, const b
 }
 
 static void bufferevent_context_ssl_free(struct bufferevent_context *context) {
-    uint8_t frame[9];
-    size_t size;
+    uint8_t frame[HTTP2_HEADER_LENGTH + 4];
     struct bufferevent_http_stream key, *http_stream;
     struct bufferevent_context_ssl *context_ssl = (struct bufferevent_context_ssl *) context;
+    struct wss_proxy_context *proxy_context;
 
+    proxy_context = context_ssl->proxy_context;
     if (context_ssl->http == http3) {
 #ifdef HAVE_OSSL_QUIC_CLIENT_METHOD
         LOGD("conclude stream: %p", context_ssl->stream);
         SSL_stream_conclude(context_ssl->stream, 0);
         SSL_free(context_ssl->stream);
 #endif
-    } else if (context_ssl->http == http2) {
-        size = build_http2_frame(frame, 0, 0, 1, context_ssl->stream_id);
-        if (context_ssl->proxy_context->output) {
-            evbuffer_add(context_ssl->proxy_context->output, frame, size);
-        }
+    } else if (context_ssl->http == http2 && proxy_context->output && !proxy_context->ssl_error) {
+        build_http2_frame(frame, 0, 0, 1, context_ssl->stream_id);
+        evbuffer_add(proxy_context->output, frame, HTTP2_HEADER_LENGTH);
     } else if (context_ssl->http == http1) {
         SSL_free(context_ssl->ssl);
     }
-    if (context_ssl->proxy_context->http_streams) {
+    if (proxy_context->http_streams) {
         key.stream_id = context_ssl->stream_id;
-        http_stream = lh_bufferevent_http_stream_retrieve(context_ssl->proxy_context->http_streams, &key);
+        http_stream = lh_bufferevent_http_stream_retrieve(proxy_context->http_streams, &key);
         if (http_stream) {
             if (http_stream->skip_free) {
                 http_stream->mark_free = 1;
                 LOGD("ignore remove http stream %lu: %p", (unsigned long) key.stream_id, http_stream);
             } else {
-                LOGD("remove http stream %lu: %p", (unsigned long) key.stream_id, http_stream);
-                lh_bufferevent_http_stream_delete(context_ssl->proxy_context->http_streams, &key);
+                LOGD("close http stream %lu: %p", (unsigned long) key.stream_id, http_stream);
+                lh_bufferevent_http_stream_delete(proxy_context->http_streams, &key);
                 free(http_stream);
             }
         }
@@ -75,7 +81,6 @@ static void bufferevent_context_ssl_free(struct bufferevent_context *context) {
     }
     free(context_ssl);
 }
-
 
 size_t build_http2_frame(uint8_t *buffer, size_t length, uint8_t type, uint8_t flags, uint32_t stream_id) {
     if (length > 0xffffff) {
@@ -133,8 +138,6 @@ size_t build_http3_frame(uint8_t *frame, uint8_t type, size_t length) {
 }
 
 #define WSS_FRAME (0xffffff)
-#define HTTP2_HEADER_LENGTH 9
-#define MAX_FRAME_SIZE (MAX_WSS_PAYLOAD_SIZE + MAX_WS_HEADER_SIZE + HTTP2_HEADER_LENGTH)
 #define WSS_EOF (0)
 #define WSS_AGAIN (-1)
 #define WSS_ERROR (-2)
@@ -171,16 +174,16 @@ static ssize_t check_ssl_error(struct bufferevent_context_ssl *context_ssl,
         }
         case SSL_ERROR_SYSCALL:
             ret = errno;
-            LOGW("cannot %s to ssl, syscall: %s (%d)", s, strerror(ret), ret);
+            LOGW("cannot %s ssl, syscall: %s (%d)", s, strerror(ret), ret);
             what = WSS_ERROR;
             break;
         default:
-            LOGW("cannot %s to ssl (%d)", s, ret);
+            LOGW("cannot %s ssl (%d)", s, ret);
             what = WSS_ERROR;
             break;
     }
-    if (context_ssl->proxy_context->ssl == ssl) {
-        free_context_ssl(context_ssl->proxy_context);
+    if (context_ssl->proxy_context) {
+        context_ssl->proxy_context->ssl_error = 1;
     }
     return what;
 }
@@ -202,9 +205,9 @@ static void http3_eventcb(evutil_socket_t sock, short event, void *context) {
             break;
         }
         if (is_infinite) {
-            LOGI("infinite, remove timer and free context");
+            LOGI("infinite, remove timer and mark ssl as error");
             event_remove_timer(proxy_context->event_quic);
-            free_context_ssl(proxy_context);
+            proxy_context->ssl_error = 1;
             break;
         }
         if (tv.tv_sec || tv.tv_usec) {
@@ -222,11 +225,14 @@ struct sock_event {
     uint8_t evicted: 1;
 };
 
-static void read_http_stream(struct bufferevent_http_stream *http_stream, void *arg) {
+static void read_http3_stream(struct bufferevent_http_stream *http_stream, void *arg) {
     int enabled;
     struct sock_event *sock_event;
     struct bufferevent_context_ssl *context_ssl;
 
+    if (http_stream->mark_free) {
+        return;
+    }
     enabled = bufferevent_get_enabled(http_stream->bev) & EV_READ;
     context_ssl = (void *) http_stream->bev->wm_write.low;
     if (!enabled || !context_ssl) {
@@ -242,8 +248,8 @@ static void read_http_stream(struct bufferevent_http_stream *http_stream, void *
 
 static void close_http_stream(struct bufferevent_http_stream *http_stream, void *http_streams) {
     if (http_stream->mark_free) {
+        LOGD("close http stream %lu, %p", (unsigned long) http_stream->stream_id, http_stream);
         lh_bufferevent_http_stream_delete(http_streams, http_stream);
-        LOGD("free http stream %p", http_stream);
         free(http_stream);
     }
 }
@@ -260,8 +266,14 @@ static void http3_readcb(evutil_socket_t sock, short event, void *context) {
     sock_event.event = (short) ((event & ~EV_TIMEOUT) | EV_READ);
     proxy_context = context;
     http_streams = proxy_context->http_streams;
-    // cannot close in doall, so do it again
-    lh_bufferevent_http_stream_doall_arg(http_streams, read_http_stream, &sock_event);
+    lh_bufferevent_http_stream_doall_arg(http_streams, read_http3_stream, &sock_event);
+    if (proxy_context->ssl_error) {
+        LOGI("would free all streams");
+        event_del(SSL_get_app_data(proxy_context->ssl));
+        event_remove_timer(proxy_context->event_quic);
+        free_all_http_streams(proxy_context);
+        return;
+    }
     if (sock_event.evicted) {
         hash_factor = lh_bufferevent_http_stream_get_down_load(http_streams);
         lh_bufferevent_http_stream_set_down_load(http_streams, 0);
@@ -725,7 +737,7 @@ static ssize_t parse_http2(struct wss_proxy_context *context, uint8_t *buffer, s
                         LOGW("cannot find stream %u, data length: %d", http2_frame.stream_id, http2_frame.length);
                     }
                     build_http2_frame(header, 4, 3, 0, http2_frame.stream_id);
-                    memcpy(header + 9, "\x00\x00\x00\x05", 4);
+                    memcpy(header + HTTP2_HEADER_LENGTH, "\x00\x00\x00\x05", 4);
                     evbuffer_add(context->output, header, 13);
                 }
             }
@@ -738,7 +750,8 @@ static ssize_t parse_http2(struct wss_proxy_context *context, uint8_t *buffer, s
                     update_window_update(context, header + HTTP2_HEADER_LENGTH);
                     break;
                 case 7: // goaway
-                    LOGW("sever send goway");
+                    LOGI("sever send goway, mark as eof");
+                    context->ssl_error = 1;
                     return WSS_EOF;
                 default:
                     LOGW("unknown control frame %d", http2_frame.type);
@@ -761,9 +774,14 @@ static ssize_t do_ssl_read(struct bufferevent_context_ssl *context_ssl, struct b
     struct wss_proxy_context *proxy_context;
 
     proxy_context = context_ssl->proxy_context;
-    if ((context_ssl->http == http2 || context_ssl->http == http3) && (!proxy_context || !proxy_context->ssl)) {
-        LOGW("http mux read without ssl");
-        return WSS_ERROR;
+    if (context_ssl->http == http2 || context_ssl->http == http3) {
+        if (!proxy_context || !proxy_context->ssl) {
+            LOGW("http mux read without ssl");
+            return WSS_ERROR;
+        } else if (proxy_context->ssl_error) {
+            LOGW("http mux read while ssl error");
+            return WSS_ERROR;
+        }
     }
 
     ssl = context_ssl->ssl;
@@ -788,8 +806,12 @@ error:
     ret = SSL_get_error(ssl, 0);
     switch (ret) {
         case SSL_ERROR_ZERO_RETURN:
-            LOGD("read ssl with zero return, mark as eof");
-            return WSS_EOF;
+#ifdef HAVE_OSSL_QUIC_CLIENT_METHOD
+            if (context_ssl->http == http3) {
+                return WSS_EOF;
+            }
+#endif
+            break;
         case SSL_ERROR_WANT_READ:
             return WSS_AGAIN;
         case SSL_ERROR_WANT_WRITE:
@@ -815,9 +837,14 @@ static ssize_t do_ssl_write(struct bufferevent_context_ssl *context_ssl, uint8_t
     struct wss_proxy_context *proxy_context;
 
     proxy_context = context_ssl->proxy_context;
-    if ((context_ssl->http == http2 || context_ssl->http == http3) && (!proxy_context || !proxy_context->ssl)) {
-        LOGW("http mux write without ssl");
-        return WSS_ERROR;
+    if (context_ssl->http == http2 || context_ssl->http == http3) {
+        if (!proxy_context || !proxy_context->ssl) {
+            LOGW("http mux write without ssl");
+            return WSS_ERROR;
+        } else if (proxy_context->ssl_error) {
+            LOGW("http mux write while ssl error");
+            return WSS_ERROR;
+        }
     }
 
     ssl = context_ssl->ssl;
@@ -917,6 +944,7 @@ static void free_http_stream(struct bufferevent_http_stream *http_stream) {
     http_stream->skip_free = 1;
     tev = http_stream->bev;
     context_ssl = (void *) tev->wm_write.low;
+    bufferevent_disable(tev, EV_READ | EV_WRITE);
     if (context_ssl && context_ssl->stream_id == http_stream->stream_id && tev->errorcb) {
         tev->errorcb(tev, BEV_EVENT_READING | BEV_EVENT_ERROR, tev->cbarg);
     }
@@ -924,13 +952,18 @@ static void free_http_stream(struct bufferevent_http_stream *http_stream) {
     free(http_stream);
 }
 
-void free_context_ssl(struct wss_proxy_context *proxy_context) {
-    struct event *event;
+static void free_all_http_streams(struct wss_proxy_context *proxy_context) {
     if (proxy_context->http_streams) {
         lh_bufferevent_http_stream_doall(proxy_context->http_streams, free_http_stream);
         lh_bufferevent_http_stream_free(proxy_context->http_streams);
         proxy_context->http_streams = NULL;
     }
+}
+
+void free_context_ssl(struct wss_proxy_context *proxy_context) {
+    struct event *event;
+
+    free_all_http_streams(proxy_context);
     if (proxy_context->input) {
         evbuffer_free(proxy_context->input);
         proxy_context->input = NULL;
@@ -958,44 +991,68 @@ void free_context_ssl(struct wss_proxy_context *proxy_context) {
 }
 
 static void http2_readcb(evutil_socket_t sock, short event, void *context) {
-    ssize_t res;
     struct bufferevent_context_ssl context_ssl;
+    struct wss_proxy_context *proxy_context;
 
     (void) sock;
     (void) event;
-    context_ssl.proxy_context = context;
+    proxy_context = context;
+    context_ssl.proxy_context = proxy_context;
     context_ssl.http = http2;
     context_ssl.ssl = context_ssl.proxy_context->ssl;
-    res = do_ssl_read(&context_ssl, NULL);
-    if (res == WSS_ERROR || res == WSS_EOF) {
-        LOGW("http2 connection eos");
-        free_context_ssl(context);
+    do_ssl_read(&context_ssl, NULL);
+    if (proxy_context->ssl_error) {
+        LOGI("would free all streams");
+        event_del(SSL_get_app_data(proxy_context->ssl));
+        free_all_http_streams(proxy_context);
+        return;
+    }
+    do_http2_write(proxy_context, proxy_context->output);
+}
+
+static ssize_t do_http2_write(struct wss_proxy_context *context, struct evbuffer *output) {
+    ssize_t res, size;
+    size_t total;
+    uint8_t buffer[WSS_PAYLOAD_SIZE];
+    struct bufferevent_context_ssl context_ssl;
+
+    if (!output) {
+        LOGW("no output buffer");
+        return WSS_ERROR;
+    }
+
+    total = evbuffer_get_length(output);
+    if (!total) {
+        return 0;
+    }
+
+    context_ssl.proxy_context = context;
+    if (context_ssl.proxy_context->ssl_error) {
+        LOGW("http2 write ssl error, length: %lu", (unsigned long) evbuffer_get_length(output));
+        evbuffer_drain(output, evbuffer_get_length(output));
+        return WSS_ERROR;
+    }
+
+    context_ssl.http = http2;
+    context_ssl.ssl = context_ssl.proxy_context->ssl;
+    for (;;) {
+        size = evbuffer_copyout(output, buffer, WSS_PAYLOAD_SIZE);
+        if (size < 0) {
+            return WSS_ERROR;
+        } else if (size == 0) {
+            return (ssize_t) total;
+        }
+        res = do_ssl_write(&context_ssl, buffer, size);
+        if (res <= 0) {
+            return res;
+        }
+        evbuffer_drain(output, res);
     }
 }
 
 static void http2_writecb(struct evbuffer *output, const struct evbuffer_cb_info *info, void *context) {
-    ssize_t res;
-    uint8_t buffer[4096];
-    struct bufferevent_context_ssl context_ssl;
-
-    if (info->n_added <= 0) {
-        return;
-    }
-
-    context_ssl.proxy_context = context;
-    context_ssl.http = http2;
-    context_ssl.ssl = context_ssl.proxy_context->ssl;
-    for (;;) {
-        res = evbuffer_copyout(output, buffer, sizeof(buffer));
-        if (res <= 0) {
-            break;
-        }
-        res = do_ssl_write(&context_ssl, buffer, res);
-        if (res > 0) {
-            evbuffer_drain(output, res);
-        } else {
-            break;
-        }
+    if (info->n_added > 0) {
+        do_http2_write(context, output);
     }
 }
 
@@ -1047,10 +1104,19 @@ static void bufferevent_writecb(evutil_socket_t fd, short event, void *arg) {
     uint8_t buffer[4096];
     short what = BEV_EVENT_WRITING;
     struct bufferevent *bev = arg;
+    struct bufferevent_context_ssl *context_ssl;
 
     if (event == EV_TIMEOUT) {
         what |= BEV_EVENT_TIMEOUT;
         goto error;
+    }
+
+    context_ssl = (struct bufferevent_context_ssl *) bufferevent_get_context(bev);
+    if (context_ssl && context_ssl->http == http2) {
+        res = do_http2_write(context_ssl->proxy_context, context_ssl->proxy_context->output);
+        if (res < 0) {
+            goto write;
+        }
     }
 
     if (evbuffer_get_length(bev->output)) {
@@ -1063,15 +1129,7 @@ static void bufferevent_writecb(evutil_socket_t fd, short event, void *arg) {
         if (res > 0) {
             evbuffer_drain(bev->output, res);
         }
-        if (res == WSS_AGAIN) {
-            goto reschedule;
-        } else if (res == WSS_ERROR) {
-            what |= BEV_EVENT_ERROR;
-            goto error;
-        } else if (res == 0) {
-            what |= BEV_EVENT_EOF;
-            goto error;
-        }
+        goto write;
     }
 
     if (evbuffer_get_length(bev->output) == 0) {
@@ -1083,6 +1141,17 @@ static void bufferevent_writecb(evutil_socket_t fd, short event, void *arg) {
     }
 
     goto done;
+
+write:
+    if (res == WSS_AGAIN) {
+        goto reschedule;
+    } else if (res == WSS_ERROR) {
+        what |= BEV_EVENT_ERROR;
+        goto error;
+    } else if (res == 0) {
+        what |= BEV_EVENT_EOF;
+        goto error;
+    }
 
 reschedule:
     if (evbuffer_get_length(bev->output) == 0) {
@@ -1168,6 +1237,8 @@ static int init_ssl_sock(struct wss_proxy_context *context, struct event_base *b
     if (context->server.http2 || context->server.http3) {
         context->ssl = ssl;
     }
+    context->ssl_error = 0;
+    context->timeout_count = 0;
     *ssl1 = ssl;
     return sock;
 error:
@@ -1204,6 +1275,7 @@ static struct bufferevent_context_ssl *init_ssl_context(struct wss_proxy_context
         stream = SSL_new_stream(ssl, SSL_STREAM_FLAG_ADVANCE);
         if (stream == NULL) {
             LOGW("cannot new quic stream");
+            context->ssl_error = 1;
             goto error;
         }
         context_ssl->http = http3;
@@ -1252,6 +1324,9 @@ struct bufferevent *bufferevent_new(struct wss_proxy_context *context, struct bu
     struct bufferevent_http_stream *http_stream;
 
 start:
+    if (context->ssl_error) {
+        free_context_ssl(context);
+    }
     base = bufferevent_get_base(raw);
     tev = bufferevent_socket_new(base, -1, context->server.mux ? 0 : BEV_OPT_CLOSE_ON_FREE);
     if (tev == NULL) {
@@ -1300,8 +1375,7 @@ error:
     if (context_ssl) {
         free(context_ssl);
     }
-    if (context->ssl) {
-        free_context_ssl(context);
+    if (context->ssl_error) {
         goto start;
     }
     return NULL;

@@ -300,6 +300,7 @@ static void http_response_cb_v2(struct bufferevent *tev, void *raw) {
     }
     LOGD("wss is ready for peer %d, remain: %d", get_peer_port(raw), (int) evbuffer_get_length(input));
     tunnel_wss(raw, tev, wss_output_filter_v2);
+    ((struct bufferevent_context_ssl *) tev->wm_write.low)->proxy_context->timeout_count = 0;
     return;
 error:
     bufferevent_free(raw);
@@ -396,6 +397,7 @@ static void http_response_cb_v3(struct bufferevent *tev, void *raw) {
     evbuffer_drain(input, frame_length);
     LOGD("wss is ready for peer %d, remain: %d", get_peer_port(raw), (int) evbuffer_get_length(input));
     tunnel_wss(raw, tev, wss_output_filter_v3);
+    ((struct bufferevent_context_ssl *) tev->wm_write.low)->proxy_context->timeout_count = 0;
     return;
 error:
     bufferevent_free(raw);
@@ -454,10 +456,14 @@ static void tev_raw_event_cb(struct bufferevent *tev, short event, void *raw) {
         proxy_context = context_ssl->proxy_context;
     }
     raw_event_cb(raw, event, tev);
-    if (proxy_context && (event & BEV_EVENT_TIMEOUT)) {
-        LOGW("http mux connection timeout, close");
-        free_context_ssl(proxy_context);
-        tev->wm_write.low = (size_t) NULL;
+    if (proxy_context) {
+        proxy_context->timeout_count++;
+        if (proxy_context->timeout_count >= 0x3) {
+            LOGW("http mux connection timeout %d, mark as ssl error", proxy_context->timeout_count);
+            proxy_context->ssl_error = 1;
+        } else {
+            LOGI("http mux connection timeout %d", proxy_context->timeout_count);
+        }
     }
 }
 
@@ -487,6 +493,8 @@ static struct bufferevent *connect_wss(struct wss_proxy_context *context, struct
         context_ssl->recv_window = MAX_WINDOW_SIZE;
         LOGD("stream %u recv window %lu", context_ssl->stream_id, context_ssl->recv_window);
         cb = http_response_cb_v2;
+        evbuffer_add(context_ssl->proxy_context->output, request, length);
+        length = 0;
     } else {
         length = build_http_request(context, !raw->be_ops, request);
         cb = http_response_cb;
@@ -494,7 +502,9 @@ static struct bufferevent *connect_wss(struct wss_proxy_context *context, struct
     bufferevent_set_timeouts(tev, &tv, &tv);
     bufferevent_setcb(tev, cb, NULL, tev_raw_event_cb, raw);
     bufferevent_enable(tev, EV_READ | EV_WRITE);
-    bufferevent_write(tev, request, length);
+    if (length) {
+        bufferevent_write(tev, request, length);
+    }
     return tev;
 }
 
