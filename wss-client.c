@@ -27,6 +27,9 @@ struct bufferevent_http_stream {
     struct bufferevent *bev;
     uint8_t skip_free: 1;
     volatile uint8_t mark_free: 1;
+    uint8_t in_closed: 1;
+    uint8_t out_closed: 1;
+    uint8_t rst_sent: 1;
 };
 
 static unsigned long bufferevent_http_stream_hash(const bufferevent_http_stream *a) {
@@ -40,6 +43,27 @@ static int bufferevent_http_stream_cmp(const bufferevent_http_stream *a, const b
         return 1;
     } else {
         return 0;
+    }
+}
+
+static void close_http2_stream(struct wss_proxy_context *proxy_context, struct bufferevent_http_stream *http_stream) {
+    uint32_t stream_id;
+
+    stream_id = (uint32_t) http_stream->stream_id;
+    if (!http_stream->out_closed) {
+        return;
+    }
+    if (http_stream->in_closed) {
+        if (http_stream->skip_free) {
+            http_stream->mark_free = 1;
+            LOGD("ignore remove http stream %u: %p", stream_id, http_stream);
+        } else {
+            LOGD("close http stream %u: %p", stream_id, http_stream);
+            lh_bufferevent_http_stream_delete(proxy_context->http_streams, http_stream);
+            free(http_stream);
+        }
+    } else {
+        LOGD("http stream %u out closed: %p", stream_id, http_stream);
     }
 }
 
@@ -66,14 +90,8 @@ static void bufferevent_context_ssl_free(struct bufferevent_context *context) {
         key.stream_id = context_ssl->stream_id;
         http_stream = lh_bufferevent_http_stream_retrieve(proxy_context->http_streams, &key);
         if (http_stream) {
-            if (http_stream->skip_free) {
-                http_stream->mark_free = 1;
-                LOGD("ignore remove http stream %lu: %p", (unsigned long) key.stream_id, http_stream);
-            } else {
-                LOGD("close http stream %lu: %p", (unsigned long) key.stream_id, http_stream);
-                lh_bufferevent_http_stream_delete(proxy_context->http_streams, &key);
-                free(http_stream);
-            }
+            http_stream->out_closed = 1;
+            close_http2_stream(proxy_context, http_stream);
         }
     }
     if (context_ssl->frame != NULL) {
@@ -268,7 +286,6 @@ static void http3_readcb(evutil_socket_t sock, short event, void *context) {
     http_streams = proxy_context->http_streams;
     lh_bufferevent_http_stream_doall_arg(http_streams, read_http3_stream, &sock_event);
     if (proxy_context->ssl_error) {
-        LOGI("would free all streams");
         event_del(SSL_get_app_data(proxy_context->ssl));
         event_remove_timer(proxy_context->event_quic);
         free_all_http_streams(proxy_context);
@@ -692,14 +709,64 @@ static void update_window_update(struct wss_proxy_context *context, const uint8_
     LOGD("connection send window %ld, delta: 0x%x", context->send_window, delta);
 }
 
-static ssize_t parse_http2(struct wss_proxy_context *context, uint8_t *buffer, size_t size) {
-    uint8_t header[HTTP2_HEADER_LENGTH + 24], *frame;
+static int reset_http2_stream(struct wss_proxy_context *context, struct bufferevent_http_stream *http_stream, int res) {
+    uint8_t header[HTTP2_HEADER_LENGTH + 4];
 
-    size_t header_size;
-    struct http2_frame http2_frame;
+    if (http_stream->rst_sent) {
+        return 0;
+    }
+    http_stream->rst_sent = 1;
+    build_http2_frame(header, 4, 3, 0, http_stream->stream_id);
+    *((uint32_t *) (header + HTTP2_HEADER_LENGTH)) = htonl(res);
+    evbuffer_add(context->output, header, HTTP2_HEADER_LENGTH + 4);
+    return 1;
+}
+
+static void check_http2_stream(struct wss_proxy_context *context, struct http2_frame *http2_frame) {
+    uint8_t in_closed;
+    struct bufferevent_http_stream key, *http_stream;
     LHASH_OF(bufferevent_http_stream) *http_streams;
 
     http_streams = context->http_streams;
+    key.stream_id = http2_frame->stream_id;
+    in_closed = http2_frame->type == 3 || (http2_frame->flag & 1);
+    http_stream = lh_bufferevent_http_stream_retrieve(http_streams, &key);
+    if (!http_stream) {
+        if (!in_closed) {
+            LOGW("cannot find stream %u, type: %d, length: %u",
+                 http2_frame->stream_id, http2_frame->type, http2_frame->length);
+        }
+        evbuffer_drain(context->input, http2_frame->length + HTTP2_HEADER_LENGTH);
+        return;
+    }
+    if (in_closed) {
+        LOGD("http stream %u in closed: %p", http2_frame->stream_id, http_stream);
+        http_stream->in_closed = 1;
+    }
+    if (!http_stream->out_closed && http_stream->bev) {
+        handle_http2_frame(http_stream->bev, http2_frame, context->input);
+        return;
+    }
+    evbuffer_drain(context->input, http2_frame->length + HTTP2_HEADER_LENGTH);
+    if (http_stream->out_closed) {
+        if (http_stream->in_closed) {
+            close_http2_stream(context, http_stream);
+        } else {
+            LOGD("stream %u, out closed with type %d, length: %u",
+                 http2_frame->stream_id, http2_frame->type, http2_frame->length);
+            reset_http2_stream(context, http_stream, 0x5);
+        }
+    } else if (http2_frame->type != 0 && http2_frame->type != 1 && http2_frame->type != 3) {
+        LOGW("stream %u, unsupported type: %d", http2_frame->stream_id, http2_frame->type);
+        reset_http2_stream(context, http_stream, 0x1);
+    }
+}
+
+static ssize_t parse_http2(struct wss_proxy_context *context, uint8_t *buffer, size_t size) {
+    size_t header_size;
+    uint8_t header[HTTP2_HEADER_LENGTH + 42], *frame;
+    struct http2_frame http2_frame;
+
     evbuffer_add(context->input, buffer, size);
     for (;;) {
         header_size = evbuffer_copyout(context->input, header, sizeof(header));
@@ -720,31 +787,11 @@ static ssize_t parse_http2(struct wss_proxy_context *context, uint8_t *buffer, s
             return WSS_MORE;
         }
         if (http2_frame.stream_id & 1) {
-            struct bufferevent_http_stream key, *http_stream;
-            key.stream_id = http2_frame.stream_id;
-            http_stream = lh_bufferevent_http_stream_retrieve(http_streams, &key);
-            if (http_stream) {
-                handle_http2_frame(http_stream->bev, &http2_frame, context->input);
-            } else {
-                if (http2_frame.type == 3) {
-                    LOGD("cannot find stream %u, reset", http2_frame.stream_id);
-                } else if (http2_frame.type != 0) {
-                    LOGW("cannot find stream %u, unsupported type: %d", http2_frame.stream_id, http2_frame.type);
-                }
-                evbuffer_drain(context->input, http2_frame.length + HTTP2_HEADER_LENGTH);
-                if ((http2_frame.flag & 1) == 0) {
-                    if (http2_frame.type == 0) {
-                        LOGW("cannot find stream %u, data length: %d", http2_frame.stream_id, http2_frame.length);
-                    }
-                    build_http2_frame(header, 4, 3, 0, http2_frame.stream_id);
-                    memcpy(header + HTTP2_HEADER_LENGTH, "\x00\x00\x00\x05", 4);
-                    evbuffer_add(context->output, header, 13);
-                }
-            }
+            check_http2_stream(context, &http2_frame);
         } else {
             switch (http2_frame.type) {
                 case 4: // settings
-                    update_settings(context, header + HTTP2_HEADER_LENGTH, MIN(24, http2_frame.length));
+                    update_settings(context, header + HTTP2_HEADER_LENGTH, MIN(42, http2_frame.length));
                     break;
                 case 8: // window update
                     update_window_update(context, header + HTTP2_HEADER_LENGTH);
@@ -953,8 +1000,14 @@ static void free_http_stream(struct bufferevent_http_stream *http_stream) {
 }
 
 static void free_all_http_streams(struct wss_proxy_context *proxy_context) {
+    unsigned long count;
+
     if (proxy_context->http_streams) {
-        lh_bufferevent_http_stream_doall(proxy_context->http_streams, free_http_stream);
+        count = lh_bufferevent_http_stream_num_items(proxy_context->http_streams);
+        if (count) {
+            LOGI("would free all streams, count: %lu", count);
+            lh_bufferevent_http_stream_doall(proxy_context->http_streams, free_http_stream);
+        }
         lh_bufferevent_http_stream_free(proxy_context->http_streams);
         proxy_context->http_streams = NULL;
     }
@@ -1002,7 +1055,6 @@ static void http2_readcb(evutil_socket_t sock, short event, void *context) {
     context_ssl.ssl = context_ssl.proxy_context->ssl;
     do_ssl_read(&context_ssl, NULL);
     if (proxy_context->ssl_error) {
-        LOGI("would free all streams");
         event_del(SSL_get_app_data(proxy_context->ssl));
         free_all_http_streams(proxy_context);
         return;
