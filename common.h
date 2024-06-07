@@ -109,9 +109,9 @@ void bufferevent_set_context(struct bufferevent *bev, struct bufferevent_context
 
 struct bufferevent_context *bufferevent_get_context(struct bufferevent *bev);
 
-void safe_bufferevent_free(struct bufferevent *bufev);
+void safe_bufferevent_free(struct bufferevent *bev);
 
-void bufferevent_udp_free(struct bufferevent *bufev);
+void bufferevent_udp_free(struct bufferevent *raw);
 
 #ifndef _WIN32
 #define EVUTIL_ERR_RW_RETRIABLE(e) ((e) == EINTR || (e) == EAGAIN || (e) == EWOULDBLOCK)

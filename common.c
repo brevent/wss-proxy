@@ -258,7 +258,7 @@ static void sigquit_cb(evutil_socket_t fd, short event, void *arg) {
 }
 
 int init_event_signal(struct event_base *base, struct event **event_parent, struct event **event_sigquit) {
-    struct rlimit rlim;
+    struct rlimit rlimit;
     struct timeval one_minute = {60, 0};
     *event_parent = event_new(base, -1, EV_PERSIST, check_parent, NULL);
     if (*event_parent) {
@@ -267,8 +267,8 @@ int init_event_signal(struct event_base *base, struct event **event_parent, stru
         LOGW("cannot add event to check parent");
     }
 #ifdef RLIMIT_NOFILE
-    if (getrlimit(RLIMIT_NOFILE, &rlim) == 0) {
-        rlim_t cur_limit = rlim.rlim_cur;
+    if (getrlimit(RLIMIT_NOFILE, &rlimit) == 0) {
+        rlim_t cur_limit = rlimit.rlim_cur;
         rlim_t new_limit;
 #if defined(__APPLE__)
         size_t size = sizeof(new_limit);
@@ -276,11 +276,11 @@ int init_event_signal(struct event_base *base, struct event **event_parent, stru
             new_limit = 10240;
         }
 #else
-        new_limit = rlim.rlim_max;
+        new_limit = rlimit.rlim_max;
 #endif
-        rlim.rlim_cur = new_limit;
-        if (cur_limit < new_limit && setrlimit(RLIMIT_NOFILE, &rlim) == 0) {
-            LOGI("open files: %u -> %u", (uint32_t) cur_limit, (uint32_t) rlim.rlim_cur);
+        rlimit.rlim_cur = new_limit;
+        if (cur_limit < new_limit && setrlimit(RLIMIT_NOFILE, &rlimit) == 0) {
+            LOGI("open files: %u -> %u", (uint32_t) cur_limit, (uint32_t) rlimit.rlim_cur);
         } else {
             LOGI("open files: %u", (uint32_t) cur_limit);
         }
@@ -313,10 +313,11 @@ int is_websocket_key(const char *websocket_key) {
     }
 }
 
+#define WEBSOCKET_KEY_MAGIC "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 int calc_websocket_accept(const char *websocket_key, char *websocket_accept) {
     char buffer[61];
     unsigned char sha1[SHA_DIGEST_LENGTH];
-    snprintf(buffer, 61, "%s258EAFA5-E914-47DA-95CA-C5AB0DC85B11", websocket_key);
+    snprintf(buffer, 61, "%s" WEBSOCKET_KEY_MAGIC, websocket_key);
     SHA1((unsigned char *) buffer, 60, sha1);
     return EVP_EncodeBlock((unsigned char *) websocket_accept, sha1, SHA_DIGEST_LENGTH);
 }
