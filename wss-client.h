@@ -42,6 +42,7 @@ struct wss_proxy_context {
     struct evbuffer *input;
     struct evbuffer *output;
     struct event *event_quic;
+    struct event *event_sighup;
     uint8_t timeout_count;
     uint8_t settings_sent: 1;
     uint8_t ssl_error: 1;

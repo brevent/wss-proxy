@@ -2,6 +2,7 @@
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <arpa/inet.h>
+#include <signal.h>
 #include "wss-client.h"
 #include "common.h"
 
@@ -268,8 +269,6 @@ static void http3_readcb(evutil_socket_t sock, short event, void *context) {
     http_streams = proxy_context->http_streams;
     lh_bufferevent_http_stream_doall_arg(http_streams, read_http3_stream, &sock_event);
     if (proxy_context->ssl_error) {
-        event_del(SSL_get_app_data(proxy_context->ssl));
-        event_remove_timer(proxy_context->event_quic);
         free_all_http_streams(proxy_context);
         return;
     }
@@ -419,6 +418,17 @@ static int get_sockaddr(struct wss_proxy_context *context, struct sockaddr *sock
     return -1;
 }
 
+static void sighup_cb(evutil_socket_t fd, short event, void *context) {
+    struct wss_proxy_context *proxy_context;
+    (void) fd;
+    (void) event;
+
+    LOGW("received hangup, will reload");
+    proxy_context = context;
+    proxy_context->ssl_error = 1;
+    free_all_http_streams(proxy_context);
+}
+
 static SSL *init_ssl(struct wss_proxy_context *context, struct event_base *base, int fd) {
     SSL *ssl;
     struct event *event = NULL;
@@ -499,6 +509,12 @@ static SSL *init_ssl(struct wss_proxy_context *context, struct event_base *base,
         event_add(event, NULL);
     }
     if (context->server.http2 || context->server.http3) {
+        if (!context->event_sighup) {
+            context->event_sighup = evsignal_new(base, SIGHUP, sighup_cb, context);
+            if (context->event_sighup) {
+                event_add(context->event_sighup, NULL);
+            }
+        }
         context->http_streams = lh_bufferevent_http_stream_new(bufferevent_http_stream_hash,
                                                                bufferevent_http_stream_cmp);
         if (!context->http_streams) {
@@ -990,6 +1006,12 @@ static void free_http_stream(struct bufferevent_http_stream *http_stream) {
 static void free_all_http_streams(struct wss_proxy_context *proxy_context) {
     unsigned long count;
 
+    if (proxy_context->ssl && SSL_get_app_data(proxy_context->ssl)) {
+        event_del(SSL_get_app_data(proxy_context->ssl));
+    }
+    if (proxy_context->event_quic) {
+        event_remove_timer(proxy_context->event_quic);
+    }
     if (proxy_context->http_streams) {
         count = lh_bufferevent_http_stream_num_items(proxy_context->http_streams);
         if (count) {
@@ -1061,7 +1083,6 @@ static void http2_readcb(evutil_socket_t sock, short event, void *context) {
     proxy_context->http2_evicted = 0;
     do_ssl_read(&context_ssl, NULL);
     if (proxy_context->ssl_error) {
-        event_del(SSL_get_app_data(proxy_context->ssl));
         free_all_http_streams(proxy_context);
         return;
     }

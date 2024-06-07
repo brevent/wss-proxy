@@ -801,6 +801,9 @@ error:
     if (event_sigquit) {
         event_free(event_sigquit);
     }
+    if (wss_context.event_sighup) {
+        event_free(wss_context.event_sighup);
+    }
     if (base) {
         event_base_free(base);
     }
