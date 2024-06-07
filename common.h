@@ -76,6 +76,9 @@ struct udp_frame {
 };
 #define MAX_WSS_PAYLOAD_SIZE MAX_UDP_FRAME_SIZE
 
+#define MAX_PROXY_BUFFER (512 * 1024)
+#define MIN_PROXY_BUFFER (64 * 1024)
+
 typedef struct bufferevent_udp bufferevent_udp;
 
 #ifdef WSS_PROXY_CLIENT

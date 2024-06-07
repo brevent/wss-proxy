@@ -757,8 +757,6 @@ static void wss_event_cb(struct bufferevent *wev, short event, void *raw) {
 #endif
 }
 
-#define MAX_PROXY_BUFFER (512 * 1024)
-#define MIN_PROXY_BUFFER (64 * 1024)
 static void tev_write_cb(struct evbuffer *buffer, const struct evbuffer_cb_info *info, void *arg) {
     size_t length;
     struct bufferevent *raw;

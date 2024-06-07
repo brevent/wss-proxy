@@ -45,6 +45,7 @@ struct wss_proxy_context {
     uint8_t timeout_count;
     uint8_t settings_sent: 1;
     uint8_t ssl_error: 1;
+    uint8_t http2_evicted: 1;
     uint32_t next_stream_id: 23;
     uint32_t initial_window_size;
     ssize_t send_window;
@@ -90,5 +91,7 @@ size_t parse_http3_frame(const uint8_t *buffer, size_t length, size_t *out_heade
 size_t build_http3_frame(uint8_t *frame, uint8_t type, size_t length);
 
 struct bufferevent *bufferevent_new(struct wss_proxy_context *context, struct bufferevent *raw);
+
+void bufferevent_timeout(struct bufferevent *tev, int timeout);
 
 #endif //WSS_PROXY_WSS_CLIENT_H
