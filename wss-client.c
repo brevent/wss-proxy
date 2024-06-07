@@ -282,7 +282,7 @@ static void http3_readcb(evutil_socket_t sock, short event, void *context) {
         LOGD("all streams are completed");
         event_del(SSL_get_app_data(proxy_context->ssl));
     } else {
-        // seems bug of openssl 3.2.X, need to try later
+        // how to avoid try?
         event_add(SSL_get_app_data(proxy_context->ssl), &tv);
     }
     if (!event_pending(proxy_context->event_quic, EV_TIMEOUT, NULL)) {
@@ -1485,11 +1485,10 @@ void bufferevent_timeout(struct bufferevent *tev, int timeout) {
         return;
     }
     context->timeout_count++;
-    if (context->timeout_count >= 0x3) {
+    LOGD("http mux connection timeout %d", context->timeout_count);
+    if (!context->ssl_error && context->timeout_count >= 0x3) {
         LOGW("http mux connection timeout %d, mark as ssl error", context->timeout_count);
         context->ssl_error = 1;
-    } else {
-        LOGI("http mux connection timeout %d", context->timeout_count);
     }
     key.stream_id = context_ssl->stream_id;
     http_stream = lh_bufferevent_http_stream_retrieve(context->http_streams, &key);
