@@ -762,6 +762,24 @@ static void check_http2_stream(struct wss_proxy_context *context, struct http2_f
     }
 }
 
+static void check_http2_control(struct wss_proxy_context *context, uint8_t type, uint8_t *header, uint8_t length) {
+    switch (type) {
+        case 4: // settings
+            update_settings(context, header + HTTP2_HEADER_LENGTH, length);
+            break;
+        case 8: // window update
+            update_window_update(context, header + HTTP2_HEADER_LENGTH);
+            break;
+        case 7: // goaway
+            LOGI("sever send goaway, mark as eof");
+            context->ssl_error = 1;
+            break;
+        default:
+            LOGW("unknown control frame %d", type);
+            break;
+    }
+}
+
 static ssize_t parse_http2(struct wss_proxy_context *context, uint8_t *buffer, size_t size) {
     size_t header_size;
     uint8_t header[HTTP2_HEADER_LENGTH + 42], *frame;
@@ -789,21 +807,7 @@ static ssize_t parse_http2(struct wss_proxy_context *context, uint8_t *buffer, s
         if (http2_frame.stream_id & 1) {
             check_http2_stream(context, &http2_frame);
         } else {
-            switch (http2_frame.type) {
-                case 4: // settings
-                    update_settings(context, header + HTTP2_HEADER_LENGTH, MIN(42, http2_frame.length));
-                    break;
-                case 8: // window update
-                    update_window_update(context, header + HTTP2_HEADER_LENGTH);
-                    break;
-                case 7: // goaway
-                    LOGI("sever send goway, mark as eof");
-                    context->ssl_error = 1;
-                    return WSS_EOF;
-                default:
-                    LOGW("unknown control frame %d", http2_frame.type);
-                    break;
-            }
+            check_http2_control(context, http2_frame.type, header, MIN(42, http2_frame.length));
             evbuffer_drain(context->input, http2_frame.length + HTTP2_HEADER_LENGTH);
         }
         if (evbuffer_get_length(context->input) == 0) {
