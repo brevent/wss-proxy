@@ -836,6 +836,9 @@ static ssize_t do_ssl_read(struct bufferevent_context_ssl *context_ssl, struct b
             goto error;
         }
         context_ssl->total += size;
+        if (context_ssl->proxy_context) {
+            context_ssl->proxy_context->timeout_count = 0;
+        }
         if (context_ssl->http == http3 && bev) {
             res = parse_http3(bev, frame, size);
         } else if (context_ssl->http == http2) {
@@ -1464,12 +1467,10 @@ error:
     return NULL;
 }
 
-void bufferevent_timeout(struct bufferevent *tev, int timeout) {
-    struct bufferevent_context_ssl *context_ssl;
+void bufferevent_timeout(struct bufferevent_context_ssl *context_ssl) {
     struct wss_proxy_context *context;
     struct bufferevent_http_stream key, *http_stream;
 
-    context_ssl = (void *) tev->wm_write.low;
     if (!context_ssl) {
         return;
     }
@@ -1477,15 +1478,12 @@ void bufferevent_timeout(struct bufferevent *tev, int timeout) {
     if (!context) {
         return;
     }
-    if (!timeout) {
-        context->timeout_count = 0;
-        return;
-    }
     context->timeout_count++;
-    LOGD("http mux connection timeout %d", context->timeout_count);
     if (!context->ssl_error && context->timeout_count >= 0x3) {
         LOGW("http mux connection timeout %d, mark as ssl error", context->timeout_count);
         context->ssl_error = 1;
+    } else {
+        LOGD("http mux connection timeout %d", context->timeout_count);
     }
     key.stream_id = context_ssl->stream_id;
     http_stream = lh_bufferevent_http_stream_retrieve(context->http_streams, &key);

@@ -98,6 +98,6 @@ size_t build_http3_frame(uint8_t *frame, uint8_t type, size_t length);
 
 struct bufferevent *bufferevent_new(struct wss_proxy_context *context, struct bufferevent *raw);
 
-void bufferevent_timeout(struct bufferevent *tev, int timeout);
+void bufferevent_timeout(struct bufferevent_context_ssl *context_ssl);
 
 #endif //WSS_PROXY_WSS_CLIENT_H

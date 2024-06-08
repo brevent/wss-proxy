@@ -300,7 +300,6 @@ static void http_response_cb_v2(struct bufferevent *tev, void *raw) {
     }
     LOGD("wss is ready for peer %d, remain: %d", get_peer_port(raw), (int) evbuffer_get_length(input));
     tunnel_wss(raw, tev, wss_output_filter_v2);
-    bufferevent_timeout(tev, 0);
     return;
 error:
     bufferevent_free(raw);
@@ -395,7 +394,6 @@ static void http_response_cb_v3(struct bufferevent *tev, void *raw) {
     evbuffer_drain(input, frame_length);
     LOGD("wss is ready for peer %d, remain: %d", get_peer_port(raw), (int) evbuffer_get_length(input));
     tunnel_wss(raw, tev, wss_output_filter_v3);
-    bufferevent_timeout(tev, 0);
     return;
 error:
     bufferevent_free(raw);
@@ -446,8 +444,11 @@ static size_t build_http_request_v3(struct wss_proxy_context *context, int udp, 
 }
 
 static void tev_raw_event_cb(struct bufferevent *tev, short event, void *raw) {
-    bufferevent_timeout(tev, 1);
+    struct bufferevent_context_ssl *context_ssl;
+
+    context_ssl = (void *) tev->wm_write.low;
     raw_event_cb(raw, event, tev);
+    bufferevent_timeout(context_ssl);
 }
 
 static struct bufferevent *connect_wss(struct wss_proxy_context *context, struct bufferevent *raw) {
