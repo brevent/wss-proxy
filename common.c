@@ -313,11 +313,11 @@ int is_websocket_key(const char *websocket_key) {
     }
 }
 
-#define WEBSOCKET_KEY_MAGIC "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 int calc_websocket_accept(const char *websocket_key, char *websocket_accept) {
-    char buffer[61];
+    char buffer[60];
     unsigned char sha1[SHA_DIGEST_LENGTH];
-    snprintf(buffer, 61, "%s" WEBSOCKET_KEY_MAGIC, websocket_key);
+    memcpy(buffer, websocket_key, 24);
+    memcpy(buffer + 24, "258EAFA5-E914-47DA-95CA-C5AB0DC85B11", 36);
     SHA1((unsigned char *) buffer, 60, sha1);
     return EVP_EncodeBlock((unsigned char *) websocket_accept, sha1, SHA_DIGEST_LENGTH);
 }
@@ -408,7 +408,7 @@ static enum bufferevent_filter_result common_wss_input_filter(struct evbuffer *s
     struct ws_header_info info;
     struct udp_frame udp_frame;
 
-    header_size = evbuffer_copyout(src, header, MAX_WS_HEADER_SIZE);
+    header_size = evbuffer_copyout(src, header, sizeof(header));
     if (header_size < WS_HEADER_SIZE) {
         return BEV_NEED_MORE;
     }

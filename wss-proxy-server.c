@@ -248,10 +248,10 @@ static void http_request_cb(struct bufferevent *tev, void *ctx) {
     }
 
     buffer = request;
-    buffer += snprintf(buffer, 128, "HTTP/1.1 101 Switching Protocols\r\n"
-                                    "Upgrade: websocket\r\n"
-                                    "Connection: Upgrade\r\n"
-                                    "Sec-WebSocket-Accept: %s\r\n", sec_websocket_accept);
+    buffer += sprintf(buffer, "HTTP/1.1 101 Switching Protocols\r\n"
+                              "Upgrade: websocket\r\n"
+                              "Connection: Upgrade\r\n"
+                              "Sec-WebSocket-Accept: %s\r\n", sec_websocket_accept);
     ss = strcasestr(request, "\r\n" X_UPGRADE ": " SHADOWSOCKS "\r\n") != NULL;
     if (ss) {
         append_line(buffer, X_UPGRADE ": " SHADOWSOCKS "\r\n");

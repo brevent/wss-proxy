@@ -80,8 +80,13 @@ struct bufferevent_context_ssl {
 #define MAX(x, y) ((x) < (y) ? (y) : (x))
 #endif
 
+#define HTTP2_HEADER_LENGTH 9
+#define MAX_FRAME_SIZE (MAX_WSS_PAYLOAD_SIZE + MAX_WS_HEADER_SIZE + HTTP2_HEADER_LENGTH)
+
 #define DEFAULT_INITIAL_WINDOW_SIZE 0xffff
 #define MAX_WINDOW_SIZE 0x7fffffff
+
+#define HTTP3_MAX_HEADER_LENGTH 9
 
 void free_context_ssl(struct wss_proxy_context *proxy_context);
 

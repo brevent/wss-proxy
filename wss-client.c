@@ -12,9 +12,6 @@ static void bufferevent_readcb(evutil_socket_t fd, short event, void *arg);
 
 static void bufferevent_writecb(evutil_socket_t fd, short event, void *arg);
 
-#define HTTP2_HEADER_LENGTH 9
-#define MAX_FRAME_SIZE (MAX_WSS_PAYLOAD_SIZE + MAX_WS_HEADER_SIZE + HTTP2_HEADER_LENGTH)
-
 static void http2_readcb(evutil_socket_t sock, short event, void *context);
 
 static void http2_writecb(struct evbuffer *output, const struct evbuffer_cb_info *info, void *context);
@@ -550,14 +547,14 @@ error:
 static ssize_t parse_http3(struct bufferevent *bev, uint8_t *buffer, size_t size) {
     size_t total, header_length, frame_length;
     ssize_t header_size;
-    uint8_t frame_type, header[9];
+    uint8_t frame_type, header[HTTP3_MAX_HEADER_LENGTH];
     struct bufferevent_context_ssl *context_ssl;
 
     total = size;
     context_ssl = (void *) bev->wm_write.low;
     evbuffer_add(context_ssl->frame, buffer, size);
     for (;;) {
-        header_size = evbuffer_copyout(context_ssl->frame, header, 9);
+        header_size = evbuffer_copyout(context_ssl->frame, header, sizeof(header));
         if (header_size < 2) {
             return WSS_MORE;
         }
@@ -957,7 +954,7 @@ static ssize_t check_socket_error(ssize_t n, evutil_socket_t fd) {
 
 static ssize_t do_read(struct bufferevent *bev, evutil_socket_t fd) {
     ssize_t res;
-    uint8_t buffer[4096];
+    uint8_t buffer[WSS_PAYLOAD_SIZE];
     struct bufferevent_context_ssl *context_ssl;
 
     context_ssl = (struct bufferevent_context_ssl *) bufferevent_get_context(bev);
@@ -1122,7 +1119,7 @@ static ssize_t do_http2_write(struct wss_proxy_context *context, struct evbuffer
     context_ssl.http = http2;
     context_ssl.ssl = context_ssl.proxy_context->ssl;
     for (;;) {
-        size = evbuffer_copyout(output, buffer, WSS_PAYLOAD_SIZE);
+        size = evbuffer_copyout(output, buffer, sizeof(buffer));
         if (size < 0) {
             return WSS_ERROR;
         } else if (size == 0) {
@@ -1187,7 +1184,7 @@ done:
 
 static void bufferevent_writecb(evutil_socket_t fd, short event, void *arg) {
     ssize_t res, size;
-    uint8_t buffer[4096];
+    uint8_t buffer[WSS_PAYLOAD_SIZE];
     short what = BEV_EVENT_WRITING;
     struct bufferevent *bev = arg;
     struct bufferevent_context_ssl *context_ssl;

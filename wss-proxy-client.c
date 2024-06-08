@@ -192,7 +192,7 @@ static int init_wss_addr(struct wss_server_info *server) {
 
 static void http_response_cb(struct bufferevent *tev, void *raw) {
     size_t length;
-    char buffer[1024];
+    char buffer[WSS_PAYLOAD_SIZE];
     struct evbuffer *input;
 
     memset(buffer, 0, sizeof(buffer));
@@ -254,7 +254,7 @@ static enum bufferevent_filter_result wss_output_filter_v2(struct evbuffer *src,
                                                            ev_ssize_t dst_limit, enum bufferevent_flush_mode mode,
                                                            void *tev) {
     size_t length, frame_header_length;
-    uint8_t buffer[9 + MAX_WS_HEADER_SIZE + MAX_WSS_PAYLOAD_SIZE];
+    uint8_t buffer[HTTP2_HEADER_LENGTH + MAX_WS_HEADER_SIZE + MAX_WSS_PAYLOAD_SIZE];
     struct bufferevent_context_ssl *context_ssl;
 
     (void) dst_limit;
@@ -263,10 +263,10 @@ static enum bufferevent_filter_result wss_output_filter_v2(struct evbuffer *src,
     if (context_ssl == NULL) {
         return BEV_ERROR;
     }
-    if (evbuffer_get_length(src) > MAX_WS_HEADER_SIZE + MAX_WSS_PAYLOAD_SIZE) {
+    if (evbuffer_get_length(src) > sizeof(buffer) - HTTP2_HEADER_LENGTH) {
         return BEV_ERROR;
     }
-    length = evbuffer_copyout(src, &buffer[9], MAX_WS_HEADER_SIZE + MAX_WSS_PAYLOAD_SIZE);
+    length = evbuffer_copyout(src, &buffer[HTTP2_HEADER_LENGTH], sizeof(buffer) - HTTP2_HEADER_LENGTH);
     frame_header_length = build_http2_frame(buffer, length, 0, 0, context_ssl->stream_id);
     evbuffer_add(dst, buffer, length + frame_header_length);
     evbuffer_drain(src, length);
@@ -277,20 +277,20 @@ static enum bufferevent_filter_result wss_output_filter_v2(struct evbuffer *src,
 
 static void http_response_cb_v2(struct bufferevent *tev, void *raw) {
     size_t length, header_length;
-    char buffer[9];
+    char buffer[HTTP2_HEADER_LENGTH];
     struct evbuffer *input;
 
     input = bufferevent_get_input(tev);
     length = evbuffer_get_length(input);
-    if (length < sizeof(buffer)) {
+    if (length < HTTP2_HEADER_LENGTH) {
         return;
     }
     evbuffer_copyout(input, buffer, sizeof(buffer));
     header_length = (buffer[0] << 16) | (buffer[1] << 8) | buffer[2];
-    if (length < 9 + header_length) {
+    if (length < HTTP2_HEADER_LENGTH + header_length) {
         return;
     }
-    evbuffer_drain(input, 9 + header_length);
+    evbuffer_drain(input, HTTP2_HEADER_LENGTH + header_length);
     if (buffer[3] != 0x1) {
         return;
     }
@@ -315,7 +315,7 @@ static size_t build_http_request_v2(struct wss_proxy_context *context, int udp, 
 
     header = buffer;
     // reserved for headers
-    buffer += 9;
+    buffer += HTTP2_HEADER_LENGTH;
 
     // :method = CONNECT
     buffer = memcpy(buffer, "\x02\x07" "CONNECT", 9) + 9;
@@ -325,21 +325,21 @@ static size_t build_http_request_v2(struct wss_proxy_context *context, int udp, 
     *buffer++ = 0x87;
 #define min(a, b) ((a > b) ? (b) : (a))
     // :path = ..., max 127
-    buffer += snprintf((char *) buffer, 0x7f + 2, "\x04%c%s",
+    buffer += snprintf((char *) buffer, 0x82, "\x04%c%s",
                        (char) min(strlen(context->server.path), 0x7f), context->server.path);
     // :authority = ..., max 127
-    buffer += snprintf((char *) buffer, 0x7f + 2, "\x01%c%s",
+    buffer += snprintf((char *) buffer, 0x82, "\x01%c%s",
                        (char) min(strlen(context->server.host), 0x7f), context->server.host);
     // sec-websocket-version = 13
     buffer = memcpy(buffer, "\x00\x15sec-websocket-version\x02\x31\x33", 26) + 26;
     // user-agent = ..., max 127
-    buffer += snprintf((char *) buffer, 0x7f + 2, "\x0f\x2b%c%s",
+    buffer += snprintf((char *) buffer, 0x82, "\x0f\x2b%c%s",
                        (char) min(strlen(context->user_agent), 0x7f),
                        context->user_agent);
     if (udp) {
         buffer = memcpy(buffer, "\x00\x0bx-sock-type\x03udp", 17) + 17;
     }
-    header_length = buffer - header - 9;
+    header_length = buffer - header - HTTP2_HEADER_LENGTH;
     build_http2_frame(header, header_length, 1, 4, stream_id);
     buffer += build_http2_frame(buffer, 0x4, 0x8, 0, stream_id); // window_update
     *((uint32_t *) buffer) = htonl(MAX_WINDOW_SIZE - DEFAULT_INITIAL_WINDOW_SIZE);
@@ -352,30 +352,28 @@ static enum bufferevent_filter_result wss_output_filter_v3(struct evbuffer *src,
                                                            ev_ssize_t dst_limit, enum bufferevent_flush_mode mode,
                                                            void *tev) {
     size_t length, frame_header_length;
-    uint8_t buffer[5 + MAX_WS_HEADER_SIZE + MAX_WSS_PAYLOAD_SIZE];
+    uint8_t buffer[HTTP3_MAX_HEADER_LENGTH + MAX_WS_HEADER_SIZE + MAX_WSS_PAYLOAD_SIZE];
 
     (void) dst_limit;
     (void) mode;
     (void) tev;
-    if (evbuffer_get_length(src) > MAX_WS_HEADER_SIZE + MAX_WSS_PAYLOAD_SIZE) {
+    if (evbuffer_get_length(src) > sizeof(buffer) - HTTP3_MAX_HEADER_LENGTH) {
         return BEV_ERROR;
     }
-    length = evbuffer_copyout(src, &buffer[5], MAX_WS_HEADER_SIZE + MAX_WSS_PAYLOAD_SIZE);
+    length = evbuffer_copyout(src, &buffer[HTTP3_MAX_HEADER_LENGTH], sizeof(buffer) - HTTP3_MAX_HEADER_LENGTH);
     frame_header_length = build_http3_frame(buffer, 0, length);
     if (frame_header_length == 0) {
         return BEV_ERROR;
     }
-    if (frame_header_length != 5) {
-        memmove(buffer + (5 - frame_header_length), buffer, frame_header_length);
-    }
-    evbuffer_add(dst, buffer + (5 - frame_header_length), length + frame_header_length);
+    memmove(buffer + (HTTP3_MAX_HEADER_LENGTH - frame_header_length), buffer, frame_header_length);
+    evbuffer_add(dst, buffer + (HTTP3_MAX_HEADER_LENGTH - frame_header_length), length + frame_header_length);
     evbuffer_drain(src, length);
     return BEV_OK;
 }
 
 static void http_response_cb_v3(struct bufferevent *tev, void *raw) {
     size_t length, frame_length;
-    uint8_t buffer[9];
+    uint8_t buffer[HTTP3_MAX_HEADER_LENGTH];
     struct evbuffer *input;
 
     input = bufferevent_get_input(tev);
@@ -420,15 +418,15 @@ static size_t build_http_request_v3(struct wss_proxy_context *context, int udp, 
     *buffer++ = 0xc0 | 23;
 #define min(a, b) ((a > b) ? (b) : (a))
     // :path = ..., max 127
-    buffer += snprintf((char *) buffer, 0x7f + 2, "\x51%c%s",
+    buffer += snprintf((char *) buffer, 0x82, "\x51%c%s",
                        (char) min(strlen(context->server.path), 0x7f), context->server.path);
     // :authority = ..., max 127
-    buffer += snprintf((char *) buffer, 0x7f + 2, "\x50%c%s",
+    buffer += snprintf((char *) buffer, 0x82, "\x50%c%s",
                        (char) min(strlen(context->server.host), 0x7f), context->server.host);
     // sec-websocket-version = 13
     buffer = memcpy(buffer, "\x27\x0esec-websocket-version\x02\x31\x33", 26) + 26;
     // user-agent = ..., max 127
-    buffer += snprintf((char *) buffer, 0x7f + 3, "\x5f\x50%c%s",
+    buffer += snprintf((char *) buffer, 0x83, "\x5f\x50%c%s",
                        (char) min(strlen(context->user_agent), 0x7f),
                        context->user_agent);
     if (udp) {
