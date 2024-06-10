@@ -89,11 +89,16 @@ DEFINE_LHASH_OF(bufferevent_udp);
 #endif
 #endif
 
+struct bufferevent_context {
+    const char *name;
+    void (*free)(void *ptr);
+};
+
 struct bufferevent_udp {
-    struct bufferevent be;
-    evutil_socket_t sock;
+    const struct bufferevent_context *context;
     ev_socklen_t socklen;
     struct sockaddr *sockaddr;
+    struct bufferevent *bev;
 #ifdef WSS_PROXY_CLIENT
     union {
         struct sockaddr_in sin;
@@ -103,18 +108,22 @@ struct bufferevent_udp {
 #endif
 };
 
-struct bufferevent_context {
-    void *ev_writecb;
-    void (*free)(struct bufferevent_context *ptr);
-};
+static inline void bufferevent_set_context(struct bufferevent *bev, void *context) {
+    if (context == NULL || (!bev->wm_read.low && !bev->wm_write.low)) {
+        bev->wm_read.low = bev->wm_write.low = (size_t) context;
+    }
+}
 
-void bufferevent_set_context(struct bufferevent *bev, struct bufferevent_context *context);
+static inline void *bufferevent_get_context(struct bufferevent *bev) {
+    if (bev->wm_read.low && bev->wm_write.low) {
+        return bev->wm_read.low == bev->wm_write.low ? (void *) bev->wm_read.low : NULL;
+    }
+    return NULL;
+}
 
-struct bufferevent_context *bufferevent_get_context(struct bufferevent *bev);
+extern const struct bufferevent_context bev_wm_udp;
 
 void safe_bufferevent_free(struct bufferevent *bev);
-
-void bufferevent_udp_free(struct bufferevent *raw);
 
 #ifndef _WIN32
 #define EVUTIL_ERR_RW_RETRIABLE(e) ((e) == EINTR || (e) == EAGAIN || (e) == EWOULDBLOCK)
@@ -207,7 +216,7 @@ ssize_t udp_read(evutil_socket_t sock, struct udp_frame *udp_frame, struct socka
 
 void udp_read_cb(struct evbuffer *buf, const struct evbuffer_cb_info *info, void *arg);
 
-void udp_send_cb(struct evbuffer *buf, const struct evbuffer_cb_info *info, void *arg);
+void bufferevent_udp_writecb(evutil_socket_t fd, short event, void *arg);
 
 #ifdef HAVE_SSL_CTX_SET_KEYLOG_CALLBACK
 void ssl_keylog_callback(const SSL *ssl, const char *line);

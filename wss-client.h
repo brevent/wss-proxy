@@ -56,7 +56,7 @@ struct wss_proxy_context {
 };
 
 struct bufferevent_context_ssl {
-    struct bufferevent_context context;
+    const struct bufferevent_context *context;
     struct wss_proxy_context *proxy_context;
     enum http http: 2;
     uint8_t upgrade: 1;

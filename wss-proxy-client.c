@@ -259,7 +259,7 @@ static enum bufferevent_filter_result wss_output_filter_v2(struct evbuffer *src,
 
     (void) dst_limit;
     (void) mode;
-    context_ssl = (void *) ((struct bufferevent *) tev)->wm_write.low;
+    context_ssl = bufferevent_get_context(tev);
     if (context_ssl == NULL) {
         return BEV_ERROR;
     }
@@ -446,12 +446,12 @@ static size_t build_http_request_v3(struct wss_proxy_context *context, int udp, 
 static void tev_raw_event_cb(struct bufferevent *tev, short event, void *raw) {
     struct bufferevent_context_ssl *context_ssl;
 
-    context_ssl = (void *) tev->wm_write.low;
+    context_ssl = bufferevent_get_context(tev);
     raw_event_cb(raw, event, tev);
     bufferevent_timeout(context_ssl);
 }
 
-static struct bufferevent *connect_wss(struct wss_proxy_context *context, struct bufferevent *raw) {
+static struct bufferevent *connect_wss(struct wss_proxy_context *context, struct bufferevent *raw, int udp) {
     size_t length;
     char request[1024];
     struct bufferevent *tev;
@@ -463,24 +463,20 @@ static struct bufferevent *connect_wss(struct wss_proxy_context *context, struct
     if (!tev) {
         return NULL;
     }
-    if (raw->be_ops) {
-        bufferevent_setcb(raw, NULL, NULL, raw_event_cb, tev);
-    } else {
-        raw->cbarg = tev;
-    }
+    bufferevent_setcb(raw, NULL, NULL, raw_event_cb, tev);
     if (context->server.http3) {
-        length = build_http_request_v3(context, !raw->be_ops, request);
+        length = build_http_request_v3(context, udp, request);
         cb = http_response_cb_v3;
     } else if (context->server.http2) {
-        context_ssl = (void *) tev->wm_write.low;
-        length = build_http_request_v2(context, !raw->be_ops, request, context_ssl->stream_id);
+        context_ssl = bufferevent_get_context(tev);
+        length = build_http_request_v2(context, udp, request, context_ssl->stream_id);
         context_ssl->recv_window = MAX_WINDOW_SIZE;
         LOGD("stream %u recv window %lu", context_ssl->stream_id, context_ssl->recv_window);
         cb = http_response_cb_v2;
         evbuffer_add(context_ssl->proxy_context->output, request, length);
         length = 0;
     } else {
-        length = build_http_request(context, !raw->be_ops, request);
+        length = build_http_request(context, udp, request);
         cb = http_response_cb;
     }
     bufferevent_set_timeouts(tev, &tv, &tv);
@@ -506,7 +502,7 @@ static void accept_conn_cb(struct evconnlistener *listener, evutil_socket_t fd,
     }
     port = get_port(address);
     LOGD("new connection from %d", port);
-    if (!connect_wss(ctx, raw)) {
+    if (!connect_wss(ctx, raw, 0)) {
         goto error;
     }
     return;
@@ -555,50 +551,65 @@ static void udp_timeout_cb(evutil_socket_t sock, short event, void *ctx) {
     }
 }
 
-static struct bufferevent_udp *init_udp_server(struct bufferevent_udp *key, struct udp_context *context,
-                                               evutil_socket_t sock, int port) {
-    struct bufferevent_udp *data;
-    struct bufferevent *raw;
-    data = lh_bufferevent_udp_retrieve(context->hash, key);
-    if (data != NULL) {
-        return data;
+static struct bufferevent *init_udp_raw(struct bufferevent_udp *key,
+                                        struct udp_context *context, evutil_socket_t sock) {
+    struct bufferevent_udp *context_udp;
+    struct bufferevent *raw = NULL;
+
+    context_udp = lh_bufferevent_udp_retrieve(context->hash, key);
+    if (context_udp != NULL) {
+        return context_udp->bev;
     }
-    data = calloc(1, sizeof(struct bufferevent_udp));
-    if (!data) {
-        LOGE("cannot calloc for peer %d", port);
-        return NULL;
+    context_udp = calloc(1, sizeof(struct bufferevent_udp));
+    if (!context_udp) {
+        LOGE("cannot calloc for peer %d", get_port(key->sockaddr));
+        goto error;
     }
-    memcpy(&(data->sockaddr_storage), &(key->sockaddr_storage), key->socklen);
-    data->sock = sock;
-    data->socklen = key->socklen;
-    data->sockaddr = (struct sockaddr *) &(data->sockaddr_storage);
-    data->hash = context->hash;
-    raw = (struct bufferevent *) data;
-    raw->ev_base = context->base;
-    if (!connect_wss(context->wss_context, raw)) {
-        LOGE("cannot connect to wss for peer %d", port);
-        free(data);
-        return NULL;
+    raw = bufferevent_socket_new(context->base, -1, 0);
+    if (!raw) {
+        LOGE("cannot create bufferevent for peer %d", get_port(key->sockaddr));
+        goto error;
     }
-    raw->input = evbuffer_new();
-    raw->output = evbuffer_new();
-    evbuffer_add_cb(raw->output, udp_send_cb, data);
-    event_assign(&(raw->ev_read), context->base, sock, EV_READ | EV_PERSIST, udp_timeout_cb, data);
-    LOGD("udp init for peer %d", port);
-    lh_bufferevent_udp_insert(context->hash, data);
-    return data;
+    bufferevent_disable(raw, EV_READ | EV_WRITE);
+    bufferevent_setfd(raw, sock);
+    event_assign(&(raw->ev_write), context->base, sock, EV_WRITE | EV_PERSIST, bufferevent_udp_writecb, raw);
+    event_assign(&(raw->ev_read), context->base, -1, EV_TIMEOUT | EV_PERSIST, udp_timeout_cb, raw);
+    if (!connect_wss(context->wss_context, raw, 1)) {
+        LOGE("cannot connect to wss for peer %d", get_port(key->sockaddr));
+        goto error;
+    }
+    LOGD("udp init for peer %d", get_port(key->sockaddr));
+    memcpy(&(context_udp->sockaddr_storage), key->sockaddr, key->socklen);
+    context_udp->socklen = key->socklen;
+    context_udp->sockaddr = (struct sockaddr *) &(context_udp->sockaddr_storage);
+    context_udp->bev = raw;
+    context_udp->hash = context->hash;
+    context_udp->context = &bev_wm_udp;
+    bufferevent_set_context(raw, context_udp);
+    lh_bufferevent_udp_insert(context->hash, context_udp);
+    return raw;
+error:
+    if (context_udp) {
+        free(context_udp);
+    }
+    if (raw) {
+        bufferevent_free(raw);
+    }
+    return NULL;
 }
 
 static void udp_read_cb_server(evutil_socket_t sock, short event, void *ctx) {
     struct udp_context *context = ctx;
-    struct bufferevent_udp key, *data;
+    struct bufferevent *raw;
+    struct bufferevent_udp key;
     struct udp_frame udp_frame;
     struct timeval one_minute = {60, 0};
     (void) event;
+
     key.sockaddr = (struct sockaddr *) &(key.sockaddr_storage);
     for (;;) {
         ssize_t size;
-        key.socklen = sizeof(struct sockaddr_storage);
+        key.socklen = sizeof(key.sockaddr_storage);
         if ((size = udp_read(sock, &udp_frame, key.sockaddr, &(key.socklen))) < 0) {
             break;
         }
@@ -606,11 +617,14 @@ static void udp_read_cb_server(evutil_socket_t sock, short event, void *ctx) {
             LOGW("udp read empty from %d", get_port(key.sockaddr));
             continue;
         }
-        if ((data = init_udp_server(&key, context, sock, get_port(key.sockaddr))) == NULL) {
+        if ((raw = init_udp_raw(&key, context, sock)) == NULL) {
             break;
         }
-        evbuffer_add(data->be.input, &udp_frame, size + UDP_FRAME_LENGTH_SIZE);
-        event_add(&(data->be.ev_read), &one_minute);
+        evbuffer_add(raw->input, &udp_frame, size + UDP_FRAME_LENGTH_SIZE);
+        if (raw->readcb) {
+            raw->readcb(raw, raw->cbarg);
+        }
+        event_add(&(raw->ev_read), &one_minute);
     }
 }
 
