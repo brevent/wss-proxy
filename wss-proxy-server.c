@@ -142,7 +142,7 @@ static void udp_read_cb_client(evutil_socket_t sock, short event, void *ctx) {
 
 static struct bufferevent *init_udp_client(struct event_base *base, struct raw_server_info *raw_server_info) {
     evutil_socket_t sock;
-    struct bufferevent_udp *context_udp;
+    struct bev_context_udp *bev_context_udp;
     struct bufferevent *raw;
     struct timeval one_minute = {60, 0};
 
@@ -163,13 +163,13 @@ static struct bufferevent *init_udp_client(struct event_base *base, struct raw_s
         LOGE("cannot make udp socket reuseable");
         goto error;
     }
-    context_udp = calloc(1, sizeof(struct bufferevent_udp));
-    if (context_udp == NULL) {
+    bev_context_udp = calloc(1, sizeof(struct bev_context_udp));
+    if (bev_context_udp == NULL) {
         LOGE("cannot calloc for udp socket");
         goto error;
     }
-    context_udp->socklen = raw_server_info->socklen;
-    context_udp->sockaddr = (struct sockaddr *) &(raw_server_info->udp_sockaddr);
+    bev_context_udp->socklen = raw_server_info->socklen;
+    bev_context_udp->sockaddr = (struct sockaddr *) &(raw_server_info->udp_sockaddr);
     raw = bufferevent_socket_new(base, -1, BEV_OPT_CLOSE_ON_FREE);
     if (!raw) {
         LOGE("cannot create udp bufferevent");
@@ -177,11 +177,11 @@ static struct bufferevent *init_udp_client(struct event_base *base, struct raw_s
     }
     bufferevent_disable(raw, EV_READ | EV_WRITE);
     bufferevent_setfd(raw, sock);
-    event_assign(&(raw->ev_write), base, sock, EV_WRITE | EV_PERSIST, bufferevent_udp_writecb, raw);
+    event_assign(&(raw->ev_write), base, sock, EV_WRITE | EV_PERSIST, bev_context_udp_writecb, raw);
     event_assign(&(raw->ev_read), base, sock, EV_READ | EV_PERSIST, udp_read_cb_client, raw);
     event_add(&(raw->ev_read), &one_minute);
-    context_udp->context = &bev_wm_udp;
-    bufferevent_set_context(raw, context_udp);
+    bev_context_udp->bev_context = &const_bev_context_udp;
+    bufferevent_set_context(raw, bev_context_udp);
     return raw;
 error:
     if (sock > 0) {

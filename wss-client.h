@@ -34,7 +34,7 @@ DEFINE_LHASH_OF(bufferevent_http_stream);
 #endif
 #endif
 
-struct wss_proxy_context {
+struct wss_context {
     SSL_CTX *ssl_ctx;
     SSL *ssl;
     SSL *stream;
@@ -55,9 +55,9 @@ struct wss_proxy_context {
     char user_agent[80];
 };
 
-struct bufferevent_context_ssl {
-    const struct bufferevent_context *context;
-    struct wss_proxy_context *proxy_context;
+struct bev_context_ssl {
+    const struct bev_context *bev_context;
+    struct wss_context *wss_context;
     enum http http: 2;
     uint8_t upgrade: 1;
     struct evbuffer *frame;
@@ -88,7 +88,7 @@ struct bufferevent_context_ssl {
 
 #define HTTP3_MAX_HEADER_LENGTH 9
 
-void free_context_ssl(struct wss_proxy_context *proxy_context);
+void free_context_ssl(struct wss_context *wss_context);
 
 size_t build_http2_frame(uint8_t *frame, size_t length, uint8_t type, uint8_t flags, uint32_t stream_id);
 
@@ -96,8 +96,8 @@ size_t parse_http3_frame(const uint8_t *buffer, size_t length, size_t *out_heade
 
 size_t build_http3_frame(uint8_t *frame, uint8_t type, size_t length);
 
-struct bufferevent *bufferevent_new(struct wss_proxy_context *context, struct bufferevent *raw);
+struct bufferevent *bufferevent_new(struct wss_context *wss_context, struct bufferevent *raw);
 
-void bufferevent_timeout(struct bufferevent_context_ssl *context_ssl);
+void bufferevent_timeout(struct bev_context_ssl *bev_context_ssl);
 
 #endif //WSS_PROXY_WSS_CLIENT_H

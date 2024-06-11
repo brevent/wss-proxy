@@ -79,23 +79,23 @@ struct udp_frame {
 #define MAX_PROXY_BUFFER (512 * 1024)
 #define MIN_PROXY_BUFFER (64 * 1024)
 
-typedef struct bufferevent_udp bufferevent_udp;
+typedef struct bev_context_udp bev_context_udp;
 
 #ifdef WSS_PROXY_CLIENT
 #ifdef DEFINE_LHASH_OF_EX
-DEFINE_LHASH_OF_EX(bufferevent_udp);
+DEFINE_LHASH_OF_EX(bev_context_udp);
 #else
-DEFINE_LHASH_OF(bufferevent_udp);
+DEFINE_LHASH_OF(bev_context_udp);
 #endif
 #endif
 
-struct bufferevent_context {
+struct bev_context {
     const char *name;
     void (*free)(void *ptr);
 };
 
-struct bufferevent_udp {
-    const struct bufferevent_context *context;
+struct bev_context_udp {
+    const struct bev_context *bev_context;
     ev_socklen_t socklen;
     struct sockaddr *sockaddr;
     struct bufferevent *bev;
@@ -104,7 +104,7 @@ struct bufferevent_udp {
         struct sockaddr_in sin;
         struct sockaddr_in6 sin6;
     } sockaddr_storage;
-    LHASH_OF(bufferevent_udp) *hash;
+    LHASH_OF(bev_context_udp) *hash;
 #endif
 };
 
@@ -121,7 +121,7 @@ static inline void *bufferevent_get_context(struct bufferevent *bev) {
     return NULL;
 }
 
-extern const struct bufferevent_context bev_wm_udp;
+extern const struct bev_context const_bev_context_udp;
 
 void safe_bufferevent_free(struct bufferevent *bev);
 
@@ -216,7 +216,7 @@ ssize_t udp_read(evutil_socket_t sock, struct udp_frame *udp_frame, struct socka
 
 void udp_read_cb(struct evbuffer *buf, const struct evbuffer_cb_info *info, void *arg);
 
-void bufferevent_udp_writecb(evutil_socket_t fd, short event, void *arg);
+void bev_context_udp_writecb(evutil_socket_t fd, short event, void *arg);
 
 #ifdef HAVE_SSL_CTX_SET_KEYLOG_CALLBACK
 void ssl_keylog_callback(const SSL *ssl, const char *line);

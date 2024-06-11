@@ -22,12 +22,12 @@ static int send_close(struct bufferevent *tev, uint16_t reason);
 static void tev_write_cb(struct evbuffer *buffer, const struct evbuffer_cb_info *info, void *arg);
 
 void safe_bufferevent_free(struct bufferevent *bev) {
-    struct bufferevent_udp *context_udp;
+    struct bev_context **bev_context;
 
     LOGD("free %p", bev);
-    context_udp = bufferevent_get_context(bev);
-    if (context_udp != NULL) {
-        context_udp->context->free(context_udp);
+    bev_context = bufferevent_get_context(bev);
+    if (bev_context != NULL && *bev_context != NULL) {
+        (*bev_context)->free(bev_context);
         bufferevent_set_context(bev, NULL);
     }
     bufferevent_free(bev);
@@ -36,33 +36,33 @@ void safe_bufferevent_free(struct bufferevent *bev) {
 #define bufferevent_free safe_bufferevent_free
 
 static int is_udp(struct bufferevent *bev) {
-    struct bufferevent_udp *context_udp;
+    struct bev_context_udp *bev_context_udp;
 
-    context_udp = bufferevent_get_context(bev);
-    return context_udp && context_udp->context == &bev_wm_udp;
+    bev_context_udp = bufferevent_get_context(bev);
+    return bev_context_udp && bev_context_udp->bev_context == &const_bev_context_udp;
 }
 
-static void bufferevent_udp_free(void *context) {
+static void bev_context_udp_free(void *context) {
 #ifdef WSS_PROXY_CLIENT
-    lh_bufferevent_udp_delete(((struct bufferevent_udp *) context)->hash, context);
+    lh_bev_context_udp_delete(((struct bev_context_udp *) context)->hash, context);
 #endif
     free(context);
 }
 
-const struct bufferevent_context bev_wm_udp = {
+const struct bev_context const_bev_context_udp = {
         "udp",
-        bufferevent_udp_free,
+        bev_context_udp_free,
 };
 
 uint16_t get_peer_port(struct bufferevent *bev) {
     evutil_socket_t sock;
     ev_socklen_t socklen;
     struct sockaddr_storage sockaddr;
-    struct bufferevent_udp *context_udp;
+    struct bev_context_udp *bev_context_udp;
 
-    context_udp = bufferevent_get_context(bev);
-    if (context_udp && context_udp->context == &bev_wm_udp) {
-        return get_port(context_udp->sockaddr);
+    bev_context_udp = bufferevent_get_context(bev);
+    if (bev_context_udp && bev_context_udp->bev_context == &const_bev_context_udp) {
+        return get_port(bev_context_udp->sockaddr);
     }
     sock = bufferevent_getfd(bev);
     if (sock < 0) {
@@ -322,7 +322,8 @@ static uint8_t *build_ws_frame(enum ws_op op, void *payload, uint16_t size, uint
     return header;
 }
 
-static void send_pong(struct evbuffer *src, uint16_t payload_size, uint32_t mask_key, struct bufferevent *tev, enum ws_op op) {
+static void send_pong(struct evbuffer *src, uint16_t payload_size, uint32_t mask_key,
+                      struct bufferevent *tev, enum ws_op op) {
     uint8_t *wss_header, header_size;
     struct wss_frame_pong {
         char header[MAX_WS_HEADER_SIZE];
@@ -829,18 +830,18 @@ void udp_read_cb(struct evbuffer *buf, const struct evbuffer_cb_info *info, void
     }
 }
 
-void bufferevent_udp_writecb(evutil_socket_t fd, short event, void *arg) {
+void bev_context_udp_writecb(evutil_socket_t fd, short event, void *arg) {
     size_t size;
     unsigned length;
     uint16_t payload_length;
     struct evbuffer *buf;
     struct bufferevent *raw;
-    struct bufferevent_udp *context_udp;
+    struct bev_context_udp *bev_context_udp;
     struct udp_frame udp_frame;
 
     (void) event;
     raw = arg;
-    context_udp = bufferevent_get_context(raw);
+    bev_context_udp = bufferevent_get_context(raw);
     buf = raw->output;
     size = evbuffer_get_length(buf);
     while (size > 0) {
@@ -848,7 +849,7 @@ void bufferevent_udp_writecb(evutil_socket_t fd, short event, void *arg) {
             break;
         }
         if (evbuffer_copyout(buf, &udp_frame, UDP_FRAME_LENGTH_SIZE) != UDP_FRAME_LENGTH_SIZE) {
-            LOGE("cannot copy udp to get payload length for %d", get_port(context_udp->sockaddr));
+            LOGE("cannot copy udp to get payload length for %d", get_port(bev_context_udp->sockaddr));
             raw->errorcb(raw, BEV_EVENT_ERROR, raw->cbarg);
             break;
         }
@@ -858,18 +859,19 @@ void bufferevent_udp_writecb(evutil_socket_t fd, short event, void *arg) {
             break;
         }
         if (evbuffer_copyout(buf, &udp_frame, length) != (int) length) {
-            LOGE("cannot copy udp %d for %d", (int) length, get_port(context_udp->sockaddr));
+            LOGE("cannot copy udp %d for %d", (int) length, get_port(bev_context_udp->sockaddr));
             raw->errorcb(raw, BEV_EVENT_ERROR, raw->cbarg);
             break;
         }
-        if (sendto(fd, udp_frame.buffer, payload_length, 0, context_udp->sockaddr, context_udp->socklen) < 0) {
+        if (sendto(fd, udp_frame.buffer, payload_length, 0, bev_context_udp->sockaddr, bev_context_udp->socklen) < 0) {
             // is there any chance to sendto later?
-            int socket_error = evutil_socket_geterror(context_udp->sock);
-            LOGE("cannot send udp to %d: %s", get_port(context_udp->sockaddr), evutil_socket_error_to_string(socket_error));
+            int socket_error = evutil_socket_geterror(bev_context_udp->sock);
+            LOGE("cannot send udp to %d: %s",
+                 get_port(bev_context_udp->sockaddr), evutil_socket_error_to_string(socket_error));
             raw->errorcb(raw, BEV_EVENT_ERROR, raw->cbarg);
             break;
         }
-        LOGD("udp sent %d to peer %d", payload_length, get_port(context_udp->sockaddr));
+        LOGD("udp sent %d to peer %d", payload_length, get_port(bev_context_udp->sockaddr));
         evbuffer_drain(buf, length);
         size -= length;
     }
