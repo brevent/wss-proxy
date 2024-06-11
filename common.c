@@ -43,9 +43,7 @@ static int is_udp(struct bufferevent *bev) {
 }
 
 static void bev_context_udp_free(void *context) {
-#ifdef WSS_PROXY_CLIENT
     lh_bev_context_udp_delete(((struct bev_context_udp *) context)->hash, context);
-#endif
     free(context);
 }
 
@@ -53,6 +51,26 @@ const struct bev_context const_bev_context_udp = {
         "udp",
         bev_context_udp_free,
 };
+
+static void free_udp(bev_context_udp *udp) {
+    struct bufferevent *raw, *wev, *tev;
+
+    raw = udp->bev;
+    wev = raw->cbarg;
+    tev = wev ? bufferevent_get_underlying(wev) : NULL;
+    LOGD("free udp for peer %d, raw: %p, wev: %p, tev: %p", get_peer_port(raw), raw, wev, tev);
+    if (tev) {
+        close_wss(tev, close_reason_eof, BEV_EVENT_EOF);
+    } else {
+        raw->errorcb(raw, BEV_EVENT_EOF, get_cbarg(raw));
+    }
+}
+
+void free_all_udp(LHASH_OF(bev_context_udp) *hash) {
+    lh_bev_context_udp_set_down_load(hash, 0);
+    lh_bev_context_udp_doall(hash, free_udp);
+    lh_bev_context_udp_free(hash);
+}
 
 uint16_t get_peer_port(struct bufferevent *bev) {
     evutil_socket_t sock;

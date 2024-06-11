@@ -81,12 +81,10 @@ struct udp_frame {
 
 typedef struct bev_context_udp bev_context_udp;
 
-#ifdef WSS_PROXY_CLIENT
 #ifdef DEFINE_LHASH_OF_EX
 DEFINE_LHASH_OF_EX(bev_context_udp);
 #else
 DEFINE_LHASH_OF(bev_context_udp);
-#endif
 #endif
 
 struct bev_context {
@@ -99,14 +97,19 @@ struct bev_context_udp {
     ev_socklen_t socklen;
     struct sockaddr *sockaddr;
     struct bufferevent *bev;
+    LHASH_OF(bev_context_udp) *hash;
 #ifdef WSS_PROXY_CLIENT
     union {
         struct sockaddr_in sin;
         struct sockaddr_in6 sin6;
     } sockaddr_storage;
-    LHASH_OF(bev_context_udp) *hash;
+#endif
+#ifdef WSS_PROXY_SERVER
+    evutil_socket_t sock;
 #endif
 };
+
+void free_all_udp(LHASH_OF(bev_context_udp) *hash);
 
 static inline void bufferevent_set_context(struct bufferevent *bev, void *context) {
     if (context == NULL || (!bev->wm_read.low && !bev->wm_write.low)) {

@@ -17,7 +17,16 @@ struct raw_server_info {
     struct sockaddr_storage sockaddr;
     int udp_port;
     struct sockaddr_storage udp_sockaddr;
+    LHASH_OF(bev_context_udp) *hash;
 };
+
+static unsigned long bev_context_udp_hash(const bev_context_udp *a) {
+    return a->sock;
+}
+
+static int bev_context_udp_cmp(const bev_context_udp *a, const bev_context_udp *b) {
+    return a->sock - b->sock;
+}
 
 static int init_ws_info(const char **addr, int *port) {
     int mux;
@@ -168,8 +177,6 @@ static struct bufferevent *init_udp_client(struct event_base *base, struct raw_s
         LOGE("cannot calloc for udp socket");
         goto error;
     }
-    bev_context_udp->socklen = raw_server_info->socklen;
-    bev_context_udp->sockaddr = (struct sockaddr *) &(raw_server_info->udp_sockaddr);
     raw = bufferevent_socket_new(base, -1, BEV_OPT_CLOSE_ON_FREE);
     if (!raw) {
         LOGE("cannot create udp bufferevent");
@@ -180,8 +187,14 @@ static struct bufferevent *init_udp_client(struct event_base *base, struct raw_s
     event_assign(&(raw->ev_write), base, sock, EV_WRITE | EV_PERSIST, bev_context_udp_writecb, raw);
     event_assign(&(raw->ev_read), base, sock, EV_READ | EV_PERSIST, udp_read_cb_client, raw);
     event_add(&(raw->ev_read), &one_minute);
+    bev_context_udp->socklen = raw_server_info->socklen;
+    bev_context_udp->sockaddr = (struct sockaddr *) &(raw_server_info->udp_sockaddr);
+    bev_context_udp->bev = raw;
+    bev_context_udp->hash = raw_server_info->hash;
+    bev_context_udp->sock = sock;
     bev_context_udp->bev_context = &const_bev_context_udp;
     bufferevent_set_context(raw, bev_context_udp);
+    lh_bev_context_udp_insert(raw_server_info->hash, bev_context_udp);
     return raw;
 error:
     if (sock > 0) {
@@ -318,6 +331,11 @@ int main() {
     if (raw_server_info.udp_port > 0) {
         memcpy(&(raw_server_info.udp_sockaddr), &(raw_server_info.sockaddr), raw_server_info.socklen);
         set_port(&(raw_server_info.udp_sockaddr), raw_server_info.udp_port);
+        raw_server_info.hash = lh_bev_context_udp_new(bev_context_udp_hash, bev_context_udp_cmp);
+        if (!raw_server_info.hash) {
+            LOGE("cannot create lhash for udp");
+            goto error;
+        }
     }
 
     if (init_ws_info(&addr, &port)) {
@@ -369,6 +387,9 @@ int main() {
 
     code = 0;
 error:
+    if (raw_server_info.hash) {
+        free_all_udp(raw_server_info.hash);
+    }
     if (event_parent) {
         event_free(event_parent);
     }
