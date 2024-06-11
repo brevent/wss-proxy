@@ -444,11 +444,8 @@ static size_t build_http_request_v3(struct wss_context *wss_context, int udp, ch
 }
 
 static void tev_raw_event_cb(struct bufferevent *tev, short event, void *raw) {
-    struct bev_context_ssl *bev_context_ssl;
-
-    bev_context_ssl = bufferevent_get_context(tev);
+    bufferevent_timeout(bufferevent_get_context(tev));
     raw_event_cb(raw, event, tev);
-    bufferevent_timeout(bev_context_ssl);
 }
 
 static struct bufferevent *connect_wss(struct wss_context *wss_context, struct bufferevent *raw, int udp) {
@@ -796,6 +793,7 @@ int main() {
         goto error;
     }
 
+    wss_context.base = base;
     LOGI("%s", wss_context.user_agent);
     LOGI("started, pid: %d, ppid: %d", getpid(), getppid());
 

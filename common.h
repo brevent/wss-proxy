@@ -29,7 +29,7 @@
 #endif
 
 #ifndef WSS_TIMEOUT
-#define WSS_TIMEOUT 10
+#define WSS_TIMEOUT 5
 #endif
 
 #ifndef WSS_LISTEN_BACKLOG

@@ -3,6 +3,7 @@
 #include <openssl/err.h>
 #include <arpa/inet.h>
 #include <signal.h>
+#include <openssl/rand.h>
 #include "wss-client.h"
 #include "common.h"
 
@@ -755,17 +756,30 @@ static void check_http2_stream(struct wss_context *wss_context, struct http2_fra
     }
 }
 
+static void handle_ping(struct wss_context *wss_context, uint8_t *header, size_t length) {
+    if (header[0x4] == 1) {
+        LOGI("server send ping with ack");
+    } else if (header[0x4] == 0 && length == 8) {
+        LOGI("server send ping, reply with ack");
+        header[0x4] = 1;
+        evbuffer_add(wss_context->output, header, HTTP2_HEADER_LENGTH + length);
+    }
+}
+
 static void check_http2_control(struct wss_context *wss_context, uint8_t type, uint8_t *header, uint8_t length) {
     switch (type) {
         case 4: // settings
             update_settings(wss_context, header + HTTP2_HEADER_LENGTH, length);
             break;
-        case 8: // window update
-            update_window_update(wss_context, header + HTTP2_HEADER_LENGTH);
+        case 6: // ping
+            handle_ping(wss_context, header, length);
             break;
         case 7: // goaway
-            LOGI("sever send goaway, mark as eof");
+            LOGI("server send goaway, mark as eof");
             wss_context->ssl_error = 1;
+            break;
+        case 8: // window update
+            update_window_update(wss_context, header + HTTP2_HEADER_LENGTH);
             break;
         default:
             LOGW("unknown control frame %d", type);
@@ -836,7 +850,7 @@ static ssize_t do_ssl_read(struct bev_context_ssl *bev_context_ssl, struct buffe
         }
         bev_context_ssl->total += size;
         if (bev_context_ssl->wss_context) {
-            bev_context_ssl->wss_context->timeout_count = 0;
+            bev_context_ssl->wss_context->timeout.tv_sec = 0;
         }
         if (bev_context_ssl->http == http3 && bev) {
             res = parse_http3(bev, frame, size);
@@ -1323,7 +1337,7 @@ static int init_ssl_sock(struct wss_context *wss_context, struct event_base *bas
         wss_context->ssl = ssl;
     }
     wss_context->ssl_error = 0;
-    wss_context->timeout_count = 0;
+    wss_context->timeout.tv_sec = 0;
     *ssl1 = ssl;
     return sock;
 error:
@@ -1471,6 +1485,8 @@ error:
 }
 
 void bufferevent_timeout(struct bev_context_ssl *bev_context_ssl) {
+    uint8_t frame[HTTP2_HEADER_LENGTH + 8];
+    struct timeval timeout;
     struct wss_context *wss_context;
     struct bufferevent_http_stream key, *http_stream;
 
@@ -1481,17 +1497,28 @@ void bufferevent_timeout(struct bev_context_ssl *bev_context_ssl) {
     if (!wss_context) {
         return;
     }
-    wss_context->timeout_count++;
-    if (!wss_context->ssl_error && wss_context->timeout_count >= 0x3) {
-        LOGW("http mux connection timeout %d, mark as ssl error", wss_context->timeout_count);
-        wss_context->ssl_error = 1;
-    } else {
-        LOGD("http mux connection timeout %d", wss_context->timeout_count);
-    }
     key.stream_id = bev_context_ssl->stream_id;
     http_stream = lh_bufferevent_http_stream_retrieve(wss_context->http_streams, &key);
     if (http_stream) {
         http_stream->mark_free = 1;
         LOGD("http stream %lu: %p timeout", (unsigned long) key.stream_id, http_stream);
+    }
+    event_base_gettimeofday_cached(wss_context->base, &timeout);
+    if (!wss_context->timeout.tv_sec) {
+        LOGD("http mux connection timeout, update timeout to %lld", (long long) timeout.tv_sec);
+        wss_context->timeout.tv_sec = timeout.tv_sec;
+    } else if (!wss_context->ssl_error && timeout.tv_sec - wss_context->timeout.tv_sec > WSS_TIMEOUT) {
+        LOGW("http mux connection timeout, mark as ssl error, previous: %lld, now: %lld",
+             (long long) wss_context->timeout.tv_sec, (long long) timeout.tv_sec);
+        wss_context->ssl_error = 1;
+    } else {
+        LOGD("http mux connection timeout, previous: %lld, now: %lld",
+             (long long) wss_context->timeout.tv_sec, (long long) timeout.tv_sec);
+    }
+    if (!wss_context->ssl_error && bev_context_ssl->http == http2) {
+        build_http2_frame(frame, 8, 6, 0, 0);
+        RAND_bytes(frame + HTTP2_HEADER_LENGTH, 8);
+        evbuffer_add(wss_context->output, frame, sizeof(frame));
+        LOGD("send http2 ping");
     }
 }

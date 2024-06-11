@@ -39,11 +39,12 @@ struct wss_context {
     SSL *ssl;
     SSL *stream;
     LHASH_OF(bufferevent_http_stream) *http_streams;
+    struct event_base *base;
     struct evbuffer *input;
     struct evbuffer *output;
     struct event *event_quic;
     struct event *event_sighup;
-    uint8_t timeout_count;
+    struct timeval timeout;
     uint8_t settings_sent: 1;
     uint8_t ssl_error: 1;
     uint8_t http2_evicted: 1;
