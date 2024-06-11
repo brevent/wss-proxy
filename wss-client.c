@@ -1,3 +1,4 @@
+#include <string.h>
 #include <event2/event.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
@@ -28,6 +29,7 @@ struct bufferevent_http_stream {
     uint8_t in_closed: 1;
     uint8_t out_closed: 1;
     uint8_t rst_sent: 1;
+    struct wss_context *wss_context;
 };
 
 static unsigned long bufferevent_http_stream_hash(const bufferevent_http_stream *a) {
@@ -151,6 +153,8 @@ static ssize_t check_ssl_error(struct bev_context_ssl *bev_context_ssl,
     if (bev_context_ssl->http == http3) {
         ret = SSL_get_error(SSL_get0_connection(ssl), ret);
     }
+#else
+    (void) ssl;
 #endif
     s = read ? "read" : "write";
     switch (ret) {
@@ -656,11 +660,11 @@ static void handle_http2_frame(struct bufferevent *bev, struct http2_frame *http
     }
 }
 
-static void update_window_size(struct bufferevent_http_stream *http_stream, void *arg) {
+static void update_window_size(struct bufferevent_http_stream *http_stream) {
     struct wss_context *wss_context;
     struct bev_context_ssl *bev_context_ssl;
 
-    wss_context = arg;
+    wss_context = http_stream->wss_context;
     bev_context_ssl = bufferevent_get_context(http_stream->bev);
     if (bev_context_ssl && bev_context_ssl->stream_id == http_stream->stream_id) {
         bev_context_ssl->send_window += wss_context->initial_window_size - bev_context_ssl->initial_window_size;
@@ -685,7 +689,7 @@ static void update_settings(struct wss_context *wss_context, uint8_t *header, si
         } else if (settings_type == 0x4) {
             LOGD("initial window size: %u", settings_value);
             wss_context->initial_window_size = settings_value;
-            lh_bufferevent_http_stream_doall_arg(wss_context->http_streams, update_window_size, wss_context);
+            lh_bufferevent_http_stream_doall(wss_context->http_streams, update_window_size);
         } else if (settings_type == 0x5) {
             LOGD("max frame size: %u", settings_value);
         } else if (settings_type == 0x8) {
@@ -1066,10 +1070,10 @@ void free_context_ssl(struct wss_context *wss_context) {
     }
 }
 
-static void evict_http2_stream(struct bufferevent_http_stream *http_stream, void *arg) {
+static void evict_http2_stream(struct bufferevent_http_stream *http_stream) {
     struct wss_context *wss_context;
 
-    wss_context = arg;
+    wss_context = http_stream->wss_context;
     if (http_stream->out_closed || http_stream->mark_free) {
         if (!http_stream->in_closed && !http_stream->rst_sent) {
             LOGD("reset http stream %lu: %p", (unsigned long) http_stream->stream_id, http_stream);
@@ -1103,7 +1107,7 @@ static void http2_readcb(evutil_socket_t sock, short event, void *context) {
         http_streams = wss_context->http_streams;
         hash_factor = lh_bufferevent_http_stream_get_down_load(http_streams);
         lh_bufferevent_http_stream_set_down_load(http_streams, 0);
-        lh_bufferevent_http_stream_doall_arg(http_streams, evict_http2_stream, wss_context);
+        lh_bufferevent_http_stream_doall(http_streams, evict_http2_stream);
         lh_bufferevent_http_stream_set_down_load(http_streams, hash_factor);
     }
     do_http2_write(wss_context, wss_context->output);
@@ -1461,6 +1465,7 @@ start:
             }
             http_stream->stream_id = bev_context_ssl->stream_id;
             http_stream->bev = tev;
+            http_stream->wss_context = wss_context;
             lh_bufferevent_http_stream_insert(wss_context->http_streams, http_stream);
             if (!event_pending(SSL_get_app_data(wss_context->ssl), EV_READ, NULL)) {
                 event_add(SSL_get_app_data(wss_context->ssl), NULL);
