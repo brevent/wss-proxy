@@ -5,7 +5,7 @@ import time
 
 if __name__ == '__main__':
     port = len(sys.argv) > 1 and int(sys.argv[1]) or 1081
-    for x in range(4):
+    for x in range(len(sys.argv) > 2 and int(sys.argv[2]) or 1):
         sock = socks.socksocket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.set_proxy(socks.SOCKS5, "localhost", port)
         sock.settimeout(10)
