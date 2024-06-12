@@ -47,6 +47,7 @@ struct wss_context {
     struct timeval timeout;
     uint8_t settings_sent: 1;
     uint8_t ssl_error: 1;
+    uint8_t ssl_connected: 1;
     uint8_t http2_evicted: 1;
     uint32_t next_stream_id: 23;
     uint32_t initial_window_size;
@@ -61,6 +62,7 @@ struct bev_context_ssl {
     struct wss_context *wss_context;
     enum http http: 2;
     uint8_t upgrade: 1;
+    uint8_t connected: 1;
     struct evbuffer *frame;
     uint32_t stream_id;
     uint32_t initial_window_size;

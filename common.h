@@ -130,8 +130,10 @@ void safe_bufferevent_free(struct bufferevent *bev);
 
 #ifndef _WIN32
 #define EVUTIL_ERR_RW_RETRIABLE(e) ((e) == EINTR || (e) == EAGAIN || (e) == EWOULDBLOCK)
+#define EVUTIL_ERR_CONNECT_RETRIABLE(e) ((e) == EINTR || (e) == EINPROGRESS)
 #else
 #define EVUTIL_ERR_RW_RETRIABLE(e) ((e) == WSAEINTR || (e) == WSAEWOULDBLOCK)
+#define EVUTIL_ERR_CONNECT_RETRIABLE(e) ((e) == WSAEINTR || (e) == WSAEINPROGRESS || (e) == WSAEWOULDBLOCK)
 #endif
 
 uint16_t get_peer_port(struct bufferevent *bev);

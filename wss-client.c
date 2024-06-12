@@ -1112,7 +1112,9 @@ static void http2_readcb(evutil_socket_t sock, short event, void *context) {
         lh_bufferevent_http_stream_doall(http_streams, evict_http2_stream);
         lh_bufferevent_http_stream_set_down_load(http_streams, hash_factor);
     }
-    do_http2_write(wss_context, wss_context->output);
+    if (wss_context->ssl_connected) {
+        do_http2_write(wss_context, wss_context->output);
+    }
 }
 
 static ssize_t do_http2_write(struct wss_context *wss_context, struct evbuffer *output) {
@@ -1204,6 +1206,52 @@ done:
     return;
 }
 
+enum status {
+    error,
+    eagain,
+    connected,
+};
+
+static enum status is_ssl_connected(struct bev_context_ssl *bev_context_ssl, evutil_socket_t fd) {
+    int err;
+    ev_socklen_t len;
+
+    if (bev_context_ssl) {
+        if (bev_context_ssl->http == http1 && bev_context_ssl->connected) {
+            return connected;
+        }
+        if (bev_context_ssl->http == http2 && bev_context_ssl->wss_context->ssl_connected) {
+            return connected;
+        }
+        if (bev_context_ssl->http == http3) {
+            return connected;
+        }
+    }
+    len = sizeof(err);
+    if (getsockopt(fd, SOL_SOCKET, SO_ERROR, (void *) &err, &len) < 0) {
+        err = evutil_socket_geterror(sock);
+        LOGW("cannot getsockopt: %s", evutil_socket_error_to_string(err));
+        return error;
+    }
+    if (err) {
+        if (EVUTIL_ERR_CONNECT_RETRIABLE(err)) {
+            return eagain;
+        } else {
+            LOGW("socket error: %s", evutil_socket_error_to_string(err));
+            return error;
+        }
+    }
+    if (bev_context_ssl) {
+        if (bev_context_ssl->http == http1) {
+            bev_context_ssl->connected = 1;
+        }
+        if (bev_context_ssl->http == http2) {
+            bev_context_ssl->wss_context->ssl_connected = 1;
+        }
+    }
+    return connected;
+}
+
 static void bufferevent_writecb(evutil_socket_t fd, short event, void *arg) {
     ssize_t res, size;
     uint8_t buffer[WSS_PAYLOAD_SIZE];
@@ -1217,6 +1265,15 @@ static void bufferevent_writecb(evutil_socket_t fd, short event, void *arg) {
     }
 
     bev_context_ssl = bufferevent_get_context(bev);
+    switch (is_ssl_connected(bev_context_ssl, fd)) {
+        case error:
+            goto error;
+        case eagain:
+            goto done;
+        case connected:
+        default:
+            break;
+    }
     if (bev_context_ssl && bev_context_ssl->http == http2) {
         res = do_http2_write(bev_context_ssl->wss_context, bev_context_ssl->wss_context->output);
         if (res < 0) {
@@ -1276,7 +1333,7 @@ done:
 }
 
 static int init_ssl_sock(struct wss_context *wss_context, struct event_base *base, SSL **ssl1) {
-    int sock;
+    int sock = -1, socket_error;
     SSL *ssl, *stream = NULL;
     socklen_t socklen;
     struct sockaddr_storage sockaddr;
@@ -1301,17 +1358,20 @@ static int init_ssl_sock(struct wss_context *wss_context, struct event_base *bas
         return -1;
     }
 
+    if (update_socket_flag(sock)) {
+        goto error;
+    }
+
     if (wss_context->server.http2 || wss_context->server.http3) {
         LOGI("new sock");
     }
 
     if (!wss_context->server.http3 && connect(sock, (struct sockaddr *) &sockaddr, socklen) < 0) {
-        LOGW("cannot connect: %s", strerror(errno));
-        goto error;
-    }
-
-    if (update_socket_flag(sock)) {
-        goto error;
+        socket_error = evutil_socket_geterror(sock);
+        if (!EVUTIL_ERR_CONNECT_RETRIABLE(socket_error)) {
+            LOGW("cannot connect: %s", evutil_socket_error_to_string(socket_error));
+            goto error;
+        }
     }
 
     if (!wss_context->server.tls) {
@@ -1501,7 +1561,7 @@ void bufferevent_timeout(struct bev_context_ssl *bev_context_ssl) {
         return;
     }
     wss_context = bev_context_ssl->wss_context;
-    if (!wss_context) {
+    if (!wss_context || !wss_context->http_streams) {
         return;
     }
     key.stream_id = bev_context_ssl->stream_id;
