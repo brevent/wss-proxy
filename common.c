@@ -716,6 +716,11 @@ static void raw_event_cb_wss(struct bufferevent *raw, short event, void *wev) {
         port = get_peer_port(tev);
 #endif
         LOGD("connection %u closed for wss %p, event: 0x%02x", port, tev, event);
+#ifdef WSS_PROXY_SERVER
+        if (event & BEV_EVENT_EOF) {
+            return;
+        }
+#endif
         if (tev && tev->cbarg) {
             close_wss(tev, close_reason_raw, event);
         } else {
