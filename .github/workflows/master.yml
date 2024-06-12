@@ -22,7 +22,7 @@ jobs:
     strategy:
       matrix:
         # https://github.com/actions/runner-images
-        os: [ubuntu-latest, ubuntu-20.04, macos-latest, macos-13, macos-12]
+        os: [ubuntu-24.04, ubuntu-22.04, ubuntu-20.04, macos-14, macos-13, macos-12]
 
     steps:
     - uses: actions/checkout@v3
@@ -44,16 +44,13 @@ jobs:
       # Build your program with the given configuration
       run: cmake --build ${{github.workspace}}/build --config ${{env.BUILD_TYPE}}
 
-    - name: Install shadowsocks on ubuntu
+    - name: Install shadowsocks and PySocks on ubuntu
       if: ${{ startsWith(matrix.os, 'ubuntu') }}
-      run: sudo apt-get install -y shadowsocks-libev
+      run: sudo apt-get install -y shadowsocks-libev python3-socks
 
-    - name: Install shadowsocks on macos
+    - name: Install shadowsocks and PySocks on macos
       if: ${{ startsWith(matrix.os, 'macos') }}
-      run: brew install shadowsocks-libev shadowsocks-rust v2ray-plugin
-
-    - name: Install PySocks
-      run: /usr/bin/pip3 install PySocks
+      run: brew install shadowsocks-libev shadowsocks-rust v2ray-plugin && /usr/bin/pip3 install PySocks
 
     - name: Test
       working-directory: ${{github.workspace}}/build
