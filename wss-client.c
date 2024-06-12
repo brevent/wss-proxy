@@ -388,18 +388,19 @@ static int update_socket_flag(evutil_socket_t sock) {
 static int get_sockaddr(struct wss_context *wss_context, struct sockaddr *sockaddr,
                         socklen_t *socklen) {
     char port[6];
-    struct evutil_addrinfo hints, *ai = NULL;
+    struct evutil_addrinfo hints, *res, *ai;
 
+start:
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = wss_context->server.ipv6 ? AF_INET6 : AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
     snprintf(port, sizeof(port), "%d", wss_context->server.port);
-    if (evutil_getaddrinfo(wss_context->server.addr, port, &hints, &ai) < 0) {
+    if (evutil_getaddrinfo(wss_context->server.addr, port, &hints, &res) < 0) {
         LOGW("cannot resolve %s", wss_context->server.addr);
         return -1;
     }
 
-    for (; ai; ai = ai->ai_next) {
+    for (ai = res; ai; ai = ai->ai_next) {
         int sock, ret;
         sock = socket(ai->ai_family, SOCK_DGRAM, IPPROTO_UDP);
         if (sock < 0) {
@@ -412,11 +413,19 @@ static int get_sockaddr(struct wss_context *wss_context, struct sockaddr *sockad
         }
         *socklen = ai->ai_addrlen;
         memcpy(sockaddr, ai->ai_addr, ai->ai_addrlen);
-        evutil_freeaddrinfo(ai);
+        evutil_freeaddrinfo(res);
         return 0;
     }
 
-    evutil_freeaddrinfo(ai);
+    if (res) {
+        evutil_freeaddrinfo(res);
+    }
+    if (wss_context->server.ipv6) {
+        LOGW("cannot connect6 to %s, remove ipv6 option", wss_context->server.addr);
+        wss_context->server.ipv6 = 0;
+        goto start;
+    }
+    LOGW("cannot connect to %s", wss_context->server.addr);
     return -1;
 }
 
@@ -1287,6 +1296,10 @@ static int init_ssl_sock(struct wss_context *wss_context, struct event_base *bas
         }
     }
 
+    if (get_sockaddr(wss_context, (struct sockaddr *) &sockaddr, &socklen)) {
+        goto error;
+    }
+
     sock = socket(wss_context->server.ipv6 ? AF_INET6 : AF_INET,
                   wss_context->server.http3 ? SOCK_DGRAM : SOCK_STREAM,
                   wss_context->server.http3 ? IPPROTO_UDP : IPPROTO_TCP);
@@ -1297,10 +1310,6 @@ static int init_ssl_sock(struct wss_context *wss_context, struct event_base *bas
 
     if (wss_context->server.http2 || wss_context->server.http3) {
         LOGI("new sock");
-    }
-
-    if (get_sockaddr(wss_context, (struct sockaddr *) &sockaddr, &socklen)) {
-        goto error;
     }
 
     if (!wss_context->server.http3 && connect(sock, (struct sockaddr *) &sockaddr, socklen) < 0) {
