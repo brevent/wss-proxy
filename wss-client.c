@@ -1112,7 +1112,7 @@ static void http2_readcb(evutil_socket_t sock, short event, void *context) {
         lh_bufferevent_http_stream_doall(http_streams, evict_http2_stream);
         lh_bufferevent_http_stream_set_down_load(http_streams, hash_factor);
     }
-    if (wss_context->ssl_connected) {
+    if (wss_context->ssl_connected && evbuffer_get_length(wss_context->output)) {
         do_http2_write(wss_context, wss_context->output);
     }
 }
@@ -1258,6 +1258,7 @@ static void bufferevent_writecb(evutil_socket_t fd, short event, void *arg) {
     short what = BEV_EVENT_WRITING;
     struct bufferevent *bev = arg;
     struct bev_context_ssl *bev_context_ssl;
+    struct wss_context *wss_context;
 
     if (event == EV_TIMEOUT) {
         what |= BEV_EVENT_TIMEOUT;
@@ -1274,10 +1275,14 @@ static void bufferevent_writecb(evutil_socket_t fd, short event, void *arg) {
         default:
             break;
     }
+
     if (bev_context_ssl && bev_context_ssl->http == http2) {
-        res = do_http2_write(bev_context_ssl->wss_context, bev_context_ssl->wss_context->output);
-        if (res < 0) {
-            goto write;
+        wss_context = bev_context_ssl->wss_context;
+        if (evbuffer_get_length(wss_context->output)) {
+            res = do_http2_write(wss_context, wss_context->output);
+            if (res <= 0) {
+                goto check;
+            }
         }
     }
 
@@ -1288,23 +1293,23 @@ static void bufferevent_writecb(evutil_socket_t fd, short event, void *arg) {
             goto error;
         }
         res = do_write(bev, fd, buffer, size);
-        if (res > 0) {
-            evbuffer_drain(bev->output, res);
+        if (res <= 0) {
+            goto check;
         }
-        goto write;
+        evbuffer_drain(bev->output, res);
     }
 
     if (evbuffer_get_length(bev->output) == 0) {
         event_del(&bev->ev_write);
     }
 
-    if (bev->writecb && evbuffer_get_length(bev->output) == 0) {
+    if (bev->writecb) {
         bev->writecb(bev, bev->cbarg);
     }
 
     goto done;
 
-write:
+check:
     if (res == WSS_AGAIN) {
         goto reschedule;
     } else if (res == WSS_ERROR) {

@@ -840,59 +840,88 @@ void tunnel_ss(struct bufferevent *raw, struct bufferevent *tev) {
     raw->readcb(raw, raw->cbarg);
 }
 
-void udp_read_cb(struct evbuffer *buf, const struct evbuffer_cb_info *info, void *arg) {
-    struct bufferevent *raw = arg;
-    (void) buf;
-    if (info->n_added > 0) {
-        raw->readcb(raw, raw->cbarg);
-    }
-}
-
 void bev_context_udp_writecb(evutil_socket_t fd, short event, void *arg) {
+    int err;
     size_t size;
+    ssize_t res;
     unsigned length;
     uint16_t payload_length;
     struct evbuffer *buf;
     struct bufferevent *raw;
     struct bev_context_udp *bev_context_udp;
     struct udp_frame udp_frame;
+    short what = BEV_EVENT_WRITING;
 
     (void) event;
     raw = arg;
     bev_context_udp = bufferevent_get_context(raw);
     buf = raw->output;
     size = evbuffer_get_length(buf);
-    while (size > 0) {
-        if (size < UDP_FRAME_LENGTH_SIZE) {
-            break;
-        }
-        if (evbuffer_copyout(buf, &udp_frame, UDP_FRAME_LENGTH_SIZE) != UDP_FRAME_LENGTH_SIZE) {
-            LOGE("cannot copy udp to get payload length for %d", get_port(bev_context_udp->sockaddr));
-            raw->errorcb(raw, BEV_EVENT_ERROR, raw->cbarg);
-            break;
-        }
-        payload_length = htons(udp_frame.length);
-        length = payload_length + UDP_FRAME_LENGTH_SIZE;
-        if (size < length) {
-            break;
-        }
-        if (evbuffer_copyout(buf, &udp_frame, length) != (int) length) {
-            LOGE("cannot copy udp %d for %d", (int) length, get_port(bev_context_udp->sockaddr));
-            raw->errorcb(raw, BEV_EVENT_ERROR, raw->cbarg);
-            break;
-        }
-        if (sendto(fd, udp_frame.buffer, payload_length, 0, bev_context_udp->sockaddr, bev_context_udp->socklen) < 0) {
-            // is there any chance to sendto later?
-            int socket_error = evutil_socket_geterror(bev_context_udp->sock);
-            LOGE("cannot send udp to %d: %s",
-                 get_port(bev_context_udp->sockaddr), evutil_socket_error_to_string(socket_error));
-            raw->errorcb(raw, BEV_EVENT_ERROR, raw->cbarg);
-            break;
-        }
-        LOGD("udp sent %d to peer %d", payload_length, get_port(bev_context_udp->sockaddr));
-        evbuffer_drain(buf, length);
-        size -= length;
+
+    if (size < UDP_FRAME_LENGTH_SIZE) {
+        goto reschedule;
     }
+    if (evbuffer_copyout(buf, &udp_frame, UDP_FRAME_LENGTH_SIZE) != UDP_FRAME_LENGTH_SIZE) {
+        LOGE("cannot copy udp to get payload length for %d", get_port(bev_context_udp->sockaddr));
+        what |= BEV_EVENT_ERROR;
+        goto error;
+    }
+    payload_length = htons(udp_frame.length);
+    length = payload_length + UDP_FRAME_LENGTH_SIZE;
+    if (size < length) {
+        goto reschedule;
+    }
+    if (evbuffer_copyout(buf, &udp_frame, length) != (ssize_t) length) {
+        LOGE("cannot copy udp %d for %d", (int) length, get_port(bev_context_udp->sockaddr));
+        what |= BEV_EVENT_ERROR;
+        goto error;
+    }
+    res = sendto(fd, udp_frame.buffer, payload_length, 0, bev_context_udp->sockaddr, bev_context_udp->socklen);
+    if (res < 0) {
+        err = evutil_socket_geterror(fd);
+        if (EVUTIL_ERR_RW_RETRIABLE(err)) {
+            goto reschedule;
+        }
+        LOGW("cannot send udp to %d: %s", get_port(bev_context_udp->sockaddr), evutil_socket_error_to_string(err));
+        what |= BEV_EVENT_ERROR;
+        goto error;
+    }
+    if (res == 0) {
+        what |= BEV_EVENT_EOF;
+        goto error;
+    }
+    if (res != payload_length) {
+        LOGW("cannot send entire udp packet to %d", get_port(bev_context_udp->sockaddr));
+        what |= BEV_EVENT_ERROR;
+        goto error;
+    }
+    LOGD("udp sent %d to peer %d", payload_length, get_port(bev_context_udp->sockaddr));
+    evbuffer_drain(buf, length);
+
+    if (evbuffer_get_length(buf) == 0) {
+        event_del(&raw->ev_write);
+    }
+
+    if (raw->writecb) {
+        raw->writecb(raw, raw->cbarg);
+    }
+
+    goto done;
+
+reschedule:
+    if (evbuffer_get_length(buf) == 0) {
+        event_del(&raw->ev_write);
+    }
+    goto done;
+
+error:
+    bufferevent_disable(raw, EV_WRITE);
+    if (raw->errorcb) {
+        raw->errorcb(raw, what, raw->cbarg);
+    }
+
+done:
+    return;
 }
 
 ssize_t udp_read(evutil_socket_t sock, struct udp_frame *udp_frame, struct sockaddr *sockaddr, ev_socklen_t *socklen) {

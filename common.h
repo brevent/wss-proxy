@@ -219,8 +219,6 @@ void tunnel_ss(struct bufferevent *raw, struct bufferevent *tev);
 
 ssize_t udp_read(evutil_socket_t sock, struct udp_frame *udp_frame, struct sockaddr *sockaddr, ev_socklen_t *socklen);
 
-void udp_read_cb(struct evbuffer *buf, const struct evbuffer_cb_info *info, void *arg);
-
 void bev_context_udp_writecb(evutil_socket_t fd, short event, void *arg);
 
 #ifdef HAVE_SSL_CTX_SET_KEYLOG_CALLBACK
