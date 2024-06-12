@@ -371,17 +371,10 @@ static int update_socket_flag(evutil_socket_t sock) {
         LOGW("cannot make socket nonblocking");
         return 1;
     }
-
     if (evutil_make_socket_closeonexec(sock) < 0) {
         LOGW("cannot make socket closeonexec");
         return 1;
     }
-
-    if (evutil_make_listen_socket_reuseable(sock) < 0) {
-        LOGW("cannot make socket reuseable");
-        return 1;
-    }
-
     return 0;
 }
 

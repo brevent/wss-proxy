@@ -168,10 +168,6 @@ static struct bufferevent *init_udp_client(struct event_base *base, struct raw_s
         LOGE("cannot make udp socket closeonexec");
         goto error;
     }
-    if (evutil_make_listen_socket_reuseable(sock) < 0) {
-        LOGE("cannot make udp socket reuseable");
-        goto error;
-    }
     bev_context_udp = calloc(1, sizeof(struct bev_context_udp));
     if (bev_context_udp == NULL) {
         LOGE("cannot calloc for udp socket");
