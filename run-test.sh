@@ -31,20 +31,20 @@ check() {
     echo "checking upload text"
     head -c 4096 /dev/urandom | openssl base64 | cat -n | sed -e 's|^ *|X-header-|g' -e 's|\t|: |g' > o.headers.txt
     magic=`head -c 42 /dev/urandom | openssl md5 | awk '{print $NF}'`
-    curl -q -m 6 -4 -s -L -H "X-magic: $magic" $urlt?mask={1,12,123,1234} https://$urlt?mask={1,12,123,1234} -o - | grep '^X-magic:' > o.magic.txt
+    curl -q -m 6 -4 -s -L -H "X-magic: $magic" $urlt?mask={1,12,123,1234} https://$urlt?mask={1,12,123,1234} -o - | grep -i '^X-magic:' > o.magic.txt
     if ! grep $magic o.magic.txt >/dev/null; then
         echo "fail check text"
         exit 1
     fi
-    curl -q -m 6 -4 -s -L -x socks5h://$laddr:$lport -H "X-magic: $magic" $urlt?mask={1,12,123,1234} https://$urlt?mask={1,12,123,1234} -o - | grep '^X-magic:' > o.magic.ws.txt
+    curl -q -m 6 -4 -s -L -x socks5h://$laddr:$lport -H "X-magic: $magic" $urlt?mask={1,12,123,1234} https://$urlt?mask={1,12,123,1234} -o - | grep -i '^X-magic:' > o.magic.ws.txt
     curl -q -m 6 -4 -s -L --header @o.headers.txt -H "X-magic: $magic" $urlt -o o.txt
     curl -q -m 6 -4 -s -L -x socks5h://$laddr:$lport --header @o.headers.txt -H "X-magic: $magic" $urlt -o o.ws.txt
     if ! cmp -s o.magic.txt o.magic.ws.txt; then
         echo "fail test text magic"
         exit 1
     fi
-    cat o.txt | grep -E '^(X-magic:|X-header-)' > o.headers.txt
-    cat o.ws.txt | grep -E '^(X-magic:|X-header-)' > o.headers.ws.txt
+    cat o.txt | grep -i -E '^(X-magic:|X-header-)' > o.headers.txt
+    cat o.ws.txt | grep -i -E '^(X-magic:|X-header-)' > o.headers.ws.txt
     if ! cmp -s o.headers.txt o.headers.ws.txt; then
         echo "fail test text"
         exit 1
