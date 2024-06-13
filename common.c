@@ -375,7 +375,7 @@ static void reply_close(struct evbuffer *src, uint16_t payload_size, uint32_t ma
         reason = htons(reason);
     }
     evbuffer_drain(src, payload_size);
-    close_wss(tev, close_reason_rfc, (short) reason);
+    send_close(tev, reason);
 }
 
 #ifdef WSS_ENABLE_PING
@@ -590,8 +590,6 @@ void close_wss(struct bufferevent *tev, enum close_reason close_reason, short ev
     } else if (close_reason == close_reason_eof) {
         send_close(tev, CLOSE_GOING_AWAY);
         close_later = 0;
-    } else if (close_reason == close_reason_rfc) {
-        close_later = send_close(tev, (uint16_t) event);
     } else if (event & BEV_EVENT_EOF) {
         // we can do nothing
         close_later = 0;

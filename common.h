@@ -193,7 +193,6 @@ void tunnel_wss(struct bufferevent *raw, struct bufferevent *tev, bufferevent_fi
 enum close_reason {
     close_reason_raw,
     close_reason_wss,
-    close_reason_rfc,
     close_reason_eof,
 };
 
