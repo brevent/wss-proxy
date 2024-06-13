@@ -769,12 +769,12 @@ static void tev_write_cb(struct evbuffer *buffer, const struct evbuffer_cb_info 
     length = evbuffer_get_length(buffer);
     if (info->n_deleted) {
         if (length <= MIN_PROXY_BUFFER && length + info->n_deleted > MIN_PROXY_BUFFER) {
-            LOGD("enable raw for read, length: %lu", length);
+            LOGD("enable raw for read, length: %zu", length);
             bufferevent_enable(raw, EV_READ);
         }
     } else if (info->n_added) {
         if (length >= MAX_PROXY_BUFFER && length - info->n_added < MAX_PROXY_BUFFER) {
-            LOGD("disable raw for read, length: %lu", length);
+            LOGD("disable raw for read, length: %zu", length);
             bufferevent_disable(raw, EV_READ);
         }
     }

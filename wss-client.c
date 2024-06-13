@@ -627,14 +627,14 @@ static void handle_http2_frame(struct bufferevent *bev, struct http2_frame *http
         bev_context_ssl->recv_window -= http2_frame->length;
         wss_context->recv_window -= http2_frame->length;
         if (bev_context_ssl->recv_window < MAX_WINDOW_SIZE / 4) {
-            LOGD("stream %u recv window %lu", bev_context_ssl->stream_id, bev_context_ssl->recv_window);
+            LOGD("stream %u recv window %zu", bev_context_ssl->stream_id, bev_context_ssl->recv_window);
             build_http2_frame(header, 4, 8, 0, bev_context_ssl->stream_id);
             *((uint32_t *) (header + HTTP2_HEADER_LENGTH)) = htonl(MAX_WINDOW_SIZE - bev_context_ssl->recv_window);
             bev_context_ssl->recv_window = MAX_WINDOW_SIZE;
             evbuffer_add(bev_context_ssl->wss_context->output, header, HTTP2_HEADER_LENGTH + 4);
         }
         if (wss_context->recv_window < MAX_WINDOW_SIZE / 4) {
-            LOGD("connection recv window %lu", wss_context->recv_window);
+            LOGD("connection recv window %zu", wss_context->recv_window);
             build_http2_frame(header, 4, 8, 0, 0);
             *((uint32_t *) (header + HTTP2_HEADER_LENGTH)) = htonl(MAX_WINDOW_SIZE - wss_context->recv_window);
             wss_context->recv_window = MAX_WINDOW_SIZE;
@@ -647,7 +647,7 @@ static void handle_http2_frame(struct bufferevent *bev, struct http2_frame *http
             evbuffer_copyout(frame, header, sizeof(header));
             delta = ntohl(*((uint32_t *) (header + HTTP2_HEADER_LENGTH)));
             bev_context_ssl->send_window += delta;
-            LOGD("stream %u send window %ld, delta: 0x%x",
+            LOGD("stream %u send window %zd, delta: 0x%x",
                  bev_context_ssl->stream_id, bev_context_ssl->send_window, delta);
         } else {
             LOGW("unsupported frame type: %d", http2_frame->type);
@@ -675,7 +675,7 @@ static void update_window_size(struct bufferevent_http_stream *http_stream) {
     if (bev_context_ssl && bev_context_ssl->stream_id == http_stream->stream_id) {
         bev_context_ssl->send_window += wss_context->initial_window_size - bev_context_ssl->initial_window_size;
         bev_context_ssl->initial_window_size = wss_context->initial_window_size;
-        LOGD("stream %u send window %ld", bev_context_ssl->stream_id, bev_context_ssl->send_window);
+        LOGD("stream %u send window %zd", bev_context_ssl->stream_id, bev_context_ssl->send_window);
     }
 }
 
@@ -712,7 +712,7 @@ static void update_window_update(struct wss_context *wss_context, const uint8_t 
 
     delta = ntohl(*((uint32_t *) header));
     wss_context->send_window += delta;
-    LOGD("connection send window %ld, delta: 0x%x", wss_context->send_window, delta);
+    LOGD("connection send window %zd, delta: 0x%x", wss_context->send_window, delta);
 }
 
 static int reset_http2_stream(struct wss_context *wss_context, struct bufferevent_http_stream *http_stream, int res) {
@@ -1476,7 +1476,7 @@ static struct bev_context_ssl *init_bev_context_ssl(struct wss_context *wss_cont
         bev_context_ssl->send_window = wss_context->initial_window_size;
         bev_context_ssl->recv_window = DEFAULT_INITIAL_WINDOW_SIZE;
         wss_context->next_stream_id += 2;
-        LOGD("stream %u send window %ld, recv window %lu",
+        LOGD("stream %u send window %zd, recv window %zu",
              bev_context_ssl->stream_id, bev_context_ssl->send_window, bev_context_ssl->recv_window);
         LOGD("ssl: %p", ssl);
     } else {

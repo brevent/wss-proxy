@@ -468,7 +468,7 @@ static struct bufferevent *connect_wss(struct wss_context *wss_context, struct b
         bev_context_ssl = bufferevent_get_context(tev);
         length = build_http_request_v2(wss_context, udp, request, bev_context_ssl->stream_id);
         bev_context_ssl->recv_window = MAX_WINDOW_SIZE;
-        LOGD("stream %u recv window %lu", bev_context_ssl->stream_id, bev_context_ssl->recv_window);
+        LOGD("stream %u recv window %zu", bev_context_ssl->stream_id, bev_context_ssl->recv_window);
         cb = http_response_cb_v2;
         evbuffer_add(bev_context_ssl->wss_context->output, request, length);
         length = 0;
