@@ -389,6 +389,10 @@ start:
     hints.ai_socktype = SOCK_STREAM;
     snprintf(port, sizeof(port), "%d", wss_context->server.port);
     if (evutil_getaddrinfo(wss_context->server.addr, port, &hints, &res) < 0) {
+        if (wss_context->server.ipv6) {
+            wss_context->server.ipv6 = 0;
+            goto start;
+        }
         LOGW("cannot resolve %s", wss_context->server.addr);
         return -1;
     }
