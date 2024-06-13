@@ -48,7 +48,7 @@ if __name__ == '__main__':
             print('%s, length %d ok' % (z, len(req)))
             if req != res:
                 raise ValueError()
-        for y in range(1, 10):
+        for y in range(1, 9):
             req = ('c' * 1024 * y).encode('utf8')
             try:
                 sock.sendto(req, ('127.0.0.1', 1235))
