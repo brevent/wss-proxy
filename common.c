@@ -695,11 +695,6 @@ void raw_event_cb(struct bufferevent *raw, short event, void *tev) {
 #endif
     if (event & (BEV_EVENT_EOF | BEV_EVENT_ERROR)) {
         LOGD("connection %u closed for wss %p, event: 0x%02x", port, tev, event);
-#ifdef WSS_PROXY_SERVER
-        if (event & BEV_EVENT_EOF) {
-            return;
-        }
-#endif
         do_close_wss(tev);
     } else if (event & BEV_EVENT_TIMEOUT) {
         LOGW("connection %u timeout for wss %p, event: 0x%02x", port, tev, event);
@@ -721,11 +716,6 @@ static void raw_event_cb_wss(struct bufferevent *raw, short event, void *wev) {
         port = get_peer_port(tev);
 #endif
         LOGD("connection %u closed for wss %p, event: 0x%02x", port, tev, event);
-#ifdef WSS_PROXY_SERVER
-        if (event & BEV_EVENT_EOF) {
-            return;
-        }
-#endif
         if (tev && tev->cbarg) {
             close_wss(tev, close_reason_raw, event);
         } else {
