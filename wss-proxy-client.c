@@ -260,7 +260,7 @@ static enum bufferevent_filter_result wss_output_filter_v2(struct evbuffer *src,
     (void) dst_limit;
     (void) mode;
     bev_context_ssl = bufferevent_get_context(tev);
-    if (bev_context_ssl == NULL) {
+    if (!bev_context_ssl || bev_context_ssl->wss_context->ssl_error) {
         return BEV_ERROR;
     }
     if (evbuffer_get_length(src) > sizeof(buffer) - HTTP2_HEADER_LENGTH) {
@@ -351,11 +351,15 @@ static enum bufferevent_filter_result wss_output_filter_v3(struct evbuffer *src,
                                                            ev_ssize_t dst_limit, enum bufferevent_flush_mode mode,
                                                            void *tev) {
     size_t length, frame_header_length;
+    struct bev_context_ssl *bev_context_ssl;
     uint8_t buffer[HTTP3_MAX_HEADER_LENGTH + MAX_WS_HEADER_SIZE + MAX_WSS_PAYLOAD_SIZE];
 
     (void) dst_limit;
     (void) mode;
-    (void) tev;
+    bev_context_ssl = bufferevent_get_context(tev);
+    if (!bev_context_ssl || bev_context_ssl->wss_context->ssl_error) {
+        return BEV_ERROR;
+    }
     if (evbuffer_get_length(src) > sizeof(buffer) - HTTP3_MAX_HEADER_LENGTH) {
         return BEV_ERROR;
     }

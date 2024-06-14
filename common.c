@@ -597,6 +597,7 @@ static int send_close(struct bufferevent *tev, uint16_t reason) {
 
 void close_wss(struct bufferevent *tev, enum close_reason close_reason, short event) {
     int close_later;
+    struct timeval tv = {1, 0};
     struct bufferevent *wev;
 
     if (close_reason == close_reason_raw) {
@@ -614,7 +615,9 @@ void close_wss(struct bufferevent *tev, enum close_reason close_reason, short ev
     wev = tev->cbarg;
     if (close_later) {
         LOGD("close wss %p later", tev);
+        bufferevent_set_timeouts(tev, &tv, NULL);
         bufferevent_setcb(tev, close_wss_data_cb, NULL, close_wss_event_cb, NULL);
+        bufferevent_enable(tev, EV_READ);
         if (wev) {
             close_wev(wev, tev);
         }

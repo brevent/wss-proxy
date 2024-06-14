@@ -172,6 +172,10 @@ static ssize_t check_ssl_error(struct bev_context_ssl *bev_context_ssl,
                 LOGW("cannot %s ssl, ssl shutdown", s);
             } else if (lib == ERR_LIB_SSL && reason == SSL_R_CERTIFICATE_VERIFY_FAILED) {
                 LOGE("cannot %s ssl, ssl certificate verify failed", s);
+#ifdef SSL_R_UNEXPECTED_EOF_WHILE_READING
+            } else if (lib == ERR_LIB_SSL && reason == SSL_R_UNEXPECTED_EOF_WHILE_READING) {
+                LOGW("cannot %s ssl, ssl unexpected eof", s);
+#endif
             } else {
                 LOGW("cannot %s ssl, ssl error, lib: %d, reason: %d", s, lib, reason);
             }
@@ -194,6 +198,13 @@ static ssize_t check_ssl_error(struct bev_context_ssl *bev_context_ssl,
     return what;
 }
 
+static void reset_streams_count(struct wss_context *wss_context) {
+    if (wss_context->http_streams_count > 1) {
+        LOGI("%u streams are completed", wss_context->http_streams_count);
+    }
+    wss_context->http_streams_count = 0;
+}
+
 #if HAVE_OSSL_QUIC_CLIENT_METHOD
 static void http3_eventcb(evutil_socket_t sock, short event, void *context) {
     int i, is_infinite;
@@ -211,9 +222,9 @@ static void http3_eventcb(evutil_socket_t sock, short event, void *context) {
             break;
         }
         if (is_infinite) {
-            LOGI("infinite, remove timer and mark ssl as error");
+            LOGI("infinite, remove timer and mark ssl as goaway");
             event_remove_timer(wss_context->event_quic);
-            wss_context->ssl_error = 1;
+            wss_context->ssl_goaway = 1;
             break;
         }
         if (tv.tv_sec || tv.tv_usec) {
@@ -261,7 +272,6 @@ static void close_http_stream(struct bufferevent_http_stream *http_stream, void 
 
 static void http3_readcb(evutil_socket_t sock, short event, void *context) {
     unsigned long hash_factor;
-    struct timeval tv = {0, 15000};
     struct sock_event sock_event;
     struct wss_context *wss_context;
     LHASH_OF(bufferevent_http_stream) *http_streams;
@@ -271,10 +281,8 @@ static void http3_readcb(evutil_socket_t sock, short event, void *context) {
     sock_event.event = (short) ((event & ~EV_TIMEOUT) | EV_READ);
     wss_context = context;
     http_streams = wss_context->http_streams;
-    lh_bufferevent_http_stream_doall_arg(http_streams, read_http3_stream, &sock_event);
-    if (wss_context->ssl_error) {
-        free_all_http_streams(wss_context);
-        return;
+    if (!wss_context->ssl_error) {
+        lh_bufferevent_http_stream_doall_arg(http_streams, read_http3_stream, &sock_event);
     }
     if (sock_event.evicted) {
         hash_factor = lh_bufferevent_http_stream_get_down_load(http_streams);
@@ -282,12 +290,12 @@ static void http3_readcb(evutil_socket_t sock, short event, void *context) {
         lh_bufferevent_http_stream_doall_arg(http_streams, close_http_stream, http_streams);
         lh_bufferevent_http_stream_set_down_load(http_streams, hash_factor);
     }
-    if (!lh_bufferevent_http_stream_num_items(http_streams)) {
-        LOGD("all streams are completed");
+    if (wss_context->ssl_error) {
+        LOGW("disable http3 read as ssl error");
         event_del(SSL_get_app_data(wss_context->ssl));
-    } else {
-        // how to avoid try?
-        event_add(SSL_get_app_data(wss_context->ssl), &tv);
+    } else if (!lh_bufferevent_http_stream_num_items(http_streams)) {
+        reset_streams_count(wss_context);
+        event_del(SSL_get_app_data(wss_context->ssl));
     }
     if (!event_pending(wss_context->event_quic, EV_TIMEOUT, NULL)) {
         event_active(wss_context->event_quic, EV_TIMEOUT, 0);
@@ -435,7 +443,7 @@ static void sighup_cb(evutil_socket_t fd, short event, void *context) {
 
     LOGW("received hangup, will reload");
     wss_context = context;
-    wss_context->ssl_error = 1;
+    wss_context->ssl_goaway = 1;
     free_all_http_streams(wss_context);
 }
 
@@ -525,6 +533,7 @@ static SSL *init_ssl(struct wss_context *wss_context, struct event_base *base, i
                 event_add(wss_context->event_sighup, NULL);
             }
         }
+        wss_context->http_streams_count = 0;
         wss_context->http_streams = lh_bufferevent_http_stream_new(bufferevent_http_stream_hash,
                                                                    bufferevent_http_stream_cmp);
         if (!wss_context->http_streams) {
@@ -787,8 +796,8 @@ static void check_http2_control(struct wss_context *wss_context, uint8_t type, u
             handle_ping(wss_context, header, length);
             break;
         case 7: // goaway
-            LOGI("server send goaway, mark as eof");
-            wss_context->ssl_error = 1;
+            LOGI("server send goaway");
+            wss_context->ssl_goaway = 1;
             break;
         case 8: // window update
             update_window_update(wss_context, header + HTTP2_HEADER_LENGTH);
@@ -838,7 +847,7 @@ static ssize_t parse_http2(struct wss_context *wss_context, uint8_t *buffer, siz
 
 static ssize_t do_ssl_read(struct bev_context_ssl *bev_context_ssl, struct bufferevent *bev) {
     int ret;
-    size_t size;
+    size_t size, total;
     ssize_t res;
     SSL *ssl;
     uint8_t frame[MAX_FRAME_SIZE];
@@ -855,11 +864,13 @@ static ssize_t do_ssl_read(struct bev_context_ssl *bev_context_ssl, struct buffe
         }
     }
 
+    total = 0;
     ssl = bev_context_ssl->ssl;
     for (;;) {
         if (!SSL_read_ex(ssl, frame, sizeof(frame), &size)) {
             goto error;
         }
+        total += size;
         bev_context_ssl->total += size;
         if (bev_context_ssl->wss_context) {
             bev_context_ssl->wss_context->timeout.tv_sec = 0;
@@ -872,7 +883,9 @@ static ssize_t do_ssl_read(struct bev_context_ssl *bev_context_ssl, struct buffe
             evbuffer_add(bev->input, frame, size);
             res = (ssize_t) size;
         }
-        if (res != WSS_MORE) {
+        if (res > 0) {
+            return (ssize_t) total;
+        } else if (res != WSS_MORE) {
             return res;
         }
     }
@@ -1017,7 +1030,7 @@ static void free_http_stream(struct bufferevent_http_stream *http_stream) {
 
     LOGD("free http stream %lu: %p, mark free: %d",
          (unsigned long) http_stream->stream_id, http_stream, http_stream->mark_free);
-    if (!http_stream->mark_free) {
+    if (!http_stream->mark_free && !http_stream->out_closed) {
         tev = http_stream->bev;
         bev_context_ssl = bufferevent_get_context(tev);
         if (bev_context_ssl && bev_context_ssl->stream_id == http_stream->stream_id && tev->errorcb) {
@@ -1105,14 +1118,15 @@ static void http2_readcb(evutil_socket_t sock, short event, void *context) {
     bev_context_ssl.wss_context = wss_context;
     bev_context_ssl.http = http2;
     bev_context_ssl.ssl = bev_context_ssl.wss_context->ssl;
+    bev_context_ssl.total = 0;
     wss_context->http2_evicted = 0;
-    do_ssl_read(&bev_context_ssl, NULL);
-    if (wss_context->ssl_error) {
-        free_all_http_streams(wss_context);
-        return;
+    if (!wss_context->ssl_error) {
+        while (do_ssl_read(&bev_context_ssl, NULL) > 0) {
+            // do nothing
+        }
     }
+    http_streams = wss_context->http_streams;
     if (wss_context->http2_evicted) {
-        http_streams = wss_context->http_streams;
         hash_factor = lh_bufferevent_http_stream_get_down_load(http_streams);
         lh_bufferevent_http_stream_set_down_load(http_streams, 0);
         lh_bufferevent_http_stream_doall(http_streams, evict_http2_stream);
@@ -1120,6 +1134,12 @@ static void http2_readcb(evutil_socket_t sock, short event, void *context) {
     }
     if (wss_context->ssl_connected && evbuffer_get_length(wss_context->output)) {
         do_http2_write(wss_context, wss_context->output);
+    }
+    if (wss_context->ssl_error) {
+        LOGW("disable read as ssl error");
+        event_del(SSL_get_app_data(wss_context->ssl));
+    } else if (!lh_bufferevent_http_stream_num_items(http_streams)) {
+        reset_streams_count(wss_context);
     }
 }
 
@@ -1413,8 +1433,6 @@ static int init_ssl_sock(struct wss_context *wss_context, struct event_base *bas
     if (wss_context->server.http2 || wss_context->server.http3) {
         wss_context->ssl = ssl;
     }
-    wss_context->ssl_error = 0;
-    wss_context->timeout.tv_sec = 0;
     *ssl1 = ssl;
     return sock;
 error:
@@ -1504,8 +1522,11 @@ struct bufferevent *bufferevent_new(struct wss_context *wss_context, struct buff
     struct bufferevent_http_stream *http_stream;
 
 start:
-    if (wss_context->ssl_error) {
+    if (wss_context->ssl_error || wss_context->ssl_goaway) {
         free_context_ssl(wss_context);
+        wss_context->ssl_error = 0;
+        wss_context->ssl_goaway = 0;
+        wss_context->timeout.tv_sec = 0;
     }
     base = bufferevent_get_base(raw);
     tev = bufferevent_socket_new(base, -1, wss_context->server.mux ? 0 : BEV_OPT_CLOSE_ON_FREE);
@@ -1541,6 +1562,7 @@ start:
             http_stream->bev = tev;
             http_stream->wss_context = wss_context;
             lh_bufferevent_http_stream_insert(wss_context->http_streams, http_stream);
+            wss_context->http_streams_count++;
             if (!event_pending(SSL_get_app_data(wss_context->ssl), EV_READ, NULL)) {
                 event_add(SSL_get_app_data(wss_context->ssl), NULL);
                 LOGD("add event for read");
@@ -1588,10 +1610,10 @@ static void bev_context_ssl_timeout(void *context) {
     if (!wss_context->timeout.tv_sec) {
         LOGD("http mux connection timeout, update timeout to %lld", (long long) timeout.tv_sec);
         wss_context->timeout.tv_sec = timeout.tv_sec;
-    } else if (!wss_context->ssl_error && timeout.tv_sec - wss_context->timeout.tv_sec >= WSS_TIMEOUT) {
-        LOGW("http mux connection timeout, mark as ssl error, previous: %lld, now: %lld",
+    } else if (!wss_context->ssl_goaway && timeout.tv_sec - wss_context->timeout.tv_sec >= WSS_TIMEOUT) {
+        LOGW("http mux connection timeout, mark ssl as goaway, previous: %lld, now: %lld",
              (long long) wss_context->timeout.tv_sec, (long long) timeout.tv_sec);
-        wss_context->ssl_error = 1;
+        wss_context->ssl_goaway = 1;
     } else {
         LOGD("http mux connection timeout, previous: %lld, now: %lld",
              (long long) wss_context->timeout.tv_sec, (long long) timeout.tv_sec);
