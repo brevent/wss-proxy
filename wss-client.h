@@ -39,7 +39,7 @@ struct wss_context {
     SSL *ssl;
     SSL *stream;
     LHASH_OF(bufferevent_http_stream) *http_streams;
-    volatile unsigned http_streams_count;
+    unsigned http_streams_count;
     struct event_base *base;
     struct evbuffer *input;
     struct evbuffer *output;
@@ -47,8 +47,9 @@ struct wss_context {
     struct event *event_sighup;
     struct timeval timeout;
     uint8_t settings_sent: 1;
-    volatile uint8_t ssl_goaway: 1;
-    volatile uint8_t ssl_error: 1;
+    uint8_t mock_ssl_timeout: 1;
+    uint8_t ssl_goaway: 1;
+    uint8_t ssl_error: 1;
     uint8_t ssl_connected: 1;
     uint8_t http2_evicted: 1;
     uint32_t next_stream_id: 23;
@@ -102,7 +103,5 @@ size_t parse_http3_frame(const uint8_t *buffer, size_t length, size_t *out_heade
 size_t build_http3_frame(uint8_t *frame, uint8_t type, size_t length);
 
 struct bufferevent *bufferevent_new(struct wss_context *wss_context, struct bufferevent *raw);
-
-void bufferevent_timeout(struct bev_context_ssl *bev_context_ssl);
 
 #endif //WSS_PROXY_WSS_CLIENT_H

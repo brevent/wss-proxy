@@ -441,10 +441,9 @@ static void sighup_cb(evutil_socket_t fd, short event, void *context) {
     (void) fd;
     (void) event;
 
-    LOGW("received hangup, will reload");
+    LOGW("received hangup, will mock ssl timeout");
     wss_context = context;
-    wss_context->ssl_goaway = 1;
-    free_all_http_streams(wss_context);
+    wss_context->mock_ssl_timeout = 1;
 }
 
 static SSL *init_ssl(struct wss_context *wss_context, struct event_base *base, int fd) {
@@ -1526,6 +1525,7 @@ start:
         free_context_ssl(wss_context);
         wss_context->ssl_error = 0;
         wss_context->ssl_goaway = 0;
+        wss_context->mock_ssl_timeout = 0;
         wss_context->timeout.tv_sec = 0;
     }
     base = bufferevent_get_base(raw);
@@ -1623,5 +1623,9 @@ static void bev_context_ssl_timeout(void *context) {
         RAND_bytes(frame + HTTP2_HEADER_LENGTH, 8);
         evbuffer_add(wss_context->output, frame, sizeof(frame));
         LOGD("send http2 ping");
+    }
+    if (wss_context->mock_ssl_timeout) {
+        LOGW("mock ssl timeout, mark ssl as goaway");
+        wss_context->ssl_goaway = 1;
     }
 }

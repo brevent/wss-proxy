@@ -279,7 +279,13 @@ static void http_response_cb_v2(struct bufferevent *tev, void *raw) {
     size_t length, header_length;
     char buffer[HTTP2_HEADER_LENGTH];
     struct evbuffer *input;
+    struct bev_context_ssl *bev_context_ssl;
 
+    bev_context_ssl = bufferevent_get_context(tev);
+    if (bev_context_ssl->wss_context->mock_ssl_timeout) {
+        tev->errorcb(tev, BEV_EVENT_READING | BEV_EVENT_TIMEOUT, tev->cbarg);
+        return;
+    }
     input = bufferevent_get_input(tev);
     length = evbuffer_get_length(input);
     if (length < HTTP2_HEADER_LENGTH) {
@@ -378,7 +384,13 @@ static void http_response_cb_v3(struct bufferevent *tev, void *raw) {
     size_t length, frame_length;
     uint8_t buffer[HTTP3_MAX_HEADER_LENGTH];
     struct evbuffer *input;
+    struct bev_context_ssl *bev_context_ssl;
 
+    bev_context_ssl = bufferevent_get_context(tev);
+    if (bev_context_ssl->wss_context->mock_ssl_timeout) {
+        tev->errorcb(tev, BEV_EVENT_READING | BEV_EVENT_TIMEOUT, tev->cbarg);
+        return;
+    }
     input = bufferevent_get_input(tev);
     frame_length = evbuffer_copyout(input, buffer, sizeof(buffer));
     frame_length = parse_http3_frame(buffer, frame_length, NULL);
