@@ -906,7 +906,9 @@ void bev_context_udp_writecb(evutil_socket_t fd, short event, void *arg) {
         what |= BEV_EVENT_ERROR;
         goto error;
     }
+#ifndef NDEBUG
     LOGD("udp sent %d to peer %d", payload_length, get_port(bev_context_udp->sockaddr));
+#endif
     evbuffer_drain(buf, length);
 
     if (evbuffer_get_length(buf) == 0) {
@@ -948,7 +950,9 @@ ssize_t udp_read(evutil_socket_t sock, struct udp_frame *udp_frame, struct socka
         return 0;
     } else {
         udp_frame->length = ntohs(size);
+#ifndef NDEBUG
         LOGD("udp read %d from port %d", (int) size, get_port(sockaddr));
+#endif
         return (int) size;
     }
 }
