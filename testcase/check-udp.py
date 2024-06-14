@@ -37,13 +37,13 @@ if __name__ == '__main__':
             try:
                 sock.sendto(req, ('127.0.0.1', 1235))
             except OSError:
-                print('%s, length %d ko' % (z, len(req)))
+                print('%s, length %d ko' % (z, len(req)), file=sys.stderr)
                 sock.close()
                 break
             try:
                 (res, addr) = sock.recvfrom(65535)
             except socket.timeout:
-                print('%s, length %d ko (timeout)' % (z, len(req)))
+                print('%s, length %d ko (timeout)' % (z, len(req)), file=sys.stderr)
                 raise
             print('%s, length %d ok' % (z, len(req)))
             if req != res:
@@ -53,15 +53,14 @@ if __name__ == '__main__':
             try:
                 sock.sendto(req, ('127.0.0.1', 1235))
             except OSError:
-                print('length %d ko' % len(req))
+                print('length %d ko' % len(req), file=sys.stderr)
                 sock.close()
                 break
             try:
                 (res, addr) = sock.recvfrom(65535)
             except socket.timeout:
-                print('length %d ko (timeout)' % len(req))
+                print('length %d ko (timeout)' % len(req), file=sys.stderr)
                 raise
             print('length %d ok' % len(req))
             if req != res:
                 raise ValueError()
-
