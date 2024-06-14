@@ -444,7 +444,6 @@ static size_t build_http_request_v3(struct wss_context *wss_context, int udp, ch
 }
 
 static void tev_raw_event_cb(struct bufferevent *tev, short event, void *raw) {
-    bufferevent_timeout(bufferevent_get_context(tev));
     raw_event_cb(raw, event, tev);
 }
 

@@ -46,6 +46,8 @@ static int bufferevent_http_stream_cmp(const bufferevent_http_stream *a, const b
     }
 }
 
+static void bev_context_ssl_timeout(void *context);
+
 static void bev_context_ssl_free(void *context) {
     uint8_t frame[HTTP2_HEADER_LENGTH + 4];
     struct bufferevent_http_stream key, *http_stream;
@@ -1431,6 +1433,7 @@ error:
 static const struct bev_context const_bev_context_ssl = {
         "ssl",
         bev_context_ssl_free,
+        bev_context_ssl_timeout,
 };
 
 static struct bev_context_ssl *init_bev_context_ssl(struct wss_context *wss_context, SSL *ssl) {
@@ -1560,12 +1563,14 @@ error:
     return NULL;
 }
 
-void bufferevent_timeout(struct bev_context_ssl *bev_context_ssl) {
+static void bev_context_ssl_timeout(void *context) {
     uint8_t frame[HTTP2_HEADER_LENGTH + 8];
     struct timeval timeout;
     struct wss_context *wss_context;
     struct bufferevent_http_stream key, *http_stream;
+    struct bev_context_ssl *bev_context_ssl;
 
+    bev_context_ssl = context;
     if (!bev_context_ssl) {
         return;
     }
@@ -1583,7 +1588,7 @@ void bufferevent_timeout(struct bev_context_ssl *bev_context_ssl) {
     if (!wss_context->timeout.tv_sec) {
         LOGD("http mux connection timeout, update timeout to %lld", (long long) timeout.tv_sec);
         wss_context->timeout.tv_sec = timeout.tv_sec;
-    } else if (!wss_context->ssl_error && timeout.tv_sec - wss_context->timeout.tv_sec > WSS_TIMEOUT) {
+    } else if (!wss_context->ssl_error && timeout.tv_sec - wss_context->timeout.tv_sec >= WSS_TIMEOUT) {
         LOGW("http mux connection timeout, mark as ssl error, previous: %lld, now: %lld",
              (long long) wss_context->timeout.tv_sec, (long long) timeout.tv_sec);
         wss_context->ssl_error = 1;

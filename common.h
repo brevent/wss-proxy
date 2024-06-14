@@ -90,6 +90,7 @@ DEFINE_LHASH_OF(bev_context_udp);
 struct bev_context {
     const char *name;
     void (*free)(void *ptr);
+    void (*timeout)(void *ptr);
 };
 
 struct bev_context_udp {

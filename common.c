@@ -63,6 +63,7 @@ static void bev_context_udp_free(void *context) {
 const struct bev_context const_bev_context_udp = {
         "udp",
         bev_context_udp_free,
+        NULL,
 };
 
 static void free_udp(bev_context_udp *udp) {
@@ -696,6 +697,7 @@ static enum bufferevent_filter_result wss_output_filter(struct evbuffer *src, st
 
 void raw_event_cb(struct bufferevent *raw, short event, void *tev) {
     uint16_t port;
+    struct bev_context **bev_context;
 
 #ifdef WSS_PROXY_CLIENT
     port = get_peer_port(raw);
@@ -709,6 +711,10 @@ void raw_event_cb(struct bufferevent *raw, short event, void *tev) {
         do_close_wss(tev);
     } else if (event & BEV_EVENT_TIMEOUT) {
         LOGW("connection %u timeout for wss %p, event: 0x%02x", port, tev, event);
+        bev_context = bufferevent_get_context(tev);
+        if (bev_context && *bev_context) {
+            (*bev_context)->timeout(bev_context);
+        }
         do_close_wss(tev);
     }
 }
