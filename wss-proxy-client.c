@@ -124,6 +124,10 @@ static int init_wss_addr(struct wss_server_info *server) {
     // http3
     if (find_option(options, "http3", "1")) {
         server->http3 = 1;
+#ifndef HAVE_OSSL_QUIC_CLIENT_METHOD
+        LOGW("http3 is unsupported");
+        return EINVAL;
+#endif
     }
     // loglevel
     if ((value = find_option(options, "loglevel", NULL)) != NULL) {
@@ -260,7 +264,7 @@ static enum bufferevent_filter_result wss_output_filter_v2(struct evbuffer *src,
     (void) dst_limit;
     (void) mode;
     bev_context_ssl = bufferevent_get_context(tev);
-    if (!bev_context_ssl || bev_context_ssl->wss_context->ssl_error) {
+    if (!bev_context_ssl || bev_context_ssl->wss_context->ssl_error || bev_context_ssl->wss_context->ssl_goaway) {
         return BEV_ERROR;
     }
     if (evbuffer_get_length(src) > sizeof(buffer) - HTTP2_HEADER_LENGTH) {
@@ -350,113 +354,6 @@ static size_t build_http_request_v2(struct wss_context *wss_context, int udp, ch
     *((uint32_t *) buffer) = htonl(MAX_WINDOW_SIZE - DEFAULT_INITIAL_WINDOW_SIZE);
     buffer += 4;
     return (char *) buffer - request;
-}
-
-
-static enum bufferevent_filter_result wss_output_filter_v3(struct evbuffer *src, struct evbuffer *dst,
-                                                           ev_ssize_t dst_limit, enum bufferevent_flush_mode mode,
-                                                           void *tev) {
-    size_t length, frame_header_length;
-    struct bev_context_ssl *bev_context_ssl;
-    uint8_t buffer[HTTP3_MAX_HEADER_LENGTH + MAX_WS_HEADER_SIZE + MAX_WSS_PAYLOAD_SIZE];
-
-    (void) dst_limit;
-    (void) mode;
-    bev_context_ssl = bufferevent_get_context(tev);
-    if (!bev_context_ssl || bev_context_ssl->wss_context->ssl_error) {
-        return BEV_ERROR;
-    }
-    if (evbuffer_get_length(src) > sizeof(buffer) - HTTP3_MAX_HEADER_LENGTH) {
-        return BEV_ERROR;
-    }
-    length = evbuffer_copyout(src, &buffer[HTTP3_MAX_HEADER_LENGTH], sizeof(buffer) - HTTP3_MAX_HEADER_LENGTH);
-    frame_header_length = build_http3_frame(buffer, 0, length);
-    if (frame_header_length == 0) {
-        return BEV_ERROR;
-    }
-    memmove(buffer + (HTTP3_MAX_HEADER_LENGTH - frame_header_length), buffer, frame_header_length);
-    evbuffer_add(dst, buffer + (HTTP3_MAX_HEADER_LENGTH - frame_header_length), length + frame_header_length);
-    evbuffer_drain(src, length);
-    return BEV_OK;
-}
-
-static void http_response_cb_v3(struct bufferevent *tev, void *raw) {
-    size_t length, frame_length;
-    uint8_t buffer[HTTP3_MAX_HEADER_LENGTH];
-    struct evbuffer *input;
-    struct bev_context_ssl *bev_context_ssl;
-
-    bev_context_ssl = bufferevent_get_context(tev);
-    if (bev_context_ssl->wss_context->mock_ssl_timeout) {
-        tev->errorcb(tev, BEV_EVENT_READING | BEV_EVENT_TIMEOUT, tev->cbarg);
-        return;
-    }
-    input = bufferevent_get_input(tev);
-    frame_length = evbuffer_copyout(input, buffer, sizeof(buffer));
-    frame_length = parse_http3_frame(buffer, frame_length, NULL);
-    length = evbuffer_get_length(input);
-    if (frame_length == 0 || length < frame_length) {
-        return;
-    }
-    if (buffer[0] != 0x1) {
-        LOGW("invalid frame %d, expect headers (0x1)", buffer[0]);
-        goto error;
-    }
-    if (frame_length != length) {
-        LOGW("invalid response, frame length %d, headers length: %d",
-             (int) frame_length, (int) length);
-        goto error;
-    }
-    evbuffer_drain(input, frame_length);
-    LOGD("wss is ready for peer %d, remain: %d", get_peer_port(raw), (int) evbuffer_get_length(input));
-    tunnel_wss(raw, tev, wss_output_filter_v3);
-    return;
-error:
-    bufferevent_free(raw);
-    bufferevent_free(tev);
-}
-
-static size_t build_http_request_v3(struct wss_context *wss_context, int udp, char *request) {
-    uint8_t *buffer;
-    size_t length;
-    buffer = (uint8_t *) request;
-    *buffer++ = 0x01; // headers frame
-    buffer += 2;      // reserve for length
-    *buffer++ = 0;
-    *buffer++ = 0;
-    // :method = CONNECT
-    *buffer++ = 0xc0 | 15;
-    // :protocol = websocket
-    buffer = memcpy(buffer, "\x27\x02:protocol\x09websocket", 21) + 21;
-    // :scheme = https
-    *buffer++ = 0xc0 | 23;
-#define min(a, b) ((a > b) ? (b) : (a))
-    // :path = ..., max 127
-    buffer += snprintf((char *) buffer, 0x82, "\x51%c%s",
-                       (char) min(strlen(wss_context->server.path), 0x7f), wss_context->server.path);
-    // :authority = ..., max 127
-    buffer += snprintf((char *) buffer, 0x82, "\x50%c%s",
-                       (char) min(strlen(wss_context->server.host), 0x7f), wss_context->server.host);
-    // sec-websocket-version = 13
-    buffer = memcpy(buffer, "\x27\x0esec-websocket-version\x02\x31\x33", 26) + 26;
-    // user-agent = ..., max 127
-    buffer += snprintf((char *) buffer, 0x83, "\x5f\x50%c%s",
-                       (char) min(strlen(wss_context->user_agent), 0x7f),
-                       wss_context->user_agent);
-    if (udp) {
-        buffer = memcpy(buffer, "\x27\x04x-sock-type\x03udp", 17) + 17;
-    }
-    length = (char *) buffer - request - 3;
-    if (length < 64) {
-        request[1] = (char) length;
-        memmove(&request[2], &request[3], length);
-        length += 2;
-    } else {
-        request[1] = (char) (length >> 8 | 0x40);
-        request[2] = (char) (length & 0xff);
-        length += 3;
-    }
-    return length;
 }
 
 static void tev_raw_event_cb(struct bufferevent *tev, short event, void *raw) {
@@ -712,12 +609,7 @@ int main() {
 
     if (wss_context.server.tls) {
         if (wss_context.server.http3) {
-#ifdef HAVE_OSSL_QUIC_CLIENT_METHOD
-            wss_context.ssl_ctx = SSL_CTX_new(OSSL_QUIC_client_method());
-#else
-            LOGE("http3 is unsupported");
-            goto error;
-#endif
+            wss_context.ssl_ctx = ssl_ctx_new_http3();
         } else {
             wss_context.ssl_ctx = SSL_CTX_new(TLS_client_method());
         }

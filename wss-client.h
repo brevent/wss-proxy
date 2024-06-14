@@ -49,7 +49,7 @@ struct wss_context {
     uint8_t settings_sent: 1;
     uint8_t mock_ssl_timeout: 1;
     uint8_t ssl_goaway: 1;
-    uint8_t ssl_error: 1;
+    volatile uint8_t ssl_error: 1;
     uint8_t ssl_connected: 1;
     uint8_t http2_evicted: 1;
     uint32_t next_stream_id: 23;
@@ -78,6 +78,16 @@ struct bev_context_ssl {
     };
 };
 
+struct bufferevent_http_stream {
+    uint64_t stream_id;
+    struct bufferevent *bev;
+    volatile uint8_t mark_free: 1;
+    uint8_t in_closed: 1;
+    uint8_t out_closed: 1;
+    uint8_t rst_sent: 1;
+    struct wss_context *wss_context;
+};
+
 #ifndef MIN
 #define MIN(x, y) ((x) < (y) ? (x) : (y))
 #endif
@@ -92,15 +102,45 @@ struct bev_context_ssl {
 #define DEFAULT_INITIAL_WINDOW_SIZE 0xffff
 #define MAX_WINDOW_SIZE 0x7fffffff
 
-#define HTTP3_MAX_HEADER_LENGTH 9
+#define WSS_EOF (0)
+#define WSS_AGAIN (-1)
+#define WSS_ERROR (-2)
+#define WSS_MORE (-3)
 
 void free_context_ssl(struct wss_context *wss_context);
 
 size_t build_http2_frame(uint8_t *frame, size_t length, uint8_t type, uint8_t flags, uint32_t stream_id);
 
+void reset_streams_count(struct wss_context *wss_context);
+
+#define HTTP3_MAX_HEADER_LENGTH 9
+
+SSL_CTX  *ssl_ctx_new_http3();
+
+size_t build_http_request_v3(struct wss_context *wss_context, int udp, char *request);
+
+void http_response_cb_v3(struct bufferevent *tev, void *raw);
+
 size_t parse_http3_frame(const uint8_t *buffer, size_t length, size_t *out_header_length);
 
 size_t build_http3_frame(uint8_t *frame, uint8_t type, size_t length);
+
+int get_ssl_error_http3(SSL *ssl, int code);
+
+enum stream_type {
+    stream_read,
+    stream_write,
+};
+
+ssize_t check_stream_error(SSL *stream, enum stream_type stream_type);
+
+SSL *init_http3_stream(SSL *ssl, struct sockaddr *sockaddr, uint16_t port);
+
+int init_context_ssl_http3(struct bev_context_ssl *bev_context_ssl, SSL *ssl);
+
+void free_context_ssl_http3(struct bev_context_ssl *bev_context_ssl);
+
+struct event *init_ssl_http3(struct wss_context *wss_context, struct event_base *base, int fd, SSL *ssl);
 
 struct bufferevent *bufferevent_new(struct wss_context *wss_context, struct bufferevent *raw);
 

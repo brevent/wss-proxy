@@ -61,7 +61,7 @@ else()
     include_directories(${LIBEVENT_INCLUDE_DIRS})
 endif()
 
-add_executable(wss-proxy-client wss-proxy-client.c ws-header.c common.c wss-client.c)
+add_executable(wss-proxy-client wss-proxy-client.c ws-header.c common.c wss-client.c wss-client-http3.c)
 target_link_libraries(wss-proxy-client ${EVENT_CORE} OpenSSL::SSL)
 target_compile_definitions(wss-proxy-client PRIVATE -DWSS_PROXY_CLIENT -DWSS_ENABLE_PING)
 install(TARGETS wss-proxy-client DESTINATION bin)

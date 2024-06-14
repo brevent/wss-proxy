@@ -40,6 +40,7 @@ void safe_bufferevent_free(struct bufferevent *bev) {
     LOGD("free %p", bev);
     bev_context = bufferevent_get_context(bev);
     if (bev_context != NULL && *bev_context != NULL) {
+        LOGD("context type %s", (*bev_context)->name);
         (*bev_context)->free(bev_context);
         bufferevent_set_context(bev, NULL);
     }
