@@ -21,6 +21,19 @@ static int send_close(struct bufferevent *tev, uint16_t reason);
 
 static void tev_write_cb(struct evbuffer *buffer, const struct evbuffer_cb_info *info, void *arg);
 
+void bufferevent_set_context(struct bufferevent *bev, void *context) {
+    if (context == NULL || (!bev->wm_read.low && !bev->wm_write.low)) {
+        bev->wm_read.low = bev->wm_write.low = (size_t) context;
+    }
+}
+
+void *bufferevent_get_context(struct bufferevent *bev) {
+    if (bev->wm_read.low && bev->wm_write.low) {
+        return bev->wm_read.low == bev->wm_write.low ? (void *) bev->wm_read.low : NULL;
+    }
+    return NULL;
+}
+
 void safe_bufferevent_free(struct bufferevent *bev) {
     struct bev_context **bev_context;
 

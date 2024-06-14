@@ -111,18 +111,9 @@ struct bev_context_udp {
 
 void free_all_udp(LHASH_OF(bev_context_udp) *hash);
 
-static inline void bufferevent_set_context(struct bufferevent *bev, void *context) {
-    if (context == NULL || (!bev->wm_read.low && !bev->wm_write.low)) {
-        bev->wm_read.low = bev->wm_write.low = (size_t) context;
-    }
-}
+void bufferevent_set_context(struct bufferevent *bev, void *context);
 
-static inline void *bufferevent_get_context(struct bufferevent *bev) {
-    if (bev->wm_read.low && bev->wm_write.low) {
-        return bev->wm_read.low == bev->wm_write.low ? (void *) bev->wm_read.low : NULL;
-    }
-    return NULL;
-}
+void *bufferevent_get_context(struct bufferevent *bev);
 
 extern const struct bev_context const_bev_context_udp;
 
