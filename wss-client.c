@@ -604,9 +604,6 @@ static ssize_t do_ssl_read(struct bev_context_ssl *bev_context_ssl, struct buffe
         if (!wss_context || !wss_context->ssl) {
             LOGW("http mux read without ssl");
             return WSS_ERROR;
-        } else if (wss_context->ssl_error) {
-            LOGW("http mux read while ssl error");
-            return WSS_ERROR;
         }
     }
 
@@ -669,9 +666,6 @@ static ssize_t do_ssl_write(struct bev_context_ssl *bev_context_ssl, uint8_t *bu
     if (bev_context_ssl->http == http2 || bev_context_ssl->http == http3) {
         if (!wss_context || !wss_context->ssl) {
             LOGW("http mux write without ssl");
-            return WSS_ERROR;
-        } else if (wss_context->ssl_error) {
-            LOGW("http mux write while ssl error");
             return WSS_ERROR;
         }
     }
@@ -905,7 +899,7 @@ static ssize_t do_http2_write(struct wss_context *wss_context, struct evbuffer *
 
     bev_context_ssl.wss_context = wss_context;
     if (bev_context_ssl.wss_context->ssl_error) {
-        LOGW("http2 write ssl error, length: %lu", (unsigned long) evbuffer_get_length(output));
+        LOGW("http2 write ssl error, length: %zu", evbuffer_get_length(output));
         evbuffer_drain(output, evbuffer_get_length(output));
         return WSS_ERROR;
     }
@@ -1062,6 +1056,12 @@ static void bufferevent_writecb(evutil_socket_t fd, short event, void *arg) {
     }
 
     if (evbuffer_get_length(bev->output)) {
+        if (bev_context_ssl && bev_context_ssl->wss_context->ssl_error) {
+            LOGW("http mux write ssl error, length: %zu", evbuffer_get_length(bev->output));
+            evbuffer_drain(bev->output, evbuffer_get_length(bev->output));
+            what |= BEV_EVENT_ERROR;
+            goto error;
+        }
         size = evbuffer_copyout(bev->output, buffer, sizeof(buffer));
         if (size <= 0) {
             what |= BEV_EVENT_ERROR;

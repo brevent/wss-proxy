@@ -302,7 +302,7 @@ static void http_response_cb_v2(struct bufferevent *tev, void *raw) {
         LOGD("stream is end");
         goto error;
     }
-    LOGD("wss is ready for peer %d, remain: %d", get_peer_port(raw), (int) evbuffer_get_length(input));
+    LOGD("wss is ready for peer %d, remain: %zu", get_peer_port(raw), evbuffer_get_length(input));
     tunnel_wss(raw, tev, wss_output_filter_v2);
     return;
 error:
