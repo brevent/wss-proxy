@@ -15,8 +15,12 @@ else
     ssserver=./ssserver
 fi
 
-/usr/bin/python3 ../testcase/udp-echo-server.py &
-echo_server_pid=$!
+if pgrep -f udp-echo-server.py > /dev/null; then
+    echo_server_pid=""
+else
+    /usr/bin/python3 ../testcase/udp-echo-server.py &
+    echo_server_pid=$!
+fi
 
 $ssserver -c ../testcase/sip003u-server.json &
 spid=$!
