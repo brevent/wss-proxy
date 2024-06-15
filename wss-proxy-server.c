@@ -219,7 +219,7 @@ static void http_request_cb(struct bufferevent *tev, void *ctx) {
     struct evbuffer *input;
     struct bufferevent *raw;
     struct raw_server_info *raw_server_info = ctx;
-    char request[1024], sec_websocket_accept[29], *buffer;
+    char request[1024], sec_websocket_accept[29], *response;
     int ss, udp;
 
     memset(request, 0, sizeof(request));
@@ -251,17 +251,17 @@ static void http_request_cb(struct bufferevent *tev, void *ctx) {
     }
     bufferevent_setcb(raw, NULL, NULL, raw_event_cb, tev);
 
-    buffer = request;
-    buffer += sprintf(buffer, "HTTP/1.1 101 Switching Protocols\r\n"
-                              "Upgrade: websocket\r\n"
-                              "Connection: Upgrade\r\n"
-                              "Sec-WebSocket-Accept: %s\r\n", sec_websocket_accept);
+    response = request;
+    response += sprintf(response, "HTTP/1.1 101 Switching Protocols\r\n"
+                                  "Upgrade: websocket\r\n"
+                                  "Connection: Upgrade\r\n"
+                                  "Sec-WebSocket-Accept: %s\r\n", sec_websocket_accept);
     ss = strcasestr(request, "\r\n" X_UPGRADE ": " SHADOWSOCKS "\r\n") != NULL;
     if (ss) {
-        append_line(buffer, X_UPGRADE ": " SHADOWSOCKS "\r\n");
+        append_buffer(response, X_UPGRADE ": " SHADOWSOCKS "\r\n");
     }
-    append_line(buffer, "\r\n");
-    bufferevent_write(tev, request, buffer - request);
+    append_buffer(response, "\r\n");
+    bufferevent_write(tev, request, response - request);
 
     if (ss) {
         tunnel_ss(raw, tev);

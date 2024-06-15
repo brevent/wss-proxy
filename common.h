@@ -203,9 +203,9 @@ void tunnel_ss(struct bufferevent *raw, struct bufferevent *tev);
 #define X_SOCK_TYPE "X-Sock-Type"
 #define SOCK_TYPE_UDP "udp"
 
-#define append_line(request, x) do { \
-    memcpy(request, (x), sizeof(x) - 1); \
-    request += sizeof(x) - 1; \
+#define append_buffer(buffer, x) do { \
+    memcpy(buffer, (x), sizeof(x) - 1); \
+    buffer += sizeof(x) - 1; \
 } while (0)
 
 ssize_t udp_read(evutil_socket_t sock, struct udp_frame *udp_frame, struct sockaddr *sockaddr, ev_socklen_t *socklen);

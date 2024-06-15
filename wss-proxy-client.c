@@ -245,12 +245,12 @@ static size_t build_http_request(struct wss_context *wss_context, int udp, char 
                        wss_context->server.path, wss_context->server.host,
                        sec_websocket_key, wss_context->user_agent);
     if (udp) {
-        append_line(request, X_SOCK_TYPE ": " SOCK_TYPE_UDP "\r\n");
+        append_buffer(request, X_SOCK_TYPE ": " SOCK_TYPE_UDP "\r\n");
     }
     if (!wss_context->server.ws) {
-        append_line(request, X_UPGRADE ": " SHADOWSOCKS "\r\n");
+        append_buffer(request, X_UPGRADE ": " SHADOWSOCKS "\r\n");
     }
-    append_line(request, "\r\n");
+    append_buffer(request, "\r\n");
     return request - start;
 }
 
