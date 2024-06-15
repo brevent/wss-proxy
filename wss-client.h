@@ -109,6 +109,11 @@ struct bufferevent_http_stream {
 
 void free_context_ssl(struct wss_context *wss_context);
 
+enum ssl_type {
+    ssl_read,
+    ssl_write,
+};
+
 size_t build_http2_frame(uint8_t *frame, size_t length, uint8_t type, uint8_t flags, uint32_t stream_id);
 
 void reset_streams_count(struct wss_context *wss_context);
@@ -127,12 +132,7 @@ size_t build_http3_frame(uint8_t *frame, uint8_t type, size_t length);
 
 int get_ssl_error_http3(SSL *ssl, int code);
 
-enum stream_type {
-    stream_read,
-    stream_write,
-};
-
-ssize_t check_stream_error(SSL *stream, enum stream_type stream_type);
+ssize_t check_ssl_error_http3(struct bev_context_ssl *bev_context_ssl, enum ssl_type ssl_type);
 
 SSL *init_http3_stream(SSL *ssl, struct sockaddr *sockaddr, uint16_t port);
 

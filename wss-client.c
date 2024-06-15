@@ -84,16 +84,25 @@ size_t build_http2_frame(uint8_t *buffer, size_t length, uint8_t type, uint8_t f
     return 9;
 }
 
-static ssize_t check_ssl_error(struct bev_context_ssl *bev_context_ssl,
-                               SSL *ssl, int read, int ret) {
+static ssize_t check_ssl_error(struct bev_context_ssl *bev_context_ssl, enum ssl_type ssl_type, int code) {
     const char *s;
     ssize_t what;
 
     if (bev_context_ssl->http == http3) {
-        ret = get_ssl_error_http3(ssl, ret);
+        code = get_ssl_error_http3(bev_context_ssl->ssl, code);
     }
-    s = read ? "read" : "write";
-    switch (ret) {
+    switch (ssl_type) {
+        case ssl_read:
+            s = "read";
+            break;
+        case ssl_write:
+            s = "write";
+            break;
+        default:
+            s = "unknown";
+            break;
+    }
+    switch (code) {
         case SSL_ERROR_ZERO_RETURN:
             LOGW("cannot %s ssl, zero return, mark as eof", s);
             what = WSS_EOF;
@@ -117,12 +126,12 @@ static ssize_t check_ssl_error(struct bev_context_ssl *bev_context_ssl,
             break;
         }
         case SSL_ERROR_SYSCALL:
-            ret = errno;
-            LOGW("cannot %s ssl, syscall: %s (%d)", s, strerror(ret), ret);
+            code = errno;
+            LOGW("cannot %s ssl, syscall: %s (%d)", s, strerror(code), code);
             what = WSS_ERROR;
             break;
         default:
-            LOGW("cannot %s ssl (%d)", s, ret);
+            LOGW("cannot %s ssl (%d)", s, code);
             what = WSS_ERROR;
             break;
     }
@@ -583,7 +592,7 @@ static ssize_t parse_http2(struct wss_context *wss_context, uint8_t *buffer, siz
 }
 
 static ssize_t do_ssl_read(struct bev_context_ssl *bev_context_ssl, struct bufferevent *bev) {
-    int ret;
+    int code;
     size_t size, total;
     ssize_t res;
     SSL *ssl;
@@ -627,8 +636,8 @@ static ssize_t do_ssl_read(struct bev_context_ssl *bev_context_ssl, struct buffe
         }
     }
 error:
-    ret = SSL_get_error(ssl, 0);
-    switch (ret) {
+    code = SSL_get_error(ssl, 0);
+    switch (code) {
         case SSL_ERROR_ZERO_RETURN:
             if (bev_context_ssl->http == http3) {
                 return WSS_EOF;
@@ -641,13 +650,13 @@ error:
             return WSS_AGAIN;
         case SSL_ERROR_SSL:
             if (bev_context_ssl->http == http3) {
-                return check_stream_error(ssl, stream_read);
+                return check_ssl_error_http3(bev_context_ssl, ssl_read);
             }
             break;
         default:
             break;
     }
-    return check_ssl_error(bev_context_ssl, ssl, 1, ret);
+    return check_ssl_error(bev_context_ssl, ssl_read, code);
 }
 
 static ssize_t do_ssl_write(struct bev_context_ssl *bev_context_ssl, uint8_t *buffer, size_t size) {
@@ -663,9 +672,6 @@ static ssize_t do_ssl_write(struct bev_context_ssl *bev_context_ssl, uint8_t *bu
             return WSS_ERROR;
         } else if (wss_context->ssl_error) {
             LOGW("http mux write while ssl error");
-            return WSS_ERROR;
-        } else if (wss_context->ssl_goaway) {
-            LOGW("http mux write while ssl goaway");
             return WSS_ERROR;
         }
     }
@@ -702,13 +708,13 @@ error:
             return WSS_AGAIN;
         case SSL_ERROR_SSL:
             if (bev_context_ssl->http == http3) {
-                return check_stream_error(ssl, stream_write);
+                return check_ssl_error_http3(bev_context_ssl, ssl_write);
             }
             break;
         default:
             break;
     }
-    return check_ssl_error(bev_context_ssl, ssl, 0, ret);
+    return check_ssl_error(bev_context_ssl, ssl_write, ret);
 }
 
 static ssize_t check_socket_error(ssize_t n, evutil_socket_t fd) {
@@ -769,7 +775,7 @@ static void free_http_stream(struct bufferevent_http_stream *http_stream) {
         bev_context_ssl = bufferevent_get_context(tev);
         if (bev_context_ssl && bev_context_ssl->stream_id == http_stream->stream_id && tev->errorcb) {
             bufferevent_disable(tev, EV_READ | EV_WRITE);
-            tev->errorcb(tev, BEV_EVENT_READING | BEV_EVENT_ERROR, tev->cbarg);
+            tev->errorcb(tev, BEV_EVENT_READING | BEV_EVENT_EOF, tev->cbarg);
         }
     }
     free(http_stream);
@@ -849,6 +855,10 @@ static void http2_readcb(evutil_socket_t sock, short event, void *context) {
     (void) sock;
     (void) event;
     wss_context = context;
+    if (wss_context->mock_ssl_timeout) {
+        event_del(SSL_get_app_data(wss_context->ssl));
+        return;
+    }
     bev_context_ssl.wss_context = wss_context;
     bev_context_ssl.http = http2;
     bev_context_ssl.ssl = bev_context_ssl.wss_context->ssl;
@@ -1039,7 +1049,7 @@ static void bufferevent_writecb(evutil_socket_t fd, short event, void *arg) {
     if (bev_context_ssl && bev_context_ssl->http == http2) {
         wss_context = bev_context_ssl->wss_context;
         if (bev_context_ssl->ssl != wss_context->ssl) {
-            LOGE("http stream ssl is not same as context ssl");
+            LOGW("http stream ssl is not same as context ssl");
             what |= BEV_EVENT_ERROR;
             goto error;
         }
@@ -1180,7 +1190,6 @@ static const struct bev_context const_bev_context_ssl = {
 };
 
 static struct bev_context_ssl *init_bev_context_ssl(struct wss_context *wss_context, SSL *ssl) {
-    SSL *stream = NULL;
     struct bev_context_ssl *bev_context_ssl;
     if (!wss_context->server.tls) {
         return NULL;
@@ -1214,9 +1223,6 @@ static struct bev_context_ssl *init_bev_context_ssl(struct wss_context *wss_cont
     }
     return bev_context_ssl;
 error:
-    if (stream != NULL) {
-        SSL_free(stream);
-    }
     free(bev_context_ssl);
     return NULL;
 }
@@ -1317,24 +1323,16 @@ static void bev_context_ssl_timeout(void *context) {
     }
     event_base_gettimeofday_cached(wss_context->base, &timeout);
     if (!wss_context->timeout.tv_sec) {
-        LOGD("http mux connection timeout, update timeout to %lld", (long long) timeout.tv_sec);
+        LOGD("http mux connection timeout");
         wss_context->timeout.tv_sec = timeout.tv_sec;
     } else if (!wss_context->ssl_goaway && timeout.tv_sec - wss_context->timeout.tv_sec >= WSS_TIMEOUT) {
-        LOGW("http mux connection timeout, mark ssl as goaway, previous: %lld, now: %lld",
-             (long long) wss_context->timeout.tv_sec, (long long) timeout.tv_sec);
+        LOGW("http mux connection timeout, mark ssl as goaway");
         wss_context->ssl_goaway = 1;
-    } else {
-        LOGD("http mux connection timeout, previous: %lld, now: %lld",
-             (long long) wss_context->timeout.tv_sec, (long long) timeout.tv_sec);
     }
     if (bev_context_ssl->http == http2 && !wss_context->ssl_error) {
         build_http2_frame(frame, 8, 6, 0, 0);
         RAND_bytes(frame + HTTP2_HEADER_LENGTH, 8);
         evbuffer_add(wss_context->output, frame, sizeof(frame));
         LOGD("send http2 ping");
-    }
-    if (wss_context->mock_ssl_timeout) {
-        LOGW("mock ssl timeout, mark ssl as goaway");
-        wss_context->ssl_goaway = 1;
     }
 }

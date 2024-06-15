@@ -17,7 +17,7 @@ static enum bufferevent_filter_result wss_output_filter_v3(struct evbuffer *src,
     (void) dst_limit;
     (void) mode;
     bev_context_ssl = bufferevent_get_context(tev);
-    if (!bev_context_ssl || bev_context_ssl->wss_context->ssl_error || bev_context_ssl->wss_context->ssl_goaway) {
+    if (!bev_context_ssl || bev_context_ssl->wss_context->ssl_error) {
         return BEV_ERROR;
     }
     if (evbuffer_get_length(src) > sizeof(buffer) - HTTP3_MAX_HEADER_LENGTH) {
@@ -38,13 +38,7 @@ void http_response_cb_v3(struct bufferevent *tev, void *raw) {
     size_t length, frame_length;
     uint8_t buffer[HTTP3_MAX_HEADER_LENGTH];
     struct evbuffer *input;
-    struct bev_context_ssl *bev_context_ssl;
 
-    bev_context_ssl = bufferevent_get_context(tev);
-    if (bev_context_ssl->wss_context->mock_ssl_timeout) {
-        tev->errorcb(tev, BEV_EVENT_READING | BEV_EVENT_TIMEOUT, tev->cbarg);
-        return;
-    }
     input = bufferevent_get_input(tev);
     frame_length = evbuffer_copyout(input, buffer, sizeof(buffer));
     frame_length = parse_http3_frame(buffer, frame_length, NULL);
@@ -177,9 +171,9 @@ void http3_eventcb(evutil_socket_t sock, short event, void *context) {
             break;
         }
         if (is_infinite) {
-            LOGI("infinite, remove timer and mark ssl as goaway");
+            LOGI("infinite, remove timer and mark ssl as error");
             event_remove_timer(wss_context->event_quic);
-            wss_context->ssl_goaway = 1;
+            wss_context->ssl_error = 1;
             break;
         }
         if (tv.tv_sec || tv.tv_usec) {
@@ -201,18 +195,19 @@ static void read_http3_stream(struct bufferevent_http_stream *http_stream, void 
     int enabled;
     struct sock_event *sock_event;
     struct bev_context_ssl *bev_context_ssl;
+    struct event* ev_read;
 
     if (http_stream->mark_free) {
         return;
     }
     enabled = bufferevent_get_enabled(http_stream->bev) & EV_READ;
     bev_context_ssl = bufferevent_get_context(http_stream->bev);
-    if (!enabled || !bev_context_ssl) {
+    if (!enabled || !bev_context_ssl || bev_context_ssl->wss_context->ssl_error) {
         return;
     }
     sock_event = arg;
-    http_stream->bev->ev_read.ev_evcallback.evcb_cb_union.evcb_callback(sock_event->sock, sock_event->event,
-                                                                        http_stream->bev);
+    ev_read = &(http_stream->bev->ev_read);
+    event_get_callback(ev_read)(sock_event->sock, sock_event->event, event_get_callback_arg(ev_read));
     if (http_stream->mark_free) {
         sock_event->evicted = 1;
     }
@@ -232,10 +227,14 @@ void http3_readcb(evutil_socket_t sock, short event, void *context) {
     struct wss_context *wss_context;
     LHASH_OF(bufferevent_http_stream) *http_streams;
 
+    wss_context = context;
+    if (wss_context->mock_ssl_timeout) {
+        event_del(SSL_get_app_data(wss_context->ssl));
+        return;
+    }
     sock_event.sock = sock;
     sock_event.evicted = 0;
     sock_event.event = (short) ((event & ~EV_TIMEOUT) | EV_READ);
-    wss_context = context;
     http_streams = wss_context->http_streams;
     if (!wss_context->ssl_error) {
         lh_bufferevent_http_stream_doall_arg(http_streams, read_http3_stream, &sock_event);
@@ -258,14 +257,16 @@ void http3_readcb(evutil_socket_t sock, short event, void *context) {
     }
 }
 
-ssize_t check_stream_error(SSL *ssl, enum stream_type stream_type) {
+ssize_t check_ssl_error_http3(struct bev_context_ssl *bev_context_ssl, enum ssl_type ssl_type) {
+    SSL *ssl;
     int stream_state;
 
-    switch (stream_type) {
-        case stream_read:
+    ssl = bev_context_ssl->ssl;
+    switch (ssl_type) {
+        case ssl_read:
             stream_state = SSL_get_stream_read_state(ssl);
             break;
-        case stream_write:
+        case ssl_write:
             stream_state = SSL_get_stream_write_state(ssl);
             break;
         default:
@@ -290,6 +291,7 @@ ssize_t check_stream_error(SSL *ssl, enum stream_type stream_type) {
             return WSS_ERROR;
         case SSL_STREAM_STATE_CONN_CLOSED:
             LOGW("stream state connection closed, mark as error");
+            bev_context_ssl->wss_context->ssl_error = 1;
             return WSS_ERROR;
         default:
             LOGW("stream state %d", stream_state);
@@ -464,9 +466,9 @@ void free_context_ssl_http3(struct bev_context_ssl *bev_context_ssl) {
     (void) bev_context_ssl;
 }
 
-ssize_t check_stream_error(SSL *ssl, enum stream_type stream_type) {
-    (void) ssl;
-    (void) stream_type;
+ssize_t check_ssl_error_http3(struct bev_context_ssl *bev_context_ssl, enum ssl_type ssl_type) {
+    (void) bev_context_ssl;
+    (void) ssl_type;
     return 0;
 }
 
