@@ -43,7 +43,7 @@ struct wss_context {
     struct event_base *base;
     struct evbuffer *input;
     struct evbuffer *output;
-    struct event *event_quic;
+    struct event *event_mux;
     struct event *event_sighup;
     struct timeval timeout;
     uint8_t settings_sent: 1;

@@ -12,7 +12,7 @@ static enum bufferevent_filter_result wss_output_filter_v3(struct evbuffer *src,
                                                            void *tev) {
     size_t length, frame_header_length;
     struct bev_context_ssl *bev_context_ssl;
-    uint8_t buffer[HTTP3_MAX_HEADER_LENGTH + MAX_WS_HEADER_SIZE + MAX_WSS_PAYLOAD_SIZE];
+    uint8_t buffer[HTTP3_MAX_HEADER_LENGTH + MAX_WS_HEADER_SIZE + WSS_PAYLOAD_SIZE];
 
     (void) dst_limit;
     (void) mode;
@@ -20,17 +20,13 @@ static enum bufferevent_filter_result wss_output_filter_v3(struct evbuffer *src,
     if (!bev_context_ssl || bev_context_ssl->wss_context->ssl_error) {
         return BEV_ERROR;
     }
-    if (evbuffer_get_length(src) > sizeof(buffer) - HTTP3_MAX_HEADER_LENGTH) {
-        return BEV_ERROR;
+    while (evbuffer_get_length(src)) {
+        length = evbuffer_copyout(src, &buffer[HTTP3_MAX_HEADER_LENGTH], sizeof(buffer) - HTTP3_MAX_HEADER_LENGTH);
+        frame_header_length = build_http3_frame(buffer, 0, length);
+        memmove(buffer + (HTTP3_MAX_HEADER_LENGTH - frame_header_length), buffer, frame_header_length);
+        evbuffer_add(dst, buffer + (HTTP3_MAX_HEADER_LENGTH - frame_header_length), length + frame_header_length);
+        evbuffer_drain(src, length);
     }
-    length = evbuffer_copyout(src, &buffer[HTTP3_MAX_HEADER_LENGTH], sizeof(buffer) - HTTP3_MAX_HEADER_LENGTH);
-    frame_header_length = build_http3_frame(buffer, 0, length);
-    if (frame_header_length == 0) {
-        return BEV_ERROR;
-    }
-    memmove(buffer + (HTTP3_MAX_HEADER_LENGTH - frame_header_length), buffer, frame_header_length);
-    evbuffer_add(dst, buffer + (HTTP3_MAX_HEADER_LENGTH - frame_header_length), length + frame_header_length);
-    evbuffer_drain(src, length);
     return BEV_OK;
 }
 
@@ -172,12 +168,12 @@ void http3_eventcb(evutil_socket_t sock, short event, void *context) {
         }
         if (is_infinite) {
             LOGI("infinite, remove timer and mark ssl as error");
-            event_remove_timer(wss_context->event_quic);
+            event_remove_timer(wss_context->event_mux);
             wss_context->ssl_error = 1;
             break;
         }
         if (tv.tv_sec || tv.tv_usec) {
-            event_add(wss_context->event_quic, &tv);
+            event_add(wss_context->event_mux, &tv);
             LOGD("handled %d, would handle events %lu.%03d later", i, tv.tv_sec, (int) tv.tv_usec / 1000);
             break;
         }
@@ -252,8 +248,8 @@ void http3_readcb(evutil_socket_t sock, short event, void *context) {
         reset_streams_count(wss_context);
         event_del(SSL_get_app_data(wss_context->ssl));
     }
-    if (!event_pending(wss_context->event_quic, EV_TIMEOUT, NULL)) {
-        event_active(wss_context->event_quic, EV_TIMEOUT, 0);
+    if (!event_pending(wss_context->event_mux, EV_TIMEOUT, NULL)) {
+        event_active(wss_context->event_mux, EV_TIMEOUT, 0);
     }
 }
 
@@ -377,11 +373,11 @@ struct event *init_ssl_http3(struct wss_context *wss_context, struct event_base 
         LOGD("cannot set quic blocking mode");
         return NULL;
     }
-    if (wss_context->event_quic) {
-        event_free(wss_context->event_quic);
+    if (wss_context->event_mux) {
+        event_free(wss_context->event_mux);
     }
-    wss_context->event_quic = event_new(base, fd, EV_TIMEOUT | EV_PERSIST, http3_eventcb, wss_context);
-    if (!wss_context->event_quic) {
+    wss_context->event_mux = event_new(base, fd, EV_TIMEOUT | EV_PERSIST, http3_eventcb, wss_context);
+    if (!wss_context->event_mux) {
         LOGW("cannot init quic ssl events");
         return NULL;
     }

@@ -258,24 +258,25 @@ static enum bufferevent_filter_result wss_output_filter_v2(struct evbuffer *src,
                                                            ev_ssize_t dst_limit, enum bufferevent_flush_mode mode,
                                                            void *tev) {
     size_t length, frame_header_length;
-    uint8_t buffer[HTTP2_HEADER_LENGTH + MAX_WS_HEADER_SIZE + MAX_WSS_PAYLOAD_SIZE];
+    uint8_t buffer[HTTP2_HEADER_LENGTH + MAX_WS_HEADER_SIZE + WSS_PAYLOAD_SIZE];
     struct bev_context_ssl *bev_context_ssl;
 
+    (void) dst;
     (void) dst_limit;
     (void) mode;
     bev_context_ssl = bufferevent_get_context(tev);
-    if (!bev_context_ssl || bev_context_ssl->wss_context->ssl_error) {
+    if (!bev_context_ssl || bev_context_ssl->wss_context->ssl_error || !bev_context_ssl->wss_context->output) {
         return BEV_ERROR;
     }
-    if (evbuffer_get_length(src) > sizeof(buffer) - HTTP2_HEADER_LENGTH) {
-        return BEV_ERROR;
+    while (evbuffer_get_length(src)) {
+        length = evbuffer_copyout(src, &buffer[HTTP2_HEADER_LENGTH], sizeof(buffer) - HTTP2_HEADER_LENGTH);
+        frame_header_length = build_http2_frame(buffer, length, 0, 0, bev_context_ssl->stream_id);
+        evbuffer_add(bev_context_ssl->wss_context->output, buffer, length + frame_header_length);
+        evbuffer_drain(src, length);
+        bev_context_ssl->send_window -= (ssize_t) length;
+        bev_context_ssl->wss_context->send_window -= (ssize_t) length;
     }
-    length = evbuffer_copyout(src, &buffer[HTTP2_HEADER_LENGTH], sizeof(buffer) - HTTP2_HEADER_LENGTH);
-    frame_header_length = build_http2_frame(buffer, length, 0, 0, bev_context_ssl->stream_id);
-    evbuffer_add(dst, buffer, length + frame_header_length);
-    evbuffer_drain(src, length);
-    bev_context_ssl->send_window -= (ssize_t) length;
-    bev_context_ssl->wss_context->send_window -= (ssize_t) length;
+    bufferevent_enable(tev, EV_WRITE);
     return BEV_OK;
 }
 
@@ -376,8 +377,6 @@ static struct bufferevent *connect_wss(struct wss_context *wss_context, struct b
         bev_context_ssl->recv_window = MAX_WINDOW_SIZE;
         LOGD("stream %u recv window %zu", bev_context_ssl->stream_id, bev_context_ssl->recv_window);
         cb = http_response_cb_v2;
-        evbuffer_add(bev_context_ssl->wss_context->output, request, length);
-        length = 0;
     } else {
         length = build_http_request(wss_context, udp, request);
         cb = http_response_cb;
@@ -385,7 +384,9 @@ static struct bufferevent *connect_wss(struct wss_context *wss_context, struct b
     bufferevent_set_timeouts(tev, &tv, &tv);
     bufferevent_setcb(tev, cb, NULL, tev_raw_event_cb, raw);
     bufferevent_enable(tev, EV_READ | EV_WRITE);
-    if (length) {
+    if (wss_context->server.http2) {
+        evbuffer_add(wss_context->output, request, length);
+    } else {
         bufferevent_write(tev, request, length);
     }
     return tev;
