@@ -132,7 +132,7 @@ static ssize_t check_ssl_error(struct bev_context_ssl *bev_context_ssl, enum ssl
             what = WSS_ERROR;
             break;
     }
-    if (bev_context_ssl->wss_context) {
+    if (bev_context_ssl->wss_context && SSL_get_app_data(bev_context_ssl->ssl)) {
         bev_context_ssl->wss_context->ssl_error = 1;
     }
     return what;
