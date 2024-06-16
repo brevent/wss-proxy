@@ -59,11 +59,11 @@ static void bev_context_ssl_free(void *context) {
         if (http_stream) {
             if (bev_context_ssl->http == http2) {
                 http_stream->out_closed = 1;
-                LOGD("http stream %lu: %p out closed", (unsigned long) key.stream_id, http_stream);
+                LOGD("http stream %u: %p out closed", key.stream_id, http_stream);
             }
             if (bev_context_ssl->http != http2 || http_stream->in_closed) {
                 http_stream->mark_free = 1;
-                LOGD("would remove http stream %lu: %p", (unsigned long) key.stream_id, http_stream);
+                LOGD("would remove http stream %u: %p", key.stream_id, http_stream);
             }
         }
     }
@@ -505,7 +505,7 @@ static void check_http2_stream(struct wss_context *wss_context, struct http2_fra
         return;
     }
     if (in_closed) {
-        LOGD("http stream %lu: %p in closed", (unsigned long) http2_frame->stream_id, http_stream);
+        LOGD("http stream %u: %p in closed", http2_frame->stream_id, http_stream);
         http_stream->in_closed = 1;
     }
     if (!http_stream->out_closed && http_stream->bev) {
@@ -764,8 +764,7 @@ static void free_http_stream(struct bufferevent_http_stream *http_stream) {
     struct bufferevent *tev;
     struct bev_context_ssl *bev_context_ssl;
 
-    LOGD("free http stream %lu: %p, mark free: %d",
-         (unsigned long) http_stream->stream_id, http_stream, http_stream->mark_free);
+    LOGD("free http stream %u: %p, mark free: %d", http_stream->stream_id, http_stream, http_stream->mark_free);
     if (!http_stream->mark_free && !http_stream->out_closed) {
         tev = http_stream->bev;
         bev_context_ssl = bufferevent_get_context(tev);
@@ -832,7 +831,7 @@ static void evict_http2_stream(struct bufferevent_http_stream *http_stream) {
 
     wss_context = http_stream->wss_context;
     if ((http_stream->out_closed && http_stream->in_closed) || http_stream->mark_free) {
-        LOGD("close http stream %lu: %p", (unsigned long) http_stream->stream_id, http_stream);
+        LOGD("close http stream %u: %p", http_stream->stream_id, http_stream);
         lh_bufferevent_http_stream_delete(wss_context->http_streams, http_stream);
         free(http_stream);
     }
@@ -1228,6 +1227,11 @@ static struct bev_context_ssl *init_bev_context_ssl(struct wss_context *wss_cont
         bev_context_ssl->send_window = wss_context->initial_window_size;
         bev_context_ssl->recv_window = DEFAULT_INITIAL_WINDOW_SIZE;
         wss_context->next_stream_id += 2;
+        if (wss_context->next_stream_id > 0x7fffffff) {
+            LOGW("stream id too large, mark as error");
+            wss_context->ssl_error = 1;
+            goto error;
+        }
         LOGD("stream %u send window %zd, recv window %zu",
              bev_context_ssl->stream_id, bev_context_ssl->send_window, bev_context_ssl->recv_window);
         LOGD("ssl: %p", ssl);
@@ -1297,7 +1301,7 @@ start:
                 event_add(SSL_get_app_data(wss_context->ssl), NULL);
                 LOGD("add event for read");
             }
-            LOGD("http stream %lu: %p, total: %lu", (unsigned long) http_stream->stream_id, http_stream,
+            LOGD("http stream %u: %p, total: %lu", http_stream->stream_id, http_stream,
                  lh_bufferevent_http_stream_num_items(wss_context->http_streams));
         }
     }
@@ -1334,7 +1338,7 @@ static void bev_context_ssl_timeout(void *context) {
     http_stream = lh_bufferevent_http_stream_retrieve(wss_context->http_streams, &key);
     if (http_stream) {
         http_stream->mark_free = 1;
-        LOGD("http stream %lu: %p timeout", (unsigned long) key.stream_id, http_stream);
+        LOGD("http stream %u: %p timeout", key.stream_id, http_stream);
     }
     event_base_gettimeofday_cached(wss_context->base, &timeout);
     if (!wss_context->timeout.tv_sec) {

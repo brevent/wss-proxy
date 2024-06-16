@@ -52,7 +52,7 @@ struct wss_context {
     uint8_t ssl_error: 1;
     uint8_t ssl_connected: 1;
     uint8_t http2_evicted: 1;
-    uint32_t next_stream_id: 23;
+    uint32_t next_stream_id;
     uint32_t initial_window_size;
     ssize_t send_window;
     size_t recv_window;
@@ -79,7 +79,7 @@ struct bev_context_ssl {
 };
 
 struct bufferevent_http_stream {
-    uint64_t stream_id;
+    uint32_t stream_id;
     struct bufferevent *bev;
     volatile uint8_t mark_free: 1;
     uint8_t in_closed: 1;

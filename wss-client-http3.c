@@ -211,7 +211,7 @@ static void read_http3_stream(struct bufferevent_http_stream *http_stream, void 
 
 static void close_http_stream(struct bufferevent_http_stream *http_stream, void *http_streams) {
     if (http_stream->mark_free) {
-        LOGD("close http stream %lu: %p", (unsigned long) http_stream->stream_id, http_stream);
+        LOGD("close http stream %u: %p", http_stream->stream_id, http_stream);
         lh_bufferevent_http_stream_delete(http_streams, http_stream);
         free(http_stream);
     }
@@ -391,6 +391,7 @@ struct event *init_ssl_http3(struct wss_context *wss_context, struct event_base 
 
 int init_context_ssl_http3(struct bev_context_ssl *bev_context_ssl, SSL *ssl) {
     SSL *stream;
+    uint64_t stream_id;
 
     stream = SSL_new_stream(ssl, SSL_STREAM_FLAG_ADVANCE);
     if (stream == NULL) {
@@ -398,9 +399,16 @@ int init_context_ssl_http3(struct bev_context_ssl *bev_context_ssl, SSL *ssl) {
         bev_context_ssl->wss_context->ssl_error = 1;
         return 1;
     }
+    stream_id = SSL_get_stream_id(stream);
+    if (stream_id > UINT32_MAX) {
+        LOGW("quic stream id too large");
+        bev_context_ssl->wss_context->ssl_error = 1;
+        SSL_free(stream);
+        return 1;
+    }
     bev_context_ssl->http = http3;
     bev_context_ssl->stream = stream;
-    bev_context_ssl->stream_id = SSL_get_stream_id(stream);
+    bev_context_ssl->stream_id = (uint32_t) stream_id;
     bev_context_ssl->frame = evbuffer_new();
     if (!bev_context_ssl->frame) {
         LOGW("cannot new quic stream frame");
