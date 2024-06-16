@@ -49,7 +49,7 @@ struct wss_context {
     uint8_t settings_sent: 1;
     uint8_t mock_ssl_timeout: 1;
     uint8_t ssl_goaway: 1;
-    volatile uint8_t ssl_error: 1;
+    uint8_t ssl_error: 1;
     uint8_t ssl_connected: 1;
     uint8_t http2_evicted: 1;
     uint32_t next_stream_id: 23;
