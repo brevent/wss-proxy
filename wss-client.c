@@ -1055,12 +1055,12 @@ static void bufferevent_writecb(evutil_socket_t fd, short event, void *arg) {
     if (bev_context_ssl && bev_context_ssl->http == http2) {
         wss_context = bev_context_ssl->wss_context;
         if (bev_context_ssl->ssl != wss_context->ssl) {
-            LOGW("http stream ssl is not same as context ssl");
+            LOGW("http stream ssl is not same as context ssl, tev: %p", bev);
             what |= BEV_EVENT_ERROR;
             goto error;
         }
         if (evbuffer_get_length(bev->output)) {
-            LOGW("for http2, write to context output instead of output");
+            LOGW("write to http stream instead of context, tev: %p", bev);
             evbuffer_add_buffer(wss_context->output, bev->output);
         }
         output = wss_context->output;
@@ -1070,7 +1070,7 @@ static void bufferevent_writecb(evutil_socket_t fd, short event, void *arg) {
 
     if (evbuffer_get_length(output)) {
         if (bev_context_ssl && bev_context_ssl->wss_context->ssl_error) {
-            LOGW("http mux write ssl error, length: %zu", evbuffer_get_length(output));
+            LOGW("http mux write ssl error, length: %zu, tev: %p", evbuffer_get_length(output), bev);
             evbuffer_drain(output, evbuffer_get_length(output));
             what |= BEV_EVENT_ERROR;
             goto error;
