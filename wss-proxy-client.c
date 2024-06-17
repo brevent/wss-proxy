@@ -282,7 +282,8 @@ static enum bufferevent_filter_result wss_output_filter_v2(struct evbuffer *src,
 
 static void http_response_cb_v2(struct bufferevent *tev, void *raw) {
     size_t length, header_length;
-    char buffer[HTTP2_HEADER_LENGTH];
+    int index, status, codes[] = {200, 204, 206, 304, 400, 404, 500};
+    uint8_t buffer[HTTP2_HEADER_LENGTH + 6];
     struct evbuffer *input;
 
     input = bufferevent_get_input(tev);
@@ -290,6 +291,7 @@ static void http_response_cb_v2(struct bufferevent *tev, void *raw) {
     if (length < HTTP2_HEADER_LENGTH) {
         return;
     }
+    memset(buffer, 0, sizeof(buffer));
     evbuffer_copyout(input, buffer, sizeof(buffer));
     header_length = (buffer[0] << 16) | (buffer[1] << 8) | buffer[2];
     if (length < HTTP2_HEADER_LENGTH + header_length) {
@@ -300,7 +302,20 @@ static void http_response_cb_v2(struct bufferevent *tev, void *raw) {
         return;
     }
     if (buffer[4] & 0x1) {
-        LOGD("stream is end");
+        LOGW("wss fail for peer %d, stream is end", get_peer_port(raw));
+        goto error;
+    }
+    status = -1;
+    if (buffer[HTTP2_HEADER_LENGTH] & 0x80) {
+        index = buffer[HTTP2_HEADER_LENGTH] & 0x7f;
+        if (index >= 8 && index <= 14) {
+            status = codes[index - 8];
+        }
+    } else if (buffer[HTTP2_HEADER_LENGTH] == 0x48 && buffer[HTTP2_HEADER_LENGTH + 1] == 0x3) {
+        status = (int) evutil_strtoll((char *) &buffer[HTTP2_HEADER_LENGTH + 2], NULL, 10);
+    }
+    if (status != 200) {
+        LOGW("wss fail for peer %d, status: %d", get_peer_port(raw), status);
         goto error;
     }
     LOGD("wss is ready for peer %d, remain: %zu", get_peer_port(raw), evbuffer_get_length(input));

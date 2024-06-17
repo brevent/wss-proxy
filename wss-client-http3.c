@@ -31,27 +31,37 @@ static enum bufferevent_filter_result wss_output_filter_v3(struct evbuffer *src,
 }
 
 void http_response_cb_v3(struct bufferevent *tev, void *raw) {
-    size_t length, frame_length;
-    uint8_t buffer[HTTP3_MAX_HEADER_LENGTH];
+    int status;
+    size_t length, frame_length, header_length;
+    uint8_t buffer[HTTP3_MAX_HEADER_LENGTH + 9];
     struct evbuffer *input;
 
     input = bufferevent_get_input(tev);
+    memset(buffer, 0, sizeof(buffer));
     frame_length = evbuffer_copyout(input, buffer, sizeof(buffer));
-    frame_length = parse_http3_frame(buffer, frame_length, NULL);
+    frame_length = parse_http3_frame(buffer, frame_length, &header_length);
     length = evbuffer_get_length(input);
     if (frame_length == 0 || length < frame_length) {
         return;
     }
     if (buffer[0] != 0x1) {
-        LOGW("invalid frame %d, expect headers (0x1)", buffer[0]);
-        goto error;
-    }
-    if (frame_length != length) {
-        LOGW("invalid response, frame length %d, headers length: %d",
-             (int) frame_length, (int) length);
+        LOGW("wss fail for peer %d, invalid frame %d, expect headers (0x1)", get_peer_port(raw), buffer[0]);
         goto error;
     }
     evbuffer_drain(input, frame_length);
+    status = -1;
+    if (buffer[header_length] == 0x00 && buffer[header_length + 1] == 0x00) {
+        // only support nginx variant
+        if (buffer[header_length + 2] == 0xd9) {
+            status = 200;
+        } else if (memcmp(&buffer[header_length + 2], "\x5f\x0a\x03", 3) == 0) {
+            status = (int) evutil_strtoll((char *) &buffer[header_length + 5], NULL, 10);
+        }
+    }
+    if (status != 200) {
+        LOGW("wss fail for peer %d, status: %d", get_peer_port(raw), status);
+        goto error;
+    }
     LOGD("wss is ready for peer %d, remain: %zu", get_peer_port(raw), evbuffer_get_length(input));
     tunnel_wss(raw, tev, wss_output_filter_v3);
     return;
