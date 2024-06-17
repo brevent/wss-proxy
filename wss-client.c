@@ -474,15 +474,11 @@ static void update_window_update(struct wss_context *wss_context, const uint8_t 
     LOGD("connection send window %zd, delta: 0x%x", wss_context->send_window, delta);
 }
 
-static int reset_http2_stream(struct wss_context *wss_context, struct bufferevent_http_stream *http_stream, int res) {
+static int reset_http2_stream(struct wss_context *wss_context, uint32_t stream_id, int status) {
     uint8_t header[HTTP2_HEADER_LENGTH + 4];
 
-    if (http_stream->rst_sent) {
-        return 0;
-    }
-    http_stream->rst_sent = 1;
-    build_http2_frame(header, 4, 3, 0, http_stream->stream_id);
-    *((uint32_t *) (header + HTTP2_HEADER_LENGTH)) = htonl(res);
+    build_http2_frame(header, 4, 3, 0, stream_id);
+    *((uint32_t *) (header + HTTP2_HEADER_LENGTH)) = htonl(status);
     evbuffer_add(wss_context->output, header, HTTP2_HEADER_LENGTH + 4);
     return 1;
 }
@@ -500,6 +496,7 @@ static void check_http2_stream(struct wss_context *wss_context, struct http2_fra
         if (!in_closed) {
             LOGD("cannot find stream %u, type: %d, length: %u",
                  http2_frame->stream_id, http2_frame->type, http2_frame->length);
+            reset_http2_stream(wss_context, http2_frame->stream_id, 0x5);
         }
         evbuffer_drain(wss_context->input, http2_frame->length + HTTP2_HEADER_LENGTH);
         return;
@@ -514,14 +511,18 @@ static void check_http2_stream(struct wss_context *wss_context, struct http2_fra
     }
     evbuffer_drain(wss_context->input, http2_frame->length + HTTP2_HEADER_LENGTH);
     if (http_stream->out_closed) {
-        wss_context->http2_evicted = 1;
         if (!http_stream->in_closed) {
             LOGD("stream %u, out closed with type %d, length: %u",
                  http2_frame->stream_id, http2_frame->type, http2_frame->length);
+        } else {
+            wss_context->http2_evicted = 1;
         }
     } else if (http2_frame->type != 0 && http2_frame->type != 1 && http2_frame->type != 3) {
         LOGW("stream %u, unsupported type: %d", http2_frame->stream_id, http2_frame->type);
-        reset_http2_stream(wss_context, http_stream, 0x1);
+        if (!http_stream->rst_sent) {
+            http_stream->rst_sent = 1;
+            reset_http2_stream(wss_context, http2_frame->stream_id, 0x1);
+        }
     }
 }
 
