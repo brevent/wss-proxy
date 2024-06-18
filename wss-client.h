@@ -118,6 +118,8 @@ size_t build_http2_frame(uint8_t *frame, size_t length, uint8_t type, uint8_t fl
 
 void reset_streams_count(struct wss_context *wss_context);
 
+int decode_huffman_digit(uint8_t *buffer, size_t size);
+
 #define HTTP3_MAX_HEADER_LENGTH 9
 
 SSL_CTX  *ssl_ctx_new_http3();

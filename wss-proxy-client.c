@@ -280,6 +280,43 @@ static enum bufferevent_filter_result wss_output_filter_v2(struct evbuffer *src,
     return BEV_OK;
 }
 
+int decode_huffman_digit(uint8_t *buffer, size_t size) {
+    int n = 0, r = 0, x = 0, x5, x6;
+
+    for (; size > 0; --size, buffer++) {
+        r += 8;
+        x = (x << 8) | *buffer;
+        while (r >= 0x5) {
+            x5 = x >> (r - 5);
+            if (x5 >= 0 && x5 <= 2) {
+                r -= 5;
+                x &= (1 << r) - 1;
+                n = n * 10 + x5;
+            } else if (x5 >= 0xc && x5 <= 0xf) {
+                if (r < 0x6) {
+                    break;
+                }
+                x6 = (x >> (r - 6));
+                if (x6 >= 0x19 && x6 <= 0x1f) {
+                    r -= 6;
+                    x &= (1 << r) - 1;
+                    n = n * 10 + (x6 - (0x19 - 3));
+                } else {
+                    return -1;
+                }
+            } else if (size == 1) {
+                break;
+            } else {
+                return -1;
+            }
+        }
+    }
+    if (x == (1 << r) - 1) {
+        return n;
+    }
+    return -1;
+}
+
 static void http_response_cb_v2(struct bufferevent *tev, void *raw) {
     size_t length, header_length;
     int index, status, codes[] = {200, 204, 206, 304, 400, 404, 500};
@@ -306,13 +343,24 @@ static void http_response_cb_v2(struct bufferevent *tev, void *raw) {
         goto error;
     }
     status = -1;
-    if (buffer[HTTP2_HEADER_LENGTH] & 0x80) {
-        index = buffer[HTTP2_HEADER_LENGTH] & 0x7f;
-        if (index >= 8 && index <= 14) {
+#define STATUS(x) ((x) >= 8 && (x) <= 14)
+    index = buffer[HTTP2_HEADER_LENGTH];
+    if (index == 0x88) {
+        status = 200;
+    } else if (index >> 7) {
+        index &= 0x7f;
+        if (STATUS(index)) {
             status = codes[index - 8];
         }
-    } else if (buffer[HTTP2_HEADER_LENGTH] == 0x48 && buffer[HTTP2_HEADER_LENGTH + 1] == 0x3) {
-        status = (int) evutil_strtoll((char *) &buffer[HTTP2_HEADER_LENGTH + 2], NULL, 10);
+    } else if ((index >> 6) == 1) {
+        index &= 0x3f;
+        if (STATUS(index)) {
+            if (buffer[HTTP2_HEADER_LENGTH + 1] == 0x3) {
+                status = (int) evutil_strtoll((char *) &buffer[HTTP2_HEADER_LENGTH + 2], NULL, 10);
+            } else if ((buffer[HTTP2_HEADER_LENGTH + 1] >> 7) && (buffer[HTTP2_HEADER_LENGTH + 1] & 0x7f) <= 3) {
+                status = decode_huffman_digit(&buffer[HTTP2_HEADER_LENGTH + 2], buffer[HTTP2_HEADER_LENGTH + 1] & 0x7f);
+            }
+        }
     }
     if (status != 200) {
         LOGW("wss fail for peer %d, status: %d", get_peer_port(raw), status);

@@ -31,7 +31,7 @@ static enum bufferevent_filter_result wss_output_filter_v3(struct evbuffer *src,
 }
 
 void http_response_cb_v3(struct bufferevent *tev, void *raw) {
-    int status;
+    int status, index, codes[] = {103, 200, 304, 404, 503}, codes2[] = {100, 204, 206, 302, 400, 403, 421, 425, 500};
     size_t length, frame_length, header_length;
     uint8_t buffer[HTTP3_MAX_HEADER_LENGTH + 9];
     struct evbuffer *input;
@@ -50,12 +50,28 @@ void http_response_cb_v3(struct bufferevent *tev, void *raw) {
     }
     evbuffer_drain(input, frame_length);
     status = -1;
+#define STATUS1(x) ((x) >= 24 && (x) <= 28)
+#define STATUS2(x) ((x) >= 63 && (x) <= 71)
     if (buffer[header_length] == 0x00 && buffer[header_length + 1] == 0x00) {
-        // only support nginx variant
-        if (buffer[header_length + 2] == 0xd9) {
+        index = buffer[header_length + 2];
+        if (index == 0xd9) {
             status = 200;
-        } else if (memcmp(&buffer[header_length + 2], "\x5f\x0a\x03", 3) == 0) {
-            status = (int) evutil_strtoll((char *) &buffer[header_length + 5], NULL, 10);
+        } else if ((index >> 6) == 3) {
+            index &= 0x3f;
+            if (STATUS1(index)) {
+                status = codes[index - 24];
+            } else if (index == 0x3f && STATUS2(buffer[header_length + 3] + 0x3f) && frame_length - header_length > 3) {
+                status = codes2[buffer[header_length + 3]];
+            }
+        } else if (index == 0x5f) {
+            index = buffer[header_length + 3] + 0xf;
+            if (STATUS1(index) || STATUS2(index)) {
+                if (buffer[header_length + 4] == 0x3) {
+                    status = (int) evutil_strtoll((char *) &buffer[header_length + 5], NULL, 10);
+                } else if ((buffer[header_length + 4] >> 7) && (buffer[header_length + 4] & 0x7f) <= 0x3) {
+                    status = decode_huffman_digit(&buffer[header_length + 5], buffer[header_length + 4] & 0x7f);
+                }
+            }
         }
     }
     if (status != 200) {
