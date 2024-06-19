@@ -877,6 +877,7 @@ static void http2_readcb(evutil_socket_t sock, short event, void *context) {
 }
 
 static void http2_writecb(evutil_socket_t sock, short event, void *context) {
+    struct timeval tv = {1, 0};
     ssize_t size, res;
     uint8_t buffer[WSS_PAYLOAD_SIZE];
     struct evbuffer *output;
@@ -925,6 +926,8 @@ error:
 done:
     if (!evbuffer_get_length(output)) {
         event_del(wss_context->event_mux);
+    } else {
+        event_add(wss_context->event_mux, &tv);
     }
 }
 
