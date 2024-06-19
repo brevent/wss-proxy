@@ -38,7 +38,7 @@ jobs:
 
     - name: Install libevent and openssl on macos
       if: ${{ startsWith(matrix.os, 'macos') }}
-      run: brew install libevent
+      run: brew list libevent &>/dev/null && brew uses --installed libevent || brew install libevent
 
     - name: Install libevent and openssl on windows
       if: ${{ startsWith(matrix.os, 'windows') }}
