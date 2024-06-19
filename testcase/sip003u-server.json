@@ -5,7 +5,7 @@
   "plugin": "./wss-proxy-server",
   "plugin_mode": "tcp_and_udp",
   "plugin_opts": "mux=0;loglevel=debug",
-  "server": "127.0.0.1",
+  "server": "0.0.0.0",
   "server_port": 8888,
   "timeout": 60
 }

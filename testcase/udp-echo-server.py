@@ -10,5 +10,4 @@ server_socket.bind((host, port))
 
 while True:
     data, addr = server_socket.recvfrom(65535)
-    print("received %d bytes" % len(data))
     server_socket.sendto(data, addr)
