@@ -1,27 +1,29 @@
 #include <string.h>
+#ifndef _WIN32
 #include <arpa/inet.h>
+#else
+#include <winsock2.h>
+#endif
 #include "ws-header.h"
 
 /**
  * fop: fin:1, rsv:3, opcode: 4
  * mlen: mask: 1, length: 7
  */
-#define FOP_MASK struct {   \
-    uint8_t fop;            \
-    uint8_t mlen;           \
-}
 
 typedef struct ws_header {
     union {
         struct {
             uint16_t unused;
-            FOP_MASK;
-        };
+            uint8_t fop;
+            uint8_t mlen;
+        } base;
         struct {
-            FOP_MASK;
+            uint8_t fop;
+            uint8_t mlen;
             uint16_t elen;
         } extend;
-    };
+    } u;
     uint32_t mask;
 } ws_header;
 
@@ -33,24 +35,24 @@ int parse_ws_header(const uint8_t *buffer, uint16_t size, struct ws_header_info 
     if (size < info->header_size) {
         return info->header_size;
     }
-    memcpy(&(ws_header.fop), buffer, WS_HEADER_SIZE);
-    len = ws_header.mlen & 0x7f;
+    memcpy(&(ws_header.u.base.fop), buffer, WS_HEADER_SIZE);
+    len = ws_header.u.base.mlen & 0x7f;
     if (len == 0x7f) {
         return -1;
     }
     if (len <= MAX_CONTROL_FRAME_SIZE) {
-        fop = ws_header.fop;
-        info->mask = (ws_header.mlen & 0x80) != 0;
+        fop = ws_header.u.base.fop;
+        info->mask = (ws_header.u.base.mlen & 0x80) != 0;
         info->payload_size = len;
     } else {
         info->header_size = EXTEND_WS_HEADER_SIZE;
         if (size < info->header_size) {
             return info->header_size;
         }
-        memcpy(&(ws_header.extend), buffer, EXTEND_WS_HEADER_SIZE);
-        fop = ws_header.extend.fop;
-        info->mask = (ws_header.extend.mlen & 0x80) != 0;
-        info->payload_size = htons(ws_header.extend.elen);
+        memcpy(&(ws_header.u.extend), buffer, EXTEND_WS_HEADER_SIZE);
+        fop = ws_header.u.extend.fop;
+        info->mask = (ws_header.u.extend.mlen & 0x80) != 0;
+        info->payload_size = htons(ws_header.u.extend.elen);
     }
     if (info->mask) {
         info->header_size += MASK_SIZE;
@@ -65,22 +67,22 @@ int parse_ws_header(const uint8_t *buffer, uint16_t size, struct ws_header_info 
     return 0;
 }
 
-uint8_t *build_ws_header(struct ws_header_info *info, void *payload, uint16_t size) {
+uint8_t *build_ws_header(struct ws_header_info *info, uint8_t *payload, uint16_t size) {
     uint8_t fop, *header;
     ws_header ws_header;
     memset(&ws_header, 0, sizeof(ws_header));
     fop = (info->fin ? 0x80 : 0) | ((info->rsv & 0x7) << 4) | (info->op & 0xf);
     if (size < 0x7e) {
-        ws_header.fop = fop;
-        ws_header.mlen = (info->mask ? 0x80 : 0) | (uint8_t) size;
+        ws_header.u.base.fop = fop;
+        ws_header.u.base.mlen = (info->mask ? 0x80 : 0) | (uint8_t) size;
         info->header_size = WS_HEADER_SIZE;
-        header = &(ws_header.fop);
+        header = &(ws_header.u.base.fop);
     } else {
-        ws_header.extend.fop = fop;
-        ws_header.extend.mlen = (info->mask ? 0x80 : 0) | 0x7e;
-        ws_header.extend.elen = ntohs(size);
+        ws_header.u.extend.fop = fop;
+        ws_header.u.extend.mlen = (info->mask ? 0x80 : 0) | 0x7e;
+        ws_header.u.extend.elen = ntohs(size);
         info->header_size = EXTEND_WS_HEADER_SIZE;
-        header = &(ws_header.extend.fop);
+        header = &(ws_header.u.extend.fop);
     }
     if (info->mask) {
         info->header_size += MASK_SIZE;

@@ -72,10 +72,7 @@ struct bev_context_ssl {
     ssize_t send_window;
     size_t recv_window;
     uint64_t total;
-    union {
-        SSL *ssl;
-        SSL *stream;
-    };
+    SSL *ssl;
 };
 
 struct bufferevent_http_stream {
@@ -142,8 +139,8 @@ int init_context_ssl_http3(struct bev_context_ssl *bev_context_ssl, SSL *ssl);
 
 void free_context_ssl_http3(struct bev_context_ssl *bev_context_ssl);
 
-struct event *init_ssl_http3(struct wss_context *wss_context, struct event_base *base, int fd, SSL *ssl);
+struct event *init_ssl_http3(struct wss_context *wss_context, struct event_base *base, evutil_socket_t fd, SSL *ssl);
 
-struct bufferevent *bufferevent_new(struct wss_context *wss_context, struct bufferevent *raw);
+struct bufferevent *bufferevent_wss_new(struct wss_context *wss_context, struct bufferevent *raw);
 
 #endif //WSS_PROXY_WSS_CLIENT_H

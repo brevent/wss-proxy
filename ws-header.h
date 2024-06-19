@@ -64,7 +64,7 @@ int parse_ws_header(const uint8_t *buffer, uint16_t size, struct ws_header_info 
  * @param payload there should be ws header before payload, use MAX_WS_HEADER_SIZE if unsure
  * @return start of the websocket frame
  */
-uint8_t *build_ws_header(struct ws_header_info *info, void *payload, uint16_t payload_size);
+uint8_t *build_ws_header(struct ws_header_info *info, uint8_t *payload, uint16_t payload_size);
 
 void mask(void *buffer, uint16_t size, uint32_t mask_key);
 

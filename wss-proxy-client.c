@@ -3,9 +3,16 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#ifndef _WIN32
 #include <unistd.h>
+#else
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#pragma comment(lib, "Ws2_32.lib")
+#include <windows.h>
+#define strdup _strdup
+#endif
 #include <event2/buffer.h>
-#include <event2/bufferevent_ssl.h>
 #include <event2/listener.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
@@ -67,7 +74,7 @@ static int init_raw_addr(struct sockaddr_storage *sockaddr, int *socklen) {
         return -1;
     }
 
-    set_port(sockaddr, port);
+    set_port(sockaddr, (uint16_t) port);
     LOGI("raw server %s:%d", local_host, port);
     return 0;
 }
@@ -96,7 +103,7 @@ static int init_wss_addr(struct wss_server_info *server) {
         LOGE("remote port %s is unsupported", remote_port);
         return EINVAL;
     }
-    server->port = port;
+    server->port = (uint16_t) port;
 
     if (options != NULL && strchr(options, '\\') != NULL) {
         LOGE("plugin options %s (contains \\) is unsupported", options);
@@ -115,15 +122,15 @@ static int init_wss_addr(struct wss_server_info *server) {
     }
     // tls
     if ((value = find_option(options, "tls", "1")) != NULL) {
-        server->tls = (int) strtol(value, NULL, 10);
+        server->tls = strtol(value, NULL, 10) == 1;
     }
     // http2
     if (find_option(options, "http2", "1")) {
-        server->http2 = 1;
+        server->http2 = strtol(value, NULL, 10) == 1;
     }
     // http3
     if (find_option(options, "http3", "1")) {
-        server->http3 = 1;
+        server->http3 = strtol(value, NULL, 10) == 1;
 #ifndef HAVE_OSSL_QUIC_CLIENT_METHOD
         LOGW("http3 is unsupported");
         return EINVAL;
@@ -136,21 +143,21 @@ static int init_wss_addr(struct wss_server_info *server) {
 
     // mux
     if ((value = find_option(options, "mux", "1")) != NULL) {
-        mux = (int) strtol(value, NULL, 10);
+        mux = strtol(value, NULL, 10) == 1;
     } else {
         mux = 1;
     }
 
     // wss
     if ((value = find_option(options, "ws", "1")) != NULL) {
-        server->ws = (int) strtol(value, NULL, 10);
+        server->ws = strtol(value, NULL, 10) == 1;
     } else {
         server->ws = 1;
     }
 
     // ipv6
     if ((value = find_option(options, "ipv6", "1")) != NULL) {
-        server->ipv6 = (int) strtol(value, NULL, 10);
+        server->ipv6 = strtol(value, NULL, 10) == 1;
     }
 
     // strip
@@ -235,15 +242,15 @@ static size_t build_http_request(struct wss_context *wss_context, int udp, char 
     start = request;
     evutil_secure_rng_get_bytes(key, 16);
     EVP_EncodeBlock(sec_websocket_key, key, 16);
-    request += sprintf(request, "GET %s HTTP/1.1\r\n"
-                                "Host: %s\r\n"
-                                "Upgrade: websocket\r\n"
-                                "Connection: Upgrade\r\n"
-                                "Sec-WebSocket-Key: %s\r\n"
-                                "Sec-WebSocket-Version: 13\r\n"
-                                "User-Agent: %s\r\n",
-                       wss_context->server.path, wss_context->server.host,
-                       sec_websocket_key, wss_context->user_agent);
+    request += snprintf(request, 1024, "GET %s HTTP/1.1\r\n"
+                                       "Host: %s\r\n"
+                                       "Upgrade: websocket\r\n"
+                                       "Connection: Upgrade\r\n"
+                                       "Sec-WebSocket-Key: %s\r\n"
+                                       "Sec-WebSocket-Version: 13\r\n"
+                                       "User-Agent: %s\r\n",
+                        wss_context->server.path, wss_context->server.host,
+                        sec_websocket_key, wss_context->user_agent);
     if (udp) {
         append_buffer(request, X_SOCK_TYPE ": " SOCK_TYPE_UDP "\r\n");
     }
@@ -385,9 +392,9 @@ static size_t build_http_request_v2(struct wss_context *wss_context, int udp, ch
     buffer += HTTP2_HEADER_LENGTH;
 
     // :method = CONNECT
-    buffer = memcpy(buffer, "\x02\x07" "CONNECT", 9) + 9;
+    buffer = (uint8_t *) memcpy(buffer, "\x02\x07" "CONNECT", 9) + 9;
     // :protocol = websocket
-    buffer = memcpy(buffer, "\x00\x09:protocol\x09websocket", 21) + 21;
+    buffer = (uint8_t *) memcpy(buffer, "\x00\x09:protocol\x09websocket", 21) + 21;
     // :scheme = https
     *buffer++ = 0x87;
     // :path = ..., max 127
@@ -397,13 +404,13 @@ static size_t build_http_request_v2(struct wss_context *wss_context, int udp, ch
     buffer += snprintf((char *) buffer, 0x82, "\x01%c%s",
                        (char) MIN(strlen(wss_context->server.host), 0x7f), wss_context->server.host);
     // sec-websocket-version = 13
-    buffer = memcpy(buffer, "\x00\x15sec-websocket-version\x02\x31\x33", 26) + 26;
+    buffer = (uint8_t *) memcpy(buffer, "\x00\x15sec-websocket-version\x02\x31\x33", 26) + 26;
     // user-agent = ..., max 127
     buffer += snprintf((char *) buffer, 0x83, "\x0f\x2b%c%s",
                        (char) MIN(strlen(wss_context->user_agent), 0x7f),
                        wss_context->user_agent);
     if (udp) {
-        buffer = memcpy(buffer, "\x00\x0bx-sock-type\x03udp", 17) + 17;
+        buffer = (uint8_t *) memcpy(buffer, "\x00\x0bx-sock-type\x03udp", 17) + 17;
     }
     header_length = buffer - header - HTTP2_HEADER_LENGTH;
     build_http2_frame(header, header_length, 1, 4, stream_id);
@@ -425,7 +432,7 @@ static struct bufferevent *connect_wss(struct wss_context *wss_context, struct b
     bufferevent_data_cb cb;
     struct timeval tv = {WSS_TIMEOUT, 0};
 
-    tev = bufferevent_new(wss_context, raw);
+    tev = bufferevent_wss_new(wss_context, raw);
     if (!tev) {
         return NULL;
     }
@@ -655,7 +662,15 @@ int main() {
     struct server_context server_context, extra_server_context;
     int socklen, extra_port;
     struct wss_context wss_context;
+#ifdef _WIN32
+    WSADATA wsaData;
 
+    code = WSAStartup(MAKEWORD(2, 2), &wsaData);;
+    if (code != 0) {
+        LOGE("WSAStartup failed with error: %d", code);
+        goto error;
+    }
+#endif
     memset(&wss_context, 0, sizeof(wss_context));
     memset(&server_context, 0, sizeof(server_context));
     memset(&extra_server_context, 0, sizeof(server_context));
@@ -704,9 +719,6 @@ int main() {
     }
     event_config_set_flag(cfg, EVENT_BASE_FLAG_NOLOCK);
     event_config_set_flag(cfg, EVENT_BASE_FLAG_EPOLL_USE_CHANGELIST);
-#ifdef _WIN32
-    event_config_set_flag(cfg, EVENT_BASE_FLAG_STARTUP_IOCP);
-#endif
     base = event_base_new_with_config(cfg);
     if (!base) {
         LOGE("cannot create event base");
@@ -720,7 +732,7 @@ int main() {
     extra_port = find_option_port("extra-listen-port", 0);
     if (extra_port > 0) {
         memcpy(&extra_raw_addr, &raw_addr, socklen);
-        set_port(&extra_raw_addr, extra_port);
+        set_port(&extra_raw_addr, (uint16_t) extra_port);
         if (init_server_context(&extra_server_context, base, &wss_context,
                                 (struct sockaddr *) &extra_raw_addr, socklen)) {
             LOGW("cannot listen to extra port %d", extra_port);
@@ -743,7 +755,11 @@ int main() {
 
     wss_context.base = base;
     LOGI("%s", wss_context.user_agent);
+#ifndef _WIN32
     LOGI("started, pid: %d, ppid: %d", getpid(), getppid());
+#else
+    LOGI("started, pid: %lu", GetCurrentProcessId());
+#endif
 
     event_base_dispatch(base);
 
@@ -779,5 +795,8 @@ error:
         free((char *) wss_context.server.path);
     }
     close_syslog();
+#ifdef _WIN32
+    WSACleanup();
+#endif
     return code;
 }

@@ -3,7 +3,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#ifndef _WIN32
 #include <unistd.h>
+#else
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#pragma comment(lib, "Ws2_32.lib")
+#endif
 #include <event2/buffer.h>
 #include <event2/listener.h>
 #include "common.h"
@@ -21,16 +27,16 @@ struct raw_server_info {
 };
 
 static unsigned long bev_context_udp_hash(const bev_context_udp *a) {
-    return a->sock;
+    return (unsigned long) a->sock;
 }
 
 static int bev_context_udp_cmp(const bev_context_udp *a, const bev_context_udp *b) {
-    return a->sock - b->sock;
+    return (int) (a->sock - b->sock);
 }
 
 static int init_ws_info(const char **addr, int *port) {
     int mux;
-    char *end;
+    char *end = NULL;
     const char *value;
     const char *remote_host = getenv("SS_REMOTE_HOST");
     const char *remote_port = getenv("SS_REMOTE_PORT");
@@ -41,7 +47,7 @@ static int init_ws_info(const char **addr, int *port) {
     }
     *addr = remote_host == NULL ? "127.0.0.1" : remote_host;
     *port = remote_port == NULL ? 0 : (int) strtol(remote_port, &end, 10);
-    if (*port <= 0 || *port > 65535 || *end != '\0') {
+    if (*port <= 0 || *port > 65535 || (end && *end != '\0')) {
         LOGE("remote port %s is not supported", remote_port);
         return EINVAL;
     }
@@ -252,10 +258,10 @@ static void http_request_cb(struct bufferevent *tev, void *ctx) {
     bufferevent_setcb(raw, NULL, NULL, raw_event_cb, tev);
 
     response = request;
-    response += sprintf(response, "HTTP/1.1 101 Switching Protocols\r\n"
-                                  "Upgrade: websocket\r\n"
-                                  "Connection: Upgrade\r\n"
-                                  "Sec-WebSocket-Accept: %s\r\n", sec_websocket_accept);
+    response += snprintf(response, 1024, "HTTP/1.1 101 Switching Protocols\r\n"
+                                         "Upgrade: websocket\r\n"
+                                         "Connection: Upgrade\r\n"
+                                         "Sec-WebSocket-Accept: %s\r\n", sec_websocket_accept);
     ss = strcasestr(request, "\r\n" X_UPGRADE ": " SHADOWSOCKS "\r\n") != NULL;
     if (ss) {
         append_buffer(response, X_UPGRADE ": " SHADOWSOCKS "\r\n");
@@ -312,7 +318,15 @@ int main() {
     int socklen;
     struct evconnlistener *listener = NULL;
     struct raw_server_info raw_server_info;
+#ifdef _WIN32
+    WSADATA wsaData;
 
+    code = WSAStartup(MAKEWORD(2, 2), &wsaData);;
+    if (code != 0) {
+        LOGE("WSAStartup failed with error: %d", code);
+        goto error;
+    }
+#endif
     memset(&raw_server_info, 0, sizeof(raw_server_info));
     if (init_raw_info(&raw_server_info)) {
         goto error;
@@ -323,10 +337,10 @@ int main() {
         LOGE("cannot parse %s", raw_server_info.addr);
         goto error;
     }
-    set_port(&(raw_server_info.sockaddr), raw_server_info.port);
+    set_port(&(raw_server_info.sockaddr), (uint16_t) raw_server_info.port);
     if (raw_server_info.udp_port > 0) {
         memcpy(&(raw_server_info.udp_sockaddr), &(raw_server_info.sockaddr), raw_server_info.socklen);
-        set_port(&(raw_server_info.udp_sockaddr), raw_server_info.udp_port);
+        set_port(&(raw_server_info.udp_sockaddr), (uint16_t) raw_server_info.udp_port);
         raw_server_info.hash = lh_bev_context_udp_new(bev_context_udp_hash, bev_context_udp_cmp);
         if (!raw_server_info.hash) {
             LOGE("cannot create lhash for udp");
@@ -347,9 +361,6 @@ int main() {
     }
     event_config_set_flag(cfg, EVENT_BASE_FLAG_NOLOCK);
     event_config_set_flag(cfg, EVENT_BASE_FLAG_EPOLL_USE_CHANGELIST);
-#ifdef _WIN32
-    event_config_set_flag(cfg, EVENT_BASE_FLAG_STARTUP_IOCP);
-#endif
     base = event_base_new_with_config(cfg);
     if (!base) {
         LOGE("cannot create event base");
@@ -361,7 +372,7 @@ int main() {
         LOGE("cannot parse %s", addr);
         goto error;
     }
-    set_port(&(sockaddr_storage), port);
+    set_port(&(sockaddr_storage), (uint16_t) port);
     listener = evconnlistener_new_bind(base, accept_conn_cb, &raw_server_info,
                                        WSS_LISTEN_FLAGS, WSS_LISTEN_BACKLOG,
                                        (const struct sockaddr *) &(sockaddr_storage), socklen);
@@ -374,8 +385,18 @@ int main() {
         goto error;
     }
 
-    LOGI("wss-proxy-server/%s libevent/%s", WSS_PROXY_VERSION, event_get_version());
+#ifdef OPENSSL_VERSION_STRING
+    LOGI("wss-proxy-server/%s libevent/%s OpenSSL/%s",
+         WSS_PROXY_VERSION, event_get_version(), OpenSSL_version(OPENSSL_VERSION_STRING));
+#else
+    LOGI("wss-proxy-server/%s libevent/%s OpenSSL/%s",
+         WSS_PROXY_VERSION, event_get_version(), OpenSSL_version(OPENSSL_VERSION));
+#endif
+#ifndef _WIN32
     LOGI("started, pid: %d, ppid: %d", getpid(), getppid());
+#else
+    LOGI("started, pid: %lu", GetCurrentProcessId());
+#endif
 
     event_base_dispatch(base);
 
@@ -402,5 +423,8 @@ error:
         event_config_free(cfg);
     }
     close_syslog();
+#ifdef _WIN32
+    WSACleanup();
+#endif
     return code;
 }

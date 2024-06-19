@@ -97,7 +97,7 @@ size_t build_http_request_v3(struct wss_context *wss_context, int udp, char *req
     // :method = CONNECT
     *buffer++ = 0xc0 | 15;
     // :protocol = websocket
-    buffer = memcpy(buffer, "\x27\x02:protocol\x09websocket", 21) + 21;
+    buffer = (uint8_t *) memcpy(buffer, "\x27\x02:protocol\x09websocket", 21) + 21;
     // :scheme = https
     *buffer++ = 0xc0 | 23;
     // :path = ..., max 127
@@ -107,13 +107,13 @@ size_t build_http_request_v3(struct wss_context *wss_context, int udp, char *req
     buffer += snprintf((char *) buffer, 0x82, "\x50%c%s",
                        (char) MIN(strlen(wss_context->server.host), 0x7f), wss_context->server.host);
     // sec-websocket-version = 13
-    buffer = memcpy(buffer, "\x27\x0esec-websocket-version\x02\x31\x33", 26) + 26;
+    buffer = (uint8_t *) memcpy(buffer, "\x27\x0esec-websocket-version\x02\x31\x33", 26) + 26;
     // user-agent = ..., max 127
     buffer += snprintf((char *) buffer, 0x83, "\x5f\x50%c%s",
                        (char) MIN(strlen(wss_context->user_agent), 0x7f),
                        wss_context->user_agent);
     if (udp) {
-        buffer = memcpy(buffer, "\x27\x04x-sock-type\x03udp", 17) + 17;
+        buffer = (uint8_t *) memcpy(buffer, "\x27\x04x-sock-type\x03udp", 17) + 17;
     }
     length = (char *) buffer - request - 3;
     if (length < 64) {
@@ -161,17 +161,17 @@ size_t build_http3_frame(uint8_t *frame, uint8_t type, size_t length) {
     if (length > 0x3fffffff) {
         return 0;
     } else if (length > 0x3fff) {
-        *frame++ = 0xc0 | (length >> 24);
-        *frame++ = length >> 16;
-        *frame++ = length >> 8;
-        *frame = length;
+        *frame++ = 0xc0 | (uint8_t) (length >> 24);
+        *frame++ = (uint8_t) (length >> 16);
+        *frame++ = (uint8_t) (length >> 8);
+        *frame = (uint8_t) length;
         return 5;
     } else if (length > 0x3f) {
-        *frame++ = 0x40 | (length >> 8);
-        *frame = length;
+        *frame++ = 0x40 | (uint8_t) (length >> 8);
+        *frame = (uint8_t) length;
         return 3;
     } else {
-        *frame = length;
+        *frame = (uint8_t) length;
         return 2;
     }
 }
@@ -384,7 +384,7 @@ SSL *init_http3_stream(SSL *ssl, struct sockaddr *sockaddr, uint16_t port) {
     return stream;
 }
 
-struct event *init_ssl_http3(struct wss_context *wss_context, struct event_base *base, int fd, SSL *ssl) {
+struct event *init_ssl_http3(struct wss_context *wss_context, struct event_base *base, evutil_socket_t fd, SSL *ssl) {
     struct event *event;
     if (SSL_set_alpn_protos(ssl, (uint8_t *) "\x02h3", 3)) {
         LOGW("cannot set h3 alpn");
@@ -432,7 +432,7 @@ int init_context_ssl_http3(struct bev_context_ssl *bev_context_ssl, SSL *ssl) {
         return 1;
     }
     bev_context_ssl->http = http3;
-    bev_context_ssl->stream = stream;
+    bev_context_ssl->ssl = stream;
     bev_context_ssl->stream_id = (uint32_t) stream_id;
     bev_context_ssl->frame = evbuffer_new();
     if (!bev_context_ssl->frame) {
@@ -446,7 +446,7 @@ int init_context_ssl_http3(struct bev_context_ssl *bev_context_ssl, SSL *ssl) {
 void free_context_ssl_http3(struct bev_context_ssl *bev_context_ssl) {
     SSL *stream;
 
-    stream = bev_context_ssl->stream;
+    stream = bev_context_ssl->ssl;
     LOGD("conclude stream: %p", stream);
     SSL_stream_conclude(stream, 0);
     SSL_free(stream);
@@ -470,7 +470,7 @@ size_t build_http_request_v3(struct wss_context *wss_context, int udp, char *req
     return 0;
 }
 
-struct event *init_ssl_http3(struct wss_context *wss_context, struct event_base *base, int fd, SSL *ssl) {
+struct event *init_ssl_http3(struct wss_context *wss_context, struct event_base *base, evutil_socket_t fd, SSL *ssl) {
     (void) wss_context;
     (void) base;
     (void) fd;

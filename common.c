@@ -2,10 +2,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <signal.h>
+#ifndef _WIN32
 #include <unistd.h>
 #include <sys/resource.h>
 #ifdef __APPLE__
 #include <sys/sysctl.h>
+#endif
 #endif
 #include <event2/event.h>
 #include <event2/buffer.h>
@@ -49,7 +51,7 @@ void safe_bufferevent_free(struct bufferevent *bev) {
 
 #define bufferevent_free safe_bufferevent_free
 
-static int is_udp(struct bufferevent *bev) {
+static uint8_t is_udp(struct bufferevent *bev) {
     struct bev_context_udp *bev_context_udp;
 
     bev_context_udp = bufferevent_get_context(bev);
@@ -128,10 +130,12 @@ static void check_parent(evutil_socket_t fd, short event, void *arg) {
     (void) fd;
     (void) event;
     (void) arg;
+#ifndef _WIN32
     if (getppid() == 1) {
         LOGE("parent process has been terminated.");
         exit(EXIT_SUCCESS);
     }
+#endif
 }
 
 void log_callback(int severity, const char *msg) {
@@ -249,17 +253,23 @@ static void on_native_signal(int signal) {
         exit(EXIT_SUCCESS);
     }
     switch (signal) {
+#ifdef SIGUSR1
         case SIGUSR1:
             LOGI("received SIGUSR1, change loglevel to debug");
             set_log_level(DEBUG);
             break;
+#endif
+#ifdef SIGUSR2
         case SIGUSR2:
             LOGI("received SIGUSR2, change loglevel to info");
             set_log_level(INFO);
             break;
+#endif
+#ifdef SIGPIPE
         case SIGPIPE:
             LOGD("received SIGPIPE");
             break;
+#endif
         default:
             // Handle unknown signal
             break;
@@ -273,7 +283,9 @@ static void sigquit_cb(evutil_socket_t fd, short event, void *arg) {
 }
 
 int init_event_signal(struct event_base *base, struct event **event_parent, struct event **event_sigquit) {
+#ifdef RLIMIT_NOFILE
     struct rlimit rlimit;
+#endif
     struct timeval one_minute = {60, 0};
     *event_parent = event_new(base, -1, EV_PERSIST, check_parent, NULL);
     if (*event_parent) {
@@ -303,9 +315,16 @@ int init_event_signal(struct event_base *base, struct event **event_parent, stru
 #endif
     signal(SIGINT, on_native_signal);
     signal(SIGTERM, on_native_signal);
+#ifdef SIGUSR1
     signal(SIGUSR1, on_native_signal);
+#endif
+#ifdef SIGUSR2
     signal(SIGUSR2, on_native_signal);
+#endif
+#ifdef SIGPIPE
     signal(SIGPIPE, on_native_signal);
+#endif
+#ifdef SIGQUIT
     *event_sigquit = evsignal_new(base, SIGQUIT, sigquit_cb, base);
     if (!*event_sigquit) {
         LOGE("cannot event sigquit");
@@ -314,6 +333,10 @@ int init_event_signal(struct event_base *base, struct event **event_parent, stru
         event_add(*event_sigquit, NULL);
         return 0;
     }
+#else
+    (void) event_sigquit;
+    return 0;
+#endif
 }
 
 int is_websocket_key(const char *websocket_key) {
@@ -337,7 +360,7 @@ int calc_websocket_accept(const char *websocket_key, char *websocket_accept) {
     return EVP_EncodeBlock((unsigned char *) websocket_accept, sha1, SHA_DIGEST_LENGTH);
 }
 
-static uint8_t *build_ws_frame(enum ws_op op, void *payload, uint16_t size, uint8_t *header_size) {
+static uint8_t *build_ws_frame(enum ws_op op, uint8_t *payload, uint16_t size, uint8_t *header_size) {
     uint8_t *header;
     struct ws_header_info info;
     memset(&info, 0, sizeof(struct ws_header_info));
@@ -359,13 +382,16 @@ static void send_pong(struct evbuffer *src, uint16_t payload_size, uint32_t mask
                       struct bufferevent *tev, enum ws_op op) {
     uint8_t *wss_header, header_size;
     struct wss_frame_pong {
-        char header[MAX_WS_HEADER_SIZE];
-        char buffer[MAX_CONTROL_FRAME_SIZE];
+        uint8_t header[MAX_WS_HEADER_SIZE];
+        uint8_t buffer[MAX_CONTROL_FRAME_SIZE];
     } wss_frame_pong;
-    uint16_t size = 0;
+    ssize_t size = 0;
     if (payload_size > 0) {
         size = evbuffer_copyout(src, wss_frame_pong.buffer, MIN(MAX_CONTROL_FRAME_SIZE, payload_size));
         evbuffer_drain(src, payload_size);
+        if (size < 0) {
+            return;
+        }
     }
 #ifdef WSS_PROXY_CLIENT
     (void) mask_key;
@@ -373,8 +399,8 @@ static void send_pong(struct evbuffer *src, uint16_t payload_size, uint32_t mask
 #ifdef WSS_PROXY_SERVER
     unmask(wss_frame_pong.buffer, (uint16_t) size, mask_key);
 #endif
-    wss_header = build_ws_frame(op, &(wss_frame_pong.buffer), size, &header_size);
-    evbuffer_add(bufferevent_get_output(tev->cbarg), wss_header, size + header_size);
+    wss_header = build_ws_frame(op, wss_frame_pong.buffer, (uint16_t) size, &header_size);
+    evbuffer_add(bufferevent_get_output(tev->cbarg), wss_header, (uint16_t) size + header_size);
 }
 
 static void reply_close(struct evbuffer *src, uint16_t payload_size, uint32_t mask_key, struct bufferevent *tev) {
@@ -397,14 +423,14 @@ static void reply_close(struct evbuffer *src, uint16_t payload_size, uint32_t ma
 void send_ping(struct bufferevent *tev, const char *payload, uint8_t size) {
     uint8_t *wss_header, header_size, payload_size;
     struct wss_frame_ping {
-        char header[MAX_WS_HEADER_SIZE];
-        char buffer[MAX_CONTROL_FRAME_SIZE];
+        uint8_t header[MAX_WS_HEADER_SIZE];
+        uint8_t buffer[MAX_CONTROL_FRAME_SIZE];
     } wss_frame_ping;
     payload_size = size > 0 ? MIN(size, MAX_WS_HEADER_SIZE) : 0;
     if (payload_size > 0) {
         memcpy(wss_frame_ping.buffer, payload, payload_size);
     }
-    wss_header = build_ws_frame(OP_PING, &(wss_frame_ping.buffer), payload_size, &header_size);
+    wss_header = build_ws_frame(OP_PING, wss_frame_ping.buffer, payload_size, &header_size);
     evbuffer_add(bufferevent_get_output(tev), wss_header, payload_size + header_size);
 }
 
@@ -429,7 +455,7 @@ static enum bufferevent_filter_result common_wss_input_filter(struct evbuffer *s
         return BEV_NEED_MORE;
     }
     memset(&info, 0, sizeof(struct ws_header_info));
-    result = parse_ws_header(header, header_size, &info);
+    result = parse_ws_header(header, (uint16_t) header_size, &info);
     if (result < 0) {
         LOGW("payload length 64K+ is unsupported");
         send_close(tev, CLOSE_MESSAGE_TOO_BIG);
@@ -586,11 +612,11 @@ static int send_close(struct bufferevent *tev, uint16_t reason) {
     } else {
         uint8_t *wss_header, header_size;
         struct wss_frame_close {
-            char header[MAX_WS_HEADER_SIZE];
+            uint8_t header[MAX_WS_HEADER_SIZE];
             uint16_t reason;
         } wss_frame_close;
         wss_frame_close.reason = ntohs(reason);
-        wss_header = build_ws_frame(OP_CLOSE, &(wss_frame_close.reason), 2, &header_size);
+        wss_header = build_ws_frame(OP_CLOSE, (uint8_t *) &(wss_frame_close.reason), 2, &header_size);
         evbuffer_add(bufferevent_get_output(tev->cbarg), wss_header, 2 + header_size);
         return 1;
     }
@@ -643,14 +669,9 @@ static void raw_forward_cb(struct bufferevent *raw, void *tev) {
         // should we use continuation fame?
         uint8_t *wss_header, wss_header_size;
         struct wss_frame_data {
-            union {
-                char header[MAX_WS_HEADER_SIZE];
-                struct {
-                    char unused[MAX_WS_HEADER_SIZE - UDP_FRAME_LENGTH_SIZE];
-                    uint16_t length;
-                };
-            };
-            char buffer[MAX_WSS_PAYLOAD_SIZE];
+            uint8_t unused[MAX_WS_HEADER_SIZE - UDP_FRAME_LENGTH_SIZE];
+            uint16_t length;
+            uint8_t buffer[MAX_WSS_PAYLOAD_SIZE];
         } wss_frame_data;
         int size;
         if (!udp) {
@@ -684,7 +705,7 @@ static void raw_forward_cb(struct bufferevent *raw, void *tev) {
             evbuffer_drain(src, udp_frame_size);
             total_size -= udp_frame_size;
         }
-        wss_header = build_ws_frame(OP_BINARY, &(wss_frame_data.buffer), (uint16_t) size, &wss_header_size);
+        wss_header = build_ws_frame(OP_BINARY, wss_frame_data.buffer, (uint16_t) size, &wss_header_size);
         evbuffer_add(dst, wss_header, (uint16_t) size + wss_header_size);
     }
 }
@@ -959,7 +980,7 @@ ssize_t udp_read(evutil_socket_t sock, struct udp_frame *udp_frame, struct socka
         LOGE("udp receive 0 from port %d", get_port(sockaddr));
         return 0;
     } else {
-        udp_frame->length = ntohs(size);
+        udp_frame->length = ntohs((uint16_t) size);
 #ifndef NDEBUG
         LOGD("udp read %d from port %d", (int) size, get_port(sockaddr));
 #endif
@@ -989,5 +1010,26 @@ void ssl_keylog_callback(const SSL *ssl, const char *line) {
         fprintf(keylog_file_fp, "%s\n", line);
         fclose(keylog_file_fp);
     }
+}
+#endif
+
+#ifdef _WIN32
+#define strncasecmp _strnicmp
+// https://android.googlesource.com/platform/bionic/+/refs/heads/main/libc/upstream-openbsd/lib/libc/string/strcasestr.c
+char *strcasestr(const char *s, const char *find) {
+    char c, sc;
+    size_t len;
+    if ((c = *find++) != 0) {
+        c = (char) tolower((unsigned char) c);
+        len = strlen(find);
+        do {
+            do {
+                if ((sc = *s++) == 0)
+                    return (NULL);
+            } while ((char) tolower((unsigned char) sc) != c);
+        } while (strncasecmp(s, find, len) != 0);
+        s--;
+    }
+    return ((char *) s);
 }
 #endif

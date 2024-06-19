@@ -6,7 +6,6 @@
 #include <event2/buffer.h>
 #include <event2/bufferevent.h>
 #include <event2/bufferevent_struct.h>
-#include <event2/http.h>
 #ifdef HAVE_SSL_CTX_SET_KEYLOG_CALLBACK
 #include <openssl/ssl.h>
 #endif
@@ -19,6 +18,10 @@
 #define syslog(x, y, ...) do {} while (0)
 #endif
 #include "ws-header.h"
+
+#ifdef _WIN32
+typedef ev_ssize_t ssize_t;
+#endif
 
 #ifndef WSS_PAYLOAD_SIZE
 #define WSS_PAYLOAD_SIZE 4096
@@ -57,15 +60,20 @@
 #define TIME_FORMAT "%Y-%m-%d %H:%M:%S"
 
 #ifdef HAVE_SYSLOG
-#define DEBUG   LOG_DEBUG
-#define INFO    LOG_INFO
-#define WARN    LOG_WARNING
 #define ERROR   LOG_ERR
+#define WARN    LOG_WARNING
+#define NOTICE  LOG_NOTICE
+#define INFO    LOG_INFO
+#define DEBUG   LOG_DEBUG
 #else
-#define DEBUG   7
-#define INFO    6
-#define WARN    4
+#ifdef ERROR
+#undef ERROR
+#endif
 #define ERROR   3
+#define WARN    (ERROR + 1)
+#define NOTICE  (ERROR + 2)
+#define INFO    (ERROR + 3)
+#define DEBUG   (ERROR + 4)
 #endif
 
 #define MAX_UDP_FRAME_SIZE 65535
@@ -214,6 +222,10 @@ void bev_context_udp_writecb(evutil_socket_t fd, short event, void *arg);
 
 #ifdef HAVE_SSL_CTX_SET_KEYLOG_CALLBACK
 void ssl_keylog_callback(const SSL *ssl, const char *line);
+#endif
+
+#ifdef _WIN32
+char *strcasestr(const char *s, const char *find);
 #endif
 
 #endif //WSS_PROXY_COMMON_H

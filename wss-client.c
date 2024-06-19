@@ -1,9 +1,13 @@
 #include <string.h>
+#ifndef _WIN32
+#include <arpa/inet.h>
+#else
+#include <winsock2.h>
+#endif
+#include <signal.h>
 #include <event2/event.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
-#include <arpa/inet.h>
-#include <signal.h>
 #include <openssl/rand.h>
 #include "wss-client.h"
 #include "common.h"
@@ -77,7 +81,7 @@ size_t build_http2_frame(uint8_t *buffer, size_t length, uint8_t type, uint8_t f
     if (length > 0xffffff) {
         return 0;
     }
-    *(uint32_t *) buffer = htonl(length << 8 | type);
+    *(uint32_t *) buffer = htonl((uint32_t) (length << 8 | type));
     buffer += 4;
     *buffer++ = flags;
     *(uint32_t *) buffer = htonl(stream_id);
@@ -98,6 +102,8 @@ static ssize_t check_ssl_error(struct bev_context_ssl *bev_context_ssl, enum ssl
         case ssl_write:
             s = "write";
             break;
+        default:
+            return WSS_ERROR;
     }
     switch (code) {
         case SSL_ERROR_ZERO_RETURN:
@@ -177,17 +183,18 @@ start:
     }
 
     for (ai = res; ai; ai = ai->ai_next) {
-        int sock, ret;
+        evutil_socket_t sock;
+        int ret;
         sock = socket(ai->ai_family, SOCK_DGRAM, IPPROTO_UDP);
         if (sock < 0) {
             continue;
         }
-        ret = connect(sock, ai->ai_addr, ai->ai_addrlen);
+        ret = connect(sock, ai->ai_addr, (socklen_t) ai->ai_addrlen);
         evutil_closesocket(sock);
         if (ret < 0) {
             continue;
         }
-        *socklen = ai->ai_addrlen;
+        *socklen = (socklen_t) ai->ai_addrlen;
         memcpy(sockaddr, ai->ai_addr, ai->ai_addrlen);
         evutil_freeaddrinfo(res);
         return 0;
@@ -205,6 +212,7 @@ start:
     return -1;
 }
 
+#ifdef SIGHUP
 static void sighup_cb(evutil_socket_t fd, short event, void *context) {
     struct wss_context *wss_context;
     (void) fd;
@@ -214,8 +222,9 @@ static void sighup_cb(evutil_socket_t fd, short event, void *context) {
     wss_context = context;
     wss_context->mock_ssl_timeout = 1;
 }
+#endif
 
-static SSL *init_ssl(struct wss_context *wss_context, struct event_base *base, int fd) {
+static SSL *init_ssl(struct wss_context *wss_context, struct event_base *base, evutil_socket_t fd) {
     SSL *ssl;
     struct event *event = NULL;
 
@@ -225,7 +234,13 @@ static SSL *init_ssl(struct wss_context *wss_context, struct event_base *base, i
         return NULL;
     }
     SSL_set_connect_state(ssl);
-    if (SSL_set_fd(ssl, fd) <= 0) {
+#ifdef _WIN32
+    if (fd > INT_MAX) {
+        LOGW("fd %zu is too large", fd);
+        goto error;
+    }
+#endif
+    if (SSL_set_fd(ssl, (int) fd) <= 0) {
         LOGW("cannot set fd to ssl");
         goto error;
     }
@@ -275,12 +290,14 @@ static SSL *init_ssl(struct wss_context *wss_context, struct event_base *base, i
         event_add(event, NULL);
     }
     if (wss_context->server.http2 || wss_context->server.http3) {
+#ifdef SIGHUP
         if (!wss_context->event_sighup) {
             wss_context->event_sighup = evsignal_new(base, SIGHUP, sighup_cb, wss_context);
             if (wss_context->event_sighup) {
                 event_add(wss_context->event_sighup, NULL);
             }
         }
+#endif
         wss_context->http_streams_count = 0;
         wss_context->http_streams = lh_bufferevent_http_stream_new(bufferevent_http_stream_hash,
                                                                    bufferevent_http_stream_cmp);
@@ -388,14 +405,16 @@ static void handle_http2_frame(struct bufferevent *bev, struct http2_frame *http
         if (bev_context_ssl->recv_window < MAX_WINDOW_SIZE / 4) {
             LOGD("stream %u recv window %zu", bev_context_ssl->stream_id, bev_context_ssl->recv_window);
             build_http2_frame(header, 4, 8, 0, bev_context_ssl->stream_id);
-            *((uint32_t *) (header + HTTP2_HEADER_LENGTH)) = htonl(MAX_WINDOW_SIZE - bev_context_ssl->recv_window);
+            delta = MAX_WINDOW_SIZE - (uint32_t) bev_context_ssl->recv_window;
+            *((uint32_t *) (header + HTTP2_HEADER_LENGTH)) = htonl(delta);
             bev_context_ssl->recv_window = MAX_WINDOW_SIZE;
             evbuffer_add(bev_context_ssl->wss_context->output, header, HTTP2_HEADER_LENGTH + 4);
         }
         if (wss_context->recv_window < MAX_WINDOW_SIZE / 4) {
             LOGD("connection recv window %zu", wss_context->recv_window);
             build_http2_frame(header, 4, 8, 0, 0);
-            *((uint32_t *) (header + HTTP2_HEADER_LENGTH)) = htonl(MAX_WINDOW_SIZE - wss_context->recv_window);
+            delta = MAX_WINDOW_SIZE - (uint32_t) wss_context->recv_window;
+            *((uint32_t *) (header + HTTP2_HEADER_LENGTH)) = htonl(delta);
             wss_context->recv_window = MAX_WINDOW_SIZE;
             evbuffer_add(bev_context_ssl->wss_context->output, header, HTTP2_HEADER_LENGTH + 4);
         }
@@ -585,7 +604,7 @@ static ssize_t parse_http2(struct wss_context *wss_context, uint8_t *buffer, siz
         if (http2_frame.stream_id & 1) {
             check_http2_stream(wss_context, &http2_frame);
         } else {
-            check_http2_control(wss_context, http2_frame.type, header, MIN(42, http2_frame.length));
+            check_http2_control(wss_context, http2_frame.type, header, (uint8_t) MIN(42, http2_frame.length));
             evbuffer_drain(wss_context->input, http2_frame.length + HTTP2_HEADER_LENGTH);
         }
         if (evbuffer_get_length(wss_context->input) == 0) {
@@ -628,6 +647,9 @@ static ssize_t do_ssl_read(struct bev_context_ssl *bev_context_ssl, struct buffe
         } else if (bev_context_ssl->http == http1 && bev) {
             evbuffer_add(bev->input, frame, size);
             res = (ssize_t) size;
+        } else {
+            LOGW("unsupported http type %d", bev_context_ssl->http);
+            res = WSS_ERROR;
         }
         if (res > 0) {
             return (ssize_t) total;
@@ -739,7 +761,7 @@ static ssize_t do_read(struct bufferevent *bev, evutil_socket_t fd) {
     if (bev_context_ssl) {
         return do_ssl_read(bev_context_ssl, bev);
     } else if (fd > 0) {
-        res = check_socket_error(recv(fd, buffer, sizeof(buffer), 0), fd);
+        res = check_socket_error(recv(fd, (char *) &buffer, sizeof(buffer), 0), fd);
         if (res > 0) {
             evbuffer_add(bev->input, buffer, res);
         }
@@ -757,7 +779,7 @@ static ssize_t do_write(struct bufferevent *bev, evutil_socket_t fd, uint8_t *bu
     if (bev_context_ssl != NULL) {
         return do_ssl_write(bev_context_ssl, buffer, size);
     } else {
-        return check_socket_error(send(fd, buffer, size, 0), fd);
+        return check_socket_error(send(fd, (const char *) buffer, (int) size, 0), fd);
     }
 }
 
@@ -1008,7 +1030,7 @@ static enum status is_ssl_connected(struct bev_context_ssl *bev_context_ssl, evu
     }
     len = sizeof(err);
     if (getsockopt(fd, SOL_SOCKET, SO_ERROR, (void *) &err, &len) < 0) {
-        err = evutil_socket_geterror(sock);
+        err = evutil_socket_geterror(fd);
         LOGW("cannot getsockopt: %s", evutil_socket_error_to_string(err));
         return error;
     }
@@ -1129,9 +1151,10 @@ done:
     return;
 }
 
-static int init_ssl_sock(struct wss_context *wss_context, struct event_base *base, SSL **ssl1) {
-    int sock = -1, socket_error;
-    SSL *ssl;
+static evutil_socket_t init_ssl_sock(struct wss_context *wss_context, struct event_base *base, SSL **ssl1) {
+    evutil_socket_t sock = -1;
+    int socket_error;
+    SSL *ssl = NULL;
     socklen_t socklen;
     struct sockaddr_storage sockaddr;
 
@@ -1249,8 +1272,8 @@ error:
     return NULL;
 }
 
-struct bufferevent *bufferevent_new(struct wss_context *wss_context, struct bufferevent *raw) {
-    int sock;
+struct bufferevent *bufferevent_wss_new(struct wss_context *wss_context, struct bufferevent *raw) {
+    evutil_socket_t sock;
     SSL *ssl = NULL;
     struct event_base *base;
     struct bufferevent *tev;
@@ -1309,7 +1332,7 @@ start:
                  lh_bufferevent_http_stream_num_items(wss_context->http_streams));
         }
     }
-    LOGD("bufferevent_new, tev: %p, raw: %p", tev, raw);
+    LOGD("bufferevent_wss_new, tev: %p, raw: %p", tev, raw);
 
     return tev;
 error:
