@@ -23,6 +23,9 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+      with:
+        fetch-depth: 10
+        fetch-tags: true
 
     - name: Export GitHub Actions cache environment variables
       if: ${{ startsWith(matrix.os, 'windows') }}
@@ -38,15 +41,15 @@ jobs:
 
     - name: Install libevent and openssl on macos
       if: ${{ startsWith(matrix.os, 'macos') }}
-      run: brew install libevent
+      run: brew list libevent &>/dev/null && brew uses --installed libevent || brew install libevent
 
     - name: Install libevent and openssl on windows
       if: ${{ startsWith(matrix.os, 'windows') }}
-      shell: bash
       run: |
-        cp .github/vcpkg/${{matrix.os}}.json vcpkg.json
+        openssl version -a
+        copy .github\vcpkg\${{matrix.os}}.json vcpkg.json
         vcpkg install --triplet x64-windows-static
-
+        openssl version -a
 
     - name: Configure CMake on ubuntu and macos
       if: ${{ startsWith(matrix.os, 'ubuntu') || startsWith(matrix.os, 'macos') }}
@@ -75,6 +78,8 @@ jobs:
         cp -v build/${{env.BUILD_TYPE}}/wss-proxy*.exe build/
 
     - name: Test
+      env:
+        SECRET_REMOTE_IP: ${{ secrets.SECRET_REMOTE_IP }}
       working-directory: ${{github.workspace}}/build
       run: ctest -C ${{env.BUILD_TYPE}} -V
 
