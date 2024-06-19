@@ -1,0 +1,19 @@
+{
+  "builtin-baseline": "4065f37d0a6628ef17cf6ee15385f9091f1075bc",
+  "dependencies": [
+    {
+      "default-features": false,
+      "name": "libevent"
+    },
+    {
+      "default-features": false,
+      "name": "openssl"
+    }
+  ],
+  "overrides": [
+    {
+      "name": "libevent",
+      "version": "2.1.12#7"
+    }
+  ]
+}
