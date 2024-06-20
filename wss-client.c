@@ -640,16 +640,24 @@ static ssize_t do_ssl_read(struct bev_context_ssl *bev_context_ssl, struct buffe
         if (bev_context_ssl->wss_context) {
             bev_context_ssl->wss_context->timeout.tv_sec = 0;
         }
-        if (bev_context_ssl->http == http3 && bev) {
+        if (bev_context_ssl->http == http3) {
+            if (!bev) {
+                LOGW("http3 no bev");
+                return WSS_ERROR;
+            }
             res = parse_http3(bev, frame, size);
         } else if (bev_context_ssl->http == http2) {
             res = parse_http2(bev_context_ssl->wss_context, frame, size);
-        } else if (bev_context_ssl->http == http1 && bev) {
+        } else if (bev_context_ssl->http == http1) {
+            if (!bev) {
+                LOGW("http1 no bev");
+                return WSS_ERROR;
+            }
             evbuffer_add(bev->input, frame, size);
             res = (ssize_t) size;
         } else {
             LOGW("unsupported http type %d", bev_context_ssl->http);
-            res = WSS_ERROR;
+            return WSS_ERROR;
         }
         if (res > 0) {
             return (ssize_t) total;
