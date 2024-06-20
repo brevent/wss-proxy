@@ -63,7 +63,7 @@ struct wss_context {
 struct bev_context_ssl {
     const struct bev_context *bev_context;
     struct wss_context *wss_context;
-    enum http http: 2;
+    enum http http;
     uint8_t upgrade: 1;
     uint8_t connected: 1;
     struct evbuffer *frame;

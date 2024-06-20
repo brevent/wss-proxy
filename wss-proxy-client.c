@@ -668,7 +668,7 @@ int main() {
     code = WSAStartup(MAKEWORD(2, 2), &wsaData);;
     if (code != 0) {
         LOGE("WSAStartup failed with error: %d", code);
-        goto error;
+        return 1;
     }
 #endif
     memset(&wss_context, 0, sizeof(wss_context));
