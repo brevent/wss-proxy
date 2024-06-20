@@ -166,16 +166,19 @@ static int update_socket_flag(evutil_socket_t sock) {
 static int get_sockaddr(struct wss_context *wss_context, struct sockaddr *sockaddr,
                         socklen_t *socklen) {
     char port[6];
+    uint8_t ipv6;
     struct evutil_addrinfo hints, *res, *ai;
 
+    ipv6 = wss_context->server.ipv6;
+    snprintf(port, sizeof(port), "%d", wss_context->server.port);
 start:
     memset(&hints, 0, sizeof(hints));
-    hints.ai_family = wss_context->server.ipv6 ? AF_INET6 : AF_UNSPEC;
+    hints.ai_family = ipv6 ? AF_INET6 : AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
-    snprintf(port, sizeof(port), "%d", wss_context->server.port);
     if (evutil_getaddrinfo(wss_context->server.addr, port, &hints, &res) < 0) {
-        if (wss_context->server.ipv6) {
-            wss_context->server.ipv6 = 0;
+        if (ipv6) {
+            LOGD("cannot resolve6 %s", wss_context->server.addr);
+            ipv6 = 0;
             goto start;
         }
         LOGW("cannot resolve %s", wss_context->server.addr);
@@ -203,9 +206,9 @@ start:
     if (res) {
         evutil_freeaddrinfo(res);
     }
-    if (wss_context->server.ipv6) {
-        LOGW("cannot connect6 to %s, remove ipv6 option", wss_context->server.addr);
-        wss_context->server.ipv6 = 0;
+    if (ipv6) {
+        LOGD("cannot connect6 to %s", wss_context->server.addr);
+        ipv6 = 0;
         goto start;
     }
     LOGW("cannot connect to %s", wss_context->server.addr);
@@ -1178,7 +1181,7 @@ static evutil_socket_t init_ssl_sock(struct wss_context *wss_context, struct eve
         goto error;
     }
 
-    sock = socket(wss_context->server.ipv6 ? AF_INET6 : AF_INET,
+    sock = socket(sockaddr.ss_family,
                   wss_context->server.http3 ? SOCK_DGRAM : SOCK_STREAM,
                   wss_context->server.http3 ? IPPROTO_UDP : IPPROTO_TCP);
     if (sock < 0) {
