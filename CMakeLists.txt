@@ -9,7 +9,7 @@ project(wss-proxy C)
 find_package(Git)
 if(GIT_FOUND)
     execute_process(
-        COMMAND ${GIT_EXECUTABLE} describe --tags --always --dirty
+        COMMAND ${GIT_EXECUTABLE} describe --tags --always --dirty --long
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
         RESULT_VARIABLE GIT_DESCRIBE_RESULT
         OUTPUT_VARIABLE GIT_DESCRIBE_OUTPUT
@@ -17,6 +17,7 @@ if(GIT_FOUND)
     )
     if (NOT ${GIT_DESCRIBE_RESULT})
         string(REGEX REPLACE "^v" "" GIT_DESCRIBE_OUTPUT "${GIT_DESCRIBE_OUTPUT}")
+        string(REGEX REPLACE "-0-" "-" GIT_DESCRIBE_OUTPUT "${GIT_DESCRIBE_OUTPUT}")
         add_definitions(-DWSS_PROXY_VERSION="${GIT_DESCRIBE_OUTPUT}")
     endif()
 endif()
