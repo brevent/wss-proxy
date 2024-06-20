@@ -276,8 +276,11 @@ static void http_request_cb(struct bufferevent *tev, void *ctx) {
     }
     return;
 error:
-    bufferevent_write(tev, "HTTP/1.1 400 Bad Request\r\n\r\n", sizeof("400 Bad Request\r\n\r\n") - 1);
-    bufferevent_free(tev);
+    response = request;
+    append_buffer(response, "HTTP/1.1 400 Bad Request\r\n");
+    append_buffer(response, "Content-Length: 0\r\n");
+    append_buffer(response, "\r\n");
+    bufferevent_write(tev, request, response - request);
 }
 
 static void client_event_cb(struct bufferevent *tev, short event, void *ctx) {
