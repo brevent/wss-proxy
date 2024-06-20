@@ -125,11 +125,11 @@ static int init_wss_addr(struct wss_server_info *server) {
         server->tls = strtol(value, NULL, 10) == 1;
     }
     // http2
-    if (find_option(options, "http2", "1")) {
+    if ((value = find_option(options, "http2", "1")) != NULL) {
         server->http2 = strtol(value, NULL, 10) == 1;
     }
     // http3
-    if (find_option(options, "http3", "1")) {
+    if ((value = find_option(options, "http3", "1")) != NULL) {
         server->http3 = strtol(value, NULL, 10) == 1;
 #ifndef HAVE_OSSL_QUIC_CLIENT_METHOD
         LOGW("http3 is unsupported");
