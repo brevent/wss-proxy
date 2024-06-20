@@ -42,7 +42,7 @@ typedef ev_ssize_t ssize_t;
 #define WSS_LISTEN_FLAGS (LEV_OPT_CLOSE_ON_FREE | LEV_OPT_CLOSE_ON_EXEC | LEV_OPT_REUSEABLE)
 
 #ifndef WSS_PROXY_VERSION
-#define WSS_PROXY_VERSION "0.5.1"
+#define WSS_PROXY_VERSION "0.5.2"
 #endif
 
 #ifndef LOGGER_NAME
