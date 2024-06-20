@@ -653,6 +653,40 @@ error:
     return 1;
 }
 
+#ifdef _WIN32
+static void add_cert_for_store(X509_STORE *store, const char *name, size_t *count) {
+    HCERTSTORE hStore;
+    PCCERT_CONTEXT pContext = NULL;
+
+    hStore = CertOpenSystemStoreA(0, name);
+    if (!hStore) {
+        return;
+    }
+    for (;;) {
+        X509 *x509;
+        const unsigned char *encoded_cert;
+        pContext = CertEnumCertificatesInStore(hStore, pContext);
+        if (!pContext) {
+            break;
+        }
+        encoded_cert = (const unsigned char *) pContext->pbCertEncoded;
+        if (!encoded_cert) {
+            continue;
+        }
+        x509 = d2i_X509(NULL, &encoded_cert, pContext->cbCertEncoded);
+        if (!x509) {
+            continue;
+        }
+        if (X509_STORE_add_cert(store, x509)) {
+            (*count)++;
+        }
+        X509_free(x509);
+    }
+    CertFreeCertificateContext(pContext);
+    CertCloseStore(hStore, 0);
+}
+#endif
+
 int main() {
     int code = 1;
     struct event_base *base = NULL;
@@ -692,10 +726,24 @@ int main() {
         SSL_CTX_set_verify(wss_context.ssl_ctx,
                            strcmp(wss_context.server.host, "localhost") == 0 ? SSL_VERIFY_NONE : SSL_VERIFY_PEER,
                            NULL);
+#ifdef _WIN32
+        {
+            size_t count = 0;
+            X509_STORE *store = SSL_CTX_get_cert_store(wss_context.ssl_ctx);
+            add_cert_for_store(store, "ROOT", &count);
+            add_cert_for_store(store, "CA", &count);
+            if (!count) {
+                LOGW("cannot add trusted certificate store");
+            } else {
+                LOGI("added %zu certs", count);
+            }
+        }
+#else
         if (!SSL_CTX_set_default_verify_paths(wss_context.ssl_ctx)) {
             LOGE("cannot set default trusted certificate store");
             goto error;
         }
+#endif
         if (!wss_context.server.http3
             && !SSL_CTX_set_min_proto_version(wss_context.ssl_ctx, TLS1_2_VERSION)) {
             LOGE("cannot set minimum TLS to 1.2");

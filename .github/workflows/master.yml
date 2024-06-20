@@ -46,10 +46,8 @@ jobs:
     - name: Install libevent and openssl on windows
       if: ${{ startsWith(matrix.os, 'windows') }}
       run: |
-        openssl version -a
         copy .github\vcpkg\${{matrix.os}}.json vcpkg.json
         vcpkg install --triplet x64-windows-static
-        openssl version -a
 
     - name: Configure CMake on ubuntu and macos
       if: ${{ startsWith(matrix.os, 'ubuntu') || startsWith(matrix.os, 'macos') }}
