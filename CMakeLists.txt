@@ -70,7 +70,7 @@ unset(CMAKE_REQUIRED_LIBRARIES)
 
 find_package(PkgConfig QUIET)
 if (PkgConfig_FOUND)
-    pkg_check_modules(LIBEVENT_CORE QUIET libevent_core>=2.1.1)
+    pkg_check_modules(LIBEVENT_CORE libevent_core>=2.1.1)
     if (LIBEVENT_CORE_FOUND)
         set(EVENT_CORE ${LIBEVENT_CORE_LINK_LIBRARIES})
         include_directories(${LIBEVENT_CORE_INCLUDE_DIRS})
