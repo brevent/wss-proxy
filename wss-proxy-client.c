@@ -689,7 +689,9 @@ int main() {
             LOGE("cannot create ssl bev_context");
             goto error;
         }
-        SSL_CTX_set_verify(wss_context.ssl_ctx, SSL_VERIFY_PEER, NULL);
+        SSL_CTX_set_verify(wss_context.ssl_ctx,
+                           strcmp(wss_context.server.host, "localhost") == 0 ? SSL_VERIFY_NONE : SSL_VERIFY_PEER,
+                           NULL);
         if (!SSL_CTX_set_default_verify_paths(wss_context.ssl_ctx)) {
             LOGE("cannot set default trusted certificate store");
             goto error;
