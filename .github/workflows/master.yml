@@ -47,9 +47,10 @@ jobs:
       if: ${{ startsWith(matrix.os, 'windows') }}
       shell: bash
       run: |
+        which openssl && openssl version -a
         cp .github/vcpkg/${{matrix.os}}.json vcpkg.json
         vcpkg install --triplet x64-windows-static
-
+        which openssl && openssl version -a
 
     - name: Configure CMake on ubuntu and macos
       if: ${{ startsWith(matrix.os, 'ubuntu') || startsWith(matrix.os, 'macos') }}
