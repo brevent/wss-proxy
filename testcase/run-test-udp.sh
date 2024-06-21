@@ -34,20 +34,32 @@ $ssserver -c ../testcase/sip003u-server.json &
 spid=$!
 sleep 1
 
+if sed --version >/dev/null 2>&1; then
+    sedi() { sed -i "$@"; }
+else
+    sedi() { sed -i '' "$@"; }
+fi
+function update_tls_server() {
+    sedi -e "s|\"server\":.*|\"server\": \"$1\",|g" ../testcase/sip003u-client-{tls,http2,http3}.json
+}
+
 function cleanup() {
-    kill $echo_server_pid $lpid $lpid2 $lpid3 $lpid4 $lpid5 $spid
-    if which docker >/dev/null 2>&1 && docker version | grep -i linux/amd64; then
+    echo $echo_server_pid "$lpid" "$lpid2" "$lpid3" "$lpid4" "$lpid5" $spid | xargs echo | xargs kill
+    if which docker >/dev/null 2>&1 && docker version 2>/dev/null | grep -i linux/amd64; then
         docker ps | grep -F ':9999->443/udp' | awk '{print $1}' | xargs docker stop
+    else
+        :
     fi
-    sed -i"" -e "s|\"server\":.*|\"server\": \"127.0.0.1\",|g" ../testcase/sip003u-client-tls.json ../testcase/sip003u-client-http2.json ../testcase/sip003u-client-http3.json
+    update_tls_server 127.0.0.1
 }
 
 function check() {
+    port="$1"
     for _ in 1 2 3; do
-        if ! curl -q -s -x socks5h://127.0.0.1:$1 https://www.cloudflare.com/cdn-cgi/trace; then
+        if ! curl -q -s -x socks5h://127.0.0.1:"$port" https://www.cloudflare.com/cdn-cgi/trace; then
             exit 1
         fi
-        if ! $python3 ../testcase/check-udp.py $1; then
+        if ! $python3 ../testcase/check-udp.py "$port"; then
             exit 1
         fi
     done
@@ -67,7 +79,7 @@ lpid2=$!
 sleep 1
 check 1082
 
-if which docker >/dev/null 2>&1 && docker version | grep -i linux/amd64; then
+if which docker >/dev/null 2>&1 && docker version 2>/dev/null | grep -i linux/amd64; then
     if [ ! -f ../testcase/nginx/pcre2-10.23-2.el7.x86_64.rpm ]; then
         if ! curl -q -s https://vault.centos.org/7.9.2009/os/x86_64/Packages/pcre2-10.23-2.el7.x86_64.rpm -o ../testcase/nginx/pcre2-10.23-2.el7.x86_64.rpm; then
             echo "cannot download pcre"
@@ -80,7 +92,7 @@ if which docker >/dev/null 2>&1 && docker version | grep -i linux/amd64; then
             exit 0
         fi
     fi
-    docker run -d --rm --add-host=host.docker.internal:host-gateway -p 9999:443 -p 9999:443/udp -v $PWD/../testcase/nginx:/tmp/nginx centos:7.9.2009 \
+    docker run -d --rm --add-host=host.docker.internal:host-gateway -p 9999:443 -p 9999:443/udp -v "$PWD"/../testcase/nginx:/tmp/nginx centos:7.9.2009 \
         bash -c "yum install -y /tmp/nginx/*.rpm; cp /tmp/nginx/localhost.* /etc/nginx/conf.d/; nginx -g 'daemon off;'"
 
     for _ in $(seq 1 60); do
@@ -97,7 +109,7 @@ else
     if ! curl -q -s -v -k --connect-timeout 5 https://"$remote":9999/ok; then
         exit 0
     fi
-    sed -i"" -e "s|\"server\":.*|\"server\": \"$remote\",|g" ../testcase/sip003u-client-tls.json ../testcase/sip003u-client-http2.json ../testcase/sip003u-client-http3.json
+    update_tls_server "$remote"
 fi
 
 echo wss-proxy client - tls
