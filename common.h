@@ -11,9 +11,7 @@
 #ifdef HAVE_SSL_CTX_SET_KEYLOG_CALLBACK
 #include <openssl/ssl.h>
 #endif
-#ifdef WSS_PROXY_CLIENT
 #include <openssl/lhash.h>
-#endif
 #ifdef HAVE_SYSLOG
 #include <syslog.h>
 #else
