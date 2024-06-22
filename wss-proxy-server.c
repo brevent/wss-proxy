@@ -184,6 +184,8 @@ static struct bufferevent *init_udp_client(struct event_base *base, struct raw_s
         LOGE("cannot create udp bufferevent");
         goto error;
     }
+    evbuffer_unfreeze(raw->input, 0);
+    evbuffer_unfreeze(raw->output, 1);
     bufferevent_disable(raw, EV_READ | EV_WRITE);
     bufferevent_setfd(raw, sock);
     event_assign(&(raw->ev_write), base, sock, EV_WRITE | EV_PERSIST, bev_context_udp_writecb, raw);

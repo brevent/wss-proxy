@@ -11,7 +11,6 @@
 #endif
 #include <event2/event.h>
 #include <event2/buffer.h>
-#include <event2/http.h>
 #include <openssl/sha.h>
 #include <openssl/evp.h>
 #ifdef WSS_PROXY_CLIENT
@@ -604,6 +603,30 @@ static void close_wss_event_cb(struct bufferevent *tev, short event, void *arg) 
     do_close_wss(tev);
 }
 
+static void close_bev_event_cb(evutil_socket_t fd, short event, void *arg) {
+    (void) fd;
+    LOGD("close bev %p in event: 0x%02x", arg, event);
+    do_close_wss(arg);
+}
+
+void close_bufferevent_later(struct bufferevent *tev) {
+    struct event *event;
+    evutil_socket_t sock;
+    struct timeval tv = {1, 0};
+
+    event = &(tev->ev_read);
+    sock = event_get_fd(event);
+    if (sock > 0) {
+        event_del(event);
+        event_assign(event, tev->ev_base, sock, EV_READ | EV_PERSIST, close_bev_event_cb, tev);
+        event_add(event, &tv);
+    } else {
+        bufferevent_set_timeouts(tev, &tv, NULL);
+        bufferevent_setcb(tev, close_wss_data_cb, NULL, close_wss_event_cb, NULL);
+        bufferevent_enable(tev, EV_READ);
+    }
+}
+
 static int send_close(struct bufferevent *tev, uint16_t reason) {
     struct bufferevent *wev = tev->cbarg;
     if (wev == NULL) {
@@ -624,7 +647,6 @@ static int send_close(struct bufferevent *tev, uint16_t reason) {
 
 void close_wss(struct bufferevent *tev, enum close_reason close_reason, short event) {
     int close_later;
-    struct timeval tv = {1, 0};
     struct bufferevent *wev;
 
     if (close_reason == close_reason_raw) {
@@ -642,9 +664,7 @@ void close_wss(struct bufferevent *tev, enum close_reason close_reason, short ev
     wev = tev->cbarg;
     if (close_later) {
         LOGD("close wss %p later", tev);
-        bufferevent_set_timeouts(tev, &tv, NULL);
-        bufferevent_setcb(tev, close_wss_data_cb, NULL, close_wss_event_cb, NULL);
-        bufferevent_enable(tev, EV_READ);
+        close_bufferevent_later(tev);
         if (wev) {
             close_wev(wev, tev);
         }

@@ -817,7 +817,7 @@ static void free_all_http_streams(struct wss_context *wss_context) {
         event_del(SSL_get_app_data(wss_context->ssl));
     }
     if (wss_context->event_mux) {
-        event_remove_timer(wss_context->event_mux);
+        event_del(wss_context->event_mux);
     }
     if (wss_context->http_streams) {
         count = lh_bufferevent_http_stream_num_items(wss_context->http_streams);
@@ -1114,6 +1114,7 @@ static void bufferevent_writecb(evutil_socket_t fd, short event, void *arg) {
         }
         size = evbuffer_copyout(output, buffer, sizeof(buffer));
         if (size <= 0) {
+            LOGE("bufferevent_writecb cannot copy buffer");
             what |= BEV_EVENT_ERROR;
             goto error;
         }
@@ -1306,12 +1307,17 @@ start:
         LOGW("cannot create bufferevent socket");
         return NULL;
     }
+    evbuffer_unfreeze(tev->input, 0);
+    evbuffer_unfreeze(tev->output, 1);
     sock = init_ssl_sock(wss_context, base, &ssl);
     if (sock < 0) {
         goto error;
     }
     bufferevent_disable(tev, EV_READ | EV_WRITE);
     bufferevent_setfd(tev, sock);
+#ifndef EV_FINALIZE
+#define EV_FINALIZE 0x40
+#endif
     event_assign(&tev->ev_read, tev->ev_base,
                  (wss_context->server.http2 || wss_context->server.http3) ? -1 : sock,
                  EV_READ | EV_PERSIST | EV_FINALIZE, bufferevent_readcb, tev);

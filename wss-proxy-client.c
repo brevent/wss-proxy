@@ -231,7 +231,7 @@ static void http_response_cb(struct bufferevent *tev, void *raw) {
         buffer[0xc] = '\0';
         LOGE("wss fail for peer %d, status: %s", get_peer_port(raw), &buffer[9]);
         bufferevent_free(raw);
-        bufferevent_free(tev);
+        close_bufferevent_later(tev);
     }
 }
 
@@ -378,7 +378,7 @@ static void http_response_cb_v2(struct bufferevent *tev, void *raw) {
     return;
 error:
     bufferevent_free(raw);
-    bufferevent_free(tev);
+    close_bufferevent_later(tev);
 }
 
 static size_t build_http_request_v2(struct wss_context *wss_context, int udp, char *request, uint32_t stream_id) {
@@ -473,6 +473,8 @@ static void accept_conn_cb(struct evconnlistener *listener, evutil_socket_t fd,
     if (!raw) {
         goto error;
     }
+    evbuffer_unfreeze(raw->input, 0);
+    evbuffer_unfreeze(raw->output, 1);
     port = get_port(address);
     LOGD("new connection from %d", port);
     if (!connect_wss(ctx, raw, 0)) {
@@ -543,6 +545,8 @@ static struct bufferevent *init_udp_raw(struct bev_context_udp *bev_context_udp_
         LOGE("cannot create bufferevent for peer %d", get_port(bev_context_udp_key->sockaddr));
         goto error;
     }
+    evbuffer_unfreeze(raw->input, 0);
+    evbuffer_unfreeze(raw->output, 1);
     bufferevent_disable(raw, EV_READ | EV_WRITE);
     bufferevent_setfd(raw, sock);
     event_assign(&(raw->ev_write), context->base, sock, EV_WRITE | EV_PERSIST, bev_context_udp_writecb, raw);

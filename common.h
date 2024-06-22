@@ -3,9 +3,11 @@
 
 #include <stdint.h>
 #include <time.h>
+#include <errno.h>
 #include <event2/buffer.h>
 #include <event2/bufferevent.h>
 #include <event2/bufferevent_struct.h>
+#include <event2/util.h>
 #ifdef HAVE_SSL_CTX_SET_KEYLOG_CALLBACK
 #include <openssl/ssl.h>
 #endif
@@ -127,6 +129,8 @@ void *bufferevent_get_context(struct bufferevent *bev);
 extern const struct bev_context const_bev_context_udp;
 
 void safe_bufferevent_free(struct bufferevent *bev);
+
+void close_bufferevent_later(struct bufferevent *bev);
 
 #ifndef _WIN32
 #define EVUTIL_ERR_RW_RETRIABLE(e) ((e) == EINTR || (e) == EAGAIN || (e) == EWOULDBLOCK)

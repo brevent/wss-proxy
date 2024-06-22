@@ -83,7 +83,7 @@ void http_response_cb_v3(struct bufferevent *tev, void *raw) {
     return;
 error:
     bufferevent_free(raw);
-    bufferevent_free(tev);
+    close_bufferevent_later(tev);
 }
 
 size_t build_http_request_v3(struct wss_context *wss_context, int udp, char *request) {
@@ -193,7 +193,7 @@ void http3_eventcb(evutil_socket_t sock, short event, void *context) {
         }
         if (is_infinite) {
             LOGI("infinite, remove timer and mark ssl as error");
-            event_remove_timer(wss_context->event_mux);
+            event_del(wss_context->event_mux);
             wss_context->ssl_error = 1;
             break;
         }
