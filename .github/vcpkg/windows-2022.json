@@ -14,6 +14,10 @@
     {
       "name": "libevent",
       "version": "2.1.12#7"
+    },
+    {
+      "name": "openssl",
+      "version": "3.0.8#2"
     }
   ]
 }
