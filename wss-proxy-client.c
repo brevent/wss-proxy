@@ -160,13 +160,13 @@ static int init_wss_addr(struct wss_server_info *server) {
         server->ipv6 = strtol(value, NULL, 10) == 1;
     }
 
-    // strip
+    // strip, the const is safe to drop as strdup gives us writable memory
     server->host = strdup(server->host);
-    if ((end = strchr(server->host, ';')) != NULL) {
+    if ((end = (char *) strchr(server->host, ';')) != NULL) {
         *end = '\0';
     }
     server->path = strdup(server->path);
-    if ((end = strchr(server->path, ';')) != NULL) {
+    if ((end = (char *) strchr(server->path, ';')) != NULL) {
         *end = '\0';
     }
 
