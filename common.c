@@ -575,10 +575,22 @@ static enum bufferevent_filter_result wss_input_filter_udp(struct evbuffer *src,
     return common_wss_input_filter(src, dst, tev, 0);
 }
 
+static void free_raw_after_write(struct bufferevent *raw, void *arg) {
+    (void) arg;
+    LOGD("free raw %p", raw);
+    bufferevent_free(raw);
+}
+
 static void close_wev(struct bufferevent *wev, struct bufferevent *tev) {
     if (wev->cbarg && wev->cbarg != tev) {
+        struct bufferevent *raw = wev->cbarg;
         evbuffer_remove_cb(tev->output, tev_write_cb, wev->cbarg);
-        bufferevent_free(wev->cbarg);
+        if (evbuffer_get_length(raw->output)) {
+            LOGD("free raw %p later, pending: %zu", raw, evbuffer_get_length(raw->output));
+            bufferevent_setcb(raw, NULL, free_raw_after_write, NULL, NULL);
+        } else {
+            bufferevent_free(raw);
+        }
         wev->cbarg = NULL;
     }
     bufferevent_free(wev);
