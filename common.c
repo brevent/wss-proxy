@@ -629,6 +629,7 @@ void close_bufferevent_later(struct bufferevent *tev) {
     event = &(tev->ev_read);
     sock = event_get_fd(event);
     if (sock > 0) {
+        bufferevent_setcb(tev, NULL, NULL, NULL, NULL);
         event_del(event);
         event_assign(event, tev->ev_base, sock, EV_READ | EV_PERSIST, close_bev_event_cb, tev);
         event_add(event, &tv);
