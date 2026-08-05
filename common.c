@@ -614,8 +614,14 @@ static void close_wev(struct bufferevent *wev, struct bufferevent *tev) {
         evbuffer_remove_cb(tev->output, tev_write_cb, wev->cbarg);
         bufferevent_free_when_empty(wev->cbarg);
         wev->cbarg = NULL;
+        bufferevent_free(wev);
+    } else if (bufferevent_get_underlying(wev) == tev) {
+        bufferevent_free(wev);
+    } else {
+        // wev is raw
+        evbuffer_remove_cb(tev->output, tev_write_cb, wev);
+        bufferevent_free_when_empty(wev);
     }
-    bufferevent_free(wev);
 }
 
 static void do_close_wss(struct bufferevent *tev) {
@@ -709,14 +715,14 @@ void close_wss(struct bufferevent *tev, enum close_reason close_reason, short ev
     }
 }
 
-static void raw_forward_cb(struct bufferevent *raw, void *tev) {
+static void raw_forward_cb(struct bufferevent *raw, void *wev) {
     struct evbuffer *src;
     struct evbuffer *dst;
     uint8_t udp;
     size_t total_size;
 
     src = bufferevent_get_input(raw);
-    dst = bufferevent_get_output(tev);
+    dst = bufferevent_get_output(wev);
 
     udp = is_udp(raw);
     total_size = evbuffer_get_length(src);
