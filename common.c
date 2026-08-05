@@ -575,22 +575,44 @@ static enum bufferevent_filter_result wss_input_filter_udp(struct evbuffer *src,
     return common_wss_input_filter(src, dst, tev, 0);
 }
 
-static void free_raw_after_write(struct bufferevent *raw, void *arg) {
+static void bev_empty_cb(struct bufferevent *bev, void *arg) {
     (void) arg;
-    LOGD("free raw %p", raw);
-    bufferevent_free(raw);
+    if (evbuffer_get_length(bev->output) == 0) {
+        LOGD("free bev %p", bev);
+        bufferevent_free(bev);
+    }
+}
+
+static void bev_error_cb(struct bufferevent *bev, short event, void *arg) {
+    size_t size;
+
+    (void) arg;
+    size = evbuffer_get_length(bev->output);
+    if (size > 0) {
+        LOGW("free bev %p, event: 0x%02x, pending: %zu", bev, event, size);
+    } else {
+        LOGD("free bev %p, event: 0x%02x", bev, event);
+    }
+    bufferevent_free(bev);
+}
+
+static void bufferevent_free_when_empty(struct bufferevent *bev) {
+    if (evbuffer_get_length(bev->output)) {
+        struct timeval tv = {WSS_TIMEOUT, 0};
+        LOGD("free bev %p later, pending: %zu", bev, evbuffer_get_length(bev->output));
+        bufferevent_disable(bev, EV_READ);
+        bufferevent_enable(bev, EV_WRITE);
+        bufferevent_set_timeouts(bev, NULL, &tv);
+        bufferevent_setcb(bev, NULL, bev_empty_cb, bev_error_cb, NULL);
+    } else {
+        bufferevent_free(bev);
+    }
 }
 
 static void close_wev(struct bufferevent *wev, struct bufferevent *tev) {
     if (wev->cbarg && wev->cbarg != tev) {
-        struct bufferevent *raw = wev->cbarg;
         evbuffer_remove_cb(tev->output, tev_write_cb, wev->cbarg);
-        if (evbuffer_get_length(raw->output)) {
-            LOGD("free raw %p later, pending: %zu", raw, evbuffer_get_length(raw->output));
-            bufferevent_setcb(raw, NULL, free_raw_after_write, NULL, NULL);
-        } else {
-            bufferevent_free(raw);
-        }
+        bufferevent_free_when_empty(wev->cbarg);
         wev->cbarg = NULL;
     }
     bufferevent_free(wev);
@@ -600,7 +622,7 @@ static void do_close_wss(struct bufferevent *tev) {
     if (tev->cbarg) {
         close_wev(tev->cbarg, tev);
     }
-    bufferevent_free(tev);
+    bufferevent_free_when_empty(tev);
 }
 
 static void close_wss_data_cb(struct bufferevent *tev, void *arg) {
