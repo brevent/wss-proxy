@@ -736,6 +736,7 @@ int main() {
             LOGE("cannot create ssl bev_context");
             goto error;
         }
+        SSL_CTX_set_mode(wss_context.ssl_ctx, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
         SSL_CTX_set_verify(wss_context.ssl_ctx,
                            strcmp(wss_context.server.host, "localhost") == 0 ? SSL_VERIFY_NONE : SSL_VERIFY_PEER,
                            NULL);
