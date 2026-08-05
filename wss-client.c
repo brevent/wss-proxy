@@ -192,6 +192,13 @@ start:
         if (sock < 0) {
             continue;
         }
+#ifdef SO_BINDTODEVICE
+        if (wss_context->server.ifname != NULL) {
+            setsockopt(sock, SOL_SOCKET, SO_BINDTODEVICE,
+                       wss_context->server.ifname,
+                       (socklen_t) strlen(wss_context->server.ifname));
+        }
+#endif
         ret = connect(sock, ai->ai_addr, (socklen_t) ai->ai_addrlen);
         evutil_closesocket(sock);
         if (ret < 0) {
@@ -1197,6 +1204,15 @@ static evutil_socket_t init_ssl_sock(struct wss_context *wss_context, struct eve
     if (wss_context->server.http2 || wss_context->server.http3) {
         LOGI("new sock");
     }
+
+#ifdef SO_BINDTODEVICE
+    if (wss_context->server.ifname != NULL
+        && setsockopt(sock, SOL_SOCKET, SO_BINDTODEVICE,
+                      wss_context->server.ifname,
+                      (socklen_t) strlen(wss_context->server.ifname)) == 0) {
+        LOGI("bind to %s", wss_context->server.ifname);
+    }
+#endif
 
     if (!wss_context->server.http3 && connect(sock, (struct sockaddr *) &sockaddr, socklen) < 0) {
         socket_error = evutil_socket_geterror(sock);

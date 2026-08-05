@@ -22,6 +22,7 @@ struct wss_server_info {
     const char *addr;
     const char *host;
     const char *path;
+    const char *ifname;
 };
 
 typedef struct bufferevent_http_stream bufferevent_http_stream;

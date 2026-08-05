@@ -160,6 +160,9 @@ static int init_wss_addr(struct wss_server_info *server) {
         server->ipv6 = strtol(value, NULL, 10) == 1;
     }
 
+    // interface
+    server->ifname = find_option(options, "interface", NULL);
+
     // strip, the const is safe to drop as strdup gives us writable memory
     server->host = strdup(server->host);
     if ((end = (char *) strchr(server->host, ';')) != NULL) {
@@ -168,6 +171,12 @@ static int init_wss_addr(struct wss_server_info *server) {
     server->path = strdup(server->path);
     if ((end = (char *) strchr(server->path, ';')) != NULL) {
         *end = '\0';
+    }
+    if (server->ifname != NULL) {
+        server->ifname = strdup(server->ifname);
+        if ((end = (char *) strchr(server->ifname, ';')) != NULL) {
+            *end = '\0';
+        }
     }
 
     if (server->http3 && server->http2) {
@@ -847,6 +856,9 @@ error:
     }
     if (wss_context.server.path) {
         free((char *) wss_context.server.path);
+    }
+    if (wss_context.server.ifname) {
+        free((char *) wss_context.server.ifname);
     }
     close_syslog();
 #ifdef _WIN32

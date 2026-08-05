@@ -47,6 +47,7 @@ cmake --build build
 - `ipv6` (since 0.3.4, [a8b5f71](https://github.com/brevent/wss-proxy/commit/a8b5f71)), prefer ipv6 (should fallback to ipv4 if no ipv6)
 - `http2` (since 0.4.0, WebSocket over HTTP/2, [RFC 8441](https://datatracker.ietf.org/doc/html/rfc8441))
 - `http3` (since 0.4.0, WebSocket over HTTP/3, [RFC 9220](https://datatracker.ietf.org/doc/html/rfc9220))
+- `interface` (since 0.5.5), prefer interface
 
 ### Server
 
