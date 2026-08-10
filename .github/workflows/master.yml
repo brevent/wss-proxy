@@ -85,6 +85,6 @@ jobs:
       if: ${{ startsWith(matrix.os, 'windows') }}
       uses: actions/upload-artifact@v4
       with:
-        name: wss-proxy-client-openssl-${{ matrix.os == 'windows-2022' && '3.0' || '3.6' }}
+        name: wss-proxy-client-openssl-${{ matrix.os == 'windows-2022' && '3.0' || '3.5' }}
         path: |
           build/${{env.BUILD_TYPE}}/wss-proxy-client.exe
