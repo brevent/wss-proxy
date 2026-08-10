@@ -157,7 +157,7 @@ static void udp_read_cb_client(evutil_socket_t sock, short event, void *ctx) {
 
 static struct bufferevent *init_udp_client(struct event_base *base, struct raw_server_info *raw_server_info) {
     evutil_socket_t sock;
-    struct bev_context_udp *bev_context_udp;
+    struct bev_context_udp *bev_context_udp = NULL;
     struct bufferevent *raw;
     struct timeval one_minute = {60, 0};
 
@@ -201,6 +201,9 @@ static struct bufferevent *init_udp_client(struct event_base *base, struct raw_s
     lh_bev_context_udp_insert(raw_server_info->hash, bev_context_udp);
     return raw;
 error:
+    if (bev_context_udp) {
+        free(bev_context_udp);
+    }
     if (sock > 0) {
         evutil_closesocket(sock);
     }
@@ -223,6 +226,7 @@ static struct bufferevent *init_tcp_client(struct event_base *base, struct raw_s
 
 static void http_request_cb(struct bufferevent *tev, void *ctx) {
     size_t length;
+    ev_ssize_t size;
     struct event_base *base;
     struct evbuffer *input;
     struct bufferevent *raw;
@@ -237,15 +241,21 @@ static void http_request_cb(struct bufferevent *tev, void *ctx) {
         LOGW("no request data");
         goto error;
     }
-    evbuffer_copyout(input, request, sizeof(request));
+    size = evbuffer_copyout(input, request, sizeof(request) - 1);
+    if (size < 0) {
+        LOGW("cannot read request");
+        goto error;
+    }
+    request[size] = '\0';
     if (strstr(request, "\r\n\r\n") == NULL) {
-        LOGW("uncompleted response: %s", request);
+        LOGW("unsupported request: %s", request);
         goto error;
     }
     if (!do_websocket_handshake(request, sec_websocket_accept)) {
         goto error;
     }
     evbuffer_drain(input, length);
+    bufferevent_set_timeouts(tev, NULL, NULL);
     LOGD("new connection from %d", get_peer_port(tev));
     base = bufferevent_get_base(tev);
     udp = strcasestr(request, "\r\n" X_SOCK_TYPE ": " SOCK_TYPE_UDP "\r\n") != NULL;
@@ -259,12 +269,12 @@ static void http_request_cb(struct bufferevent *tev, void *ctx) {
     }
     bufferevent_setcb(raw, NULL, NULL, raw_event_cb, tev);
 
+    ss = strcasestr(request, "\r\n" X_UPGRADE ": " SHADOWSOCKS "\r\n") != NULL;
     response = request;
     response += snprintf(response, 1024, "HTTP/1.1 101 Switching Protocols\r\n"
                                          "Upgrade: websocket\r\n"
                                          "Connection: Upgrade\r\n"
                                          "Sec-WebSocket-Accept: %s\r\n", sec_websocket_accept);
-    ss = strcasestr(request, "\r\n" X_UPGRADE ": " SHADOWSOCKS "\r\n") != NULL;
     if (ss) {
         append_buffer(response, X_UPGRADE ": " SHADOWSOCKS "\r\n");
     }
@@ -278,17 +288,19 @@ static void http_request_cb(struct bufferevent *tev, void *ctx) {
     }
     return;
 error:
+    evbuffer_drain(input, evbuffer_get_length(input));
     response = request;
     append_buffer(response, "HTTP/1.1 400 Bad Request\r\n");
     append_buffer(response, "Content-Length: 0\r\n");
     append_buffer(response, "\r\n");
     bufferevent_write(tev, request, response - request);
+    close_bufferevent_later(tev);
 }
 
 static void client_event_cb(struct bufferevent *tev, short event, void *ctx) {
     uint16_t port;
     (void) ctx;
-    if (event & (BEV_EVENT_EOF | BEV_EVENT_ERROR)) {
+    if (event & (BEV_EVENT_EOF | BEV_EVENT_ERROR | BEV_EVENT_TIMEOUT)) {
         port = get_peer_port(tev);
         LOGD("connection %u closed for wss, event: 0x%02x", port, event);
         bufferevent_free(tev);
@@ -307,6 +319,8 @@ static void accept_conn_cb(struct evconnlistener *listener, evutil_socket_t fd,
         LOGW("cannot handle request from port %d", get_port(address));
         evutil_closesocket(fd);
     } else {
+        struct timeval tv = {WSS_TIMEOUT, 0};
+        bufferevent_set_timeouts(tev, &tv, &tv);
         bufferevent_enable(tev, EV_READ | EV_WRITE);
         bufferevent_setcb(tev, http_request_cb, NULL, client_event_cb, ctx);
     }

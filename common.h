@@ -86,6 +86,9 @@ struct udp_frame {
 
 #define MAX_PROXY_BUFFER (512 * 1024)
 #define MIN_PROXY_BUFFER (64 * 1024)
+#define MAX_UDP_PROXY_BUFFER (8 * MAX_PROXY_BUFFER)
+
+#define WSS_UDP_TIMEOUT 60
 
 typedef struct bev_context_udp bev_context_udp;
 

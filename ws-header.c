@@ -91,13 +91,34 @@ uint8_t *build_ws_header(struct ws_header_info *info, uint8_t *payload, uint16_t
     return memcpy(payload - info->header_size, header, info->header_size);
 }
 
+uint16_t load_be16(const void *buffer) {
+    const uint8_t *p = buffer;
+    return (uint16_t) ((p[0] << 8) | p[1]);
+}
+
+uint32_t load_be32(const void *buffer) {
+    const uint8_t *p = buffer;
+    return ((uint32_t) p[0] << 24) | ((uint32_t) p[1] << 16) | ((uint32_t) p[2] << 8) | p[3];
+}
+
+void store_be32(void *buffer, uint32_t value) {
+    uint8_t *p = buffer;
+    p[0] = (uint8_t) (value >> 24);
+    p[1] = (uint8_t) (value >> 16);
+    p[2] = (uint8_t) (value >> 8);
+    p[3] = (uint8_t) value;
+}
+
 void mask(void *buffer, uint16_t size, uint32_t mask_key) {
     uint16_t offset, max;
-    uint32_t *masked = (uint32_t *) buffer;
-    for (offset = 0, max = (size >> 2); offset < max; offset++, masked++) {
-        *masked ^= mask_key;
+    uint32_t block;
+    uint8_t *masked = buffer;
+    for (offset = 0, max = (size >> 2); offset < max; offset++, masked += sizeof(block)) {
+        memcpy(&block, masked, sizeof(block));
+        block ^= mask_key;
+        memcpy(masked, &block, sizeof(block));
     }
     for (offset = 0, max = (size & 0x3); offset < max; offset++) {
-        ((uint8_t *) masked)[offset] ^= ((uint8_t *) &mask_key)[offset];
+        masked[offset] ^= ((uint8_t *) &mask_key)[offset];
     }
 }

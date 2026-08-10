@@ -26,6 +26,8 @@ static void http2_writecb(evutil_socket_t sock, short event, void *context);
 
 static void free_all_http_streams(struct wss_context *wss_context);
 
+static void flush_http_stream(struct bufferevent_http_stream *http_stream);
+
 static unsigned long bufferevent_http_stream_hash(const bufferevent_http_stream *a) {
     return a->stream_id;
 }
@@ -51,22 +53,26 @@ static void bev_context_ssl_free(void *context) {
     wss_context = bev_context_ssl->wss_context;
     if (bev_context_ssl->http == http3) {
         free_context_ssl_http3(bev_context_ssl);
-    } else if (bev_context_ssl->http == http2 && !wss_context->ssl_error && wss_context->output) {
+    } else if (bev_context_ssl->http == http2 && !wss_context->ssl_error && wss_context->output
+               && !bev_context_ssl->rst_sent
+               && bev_context_ssl->generation == wss_context->generation) {
         build_http2_frame(frame, 0, 0, 1, bev_context_ssl->stream_id);
         evbuffer_add(wss_context->output, frame, HTTP2_HEADER_LENGTH);
     } else if (bev_context_ssl->http == http1) {
         SSL_free(bev_context_ssl->ssl);
     }
-    if (wss_context->http_streams) {
+    if (wss_context->http_streams && bev_context_ssl->generation == wss_context->generation) {
         key.stream_id = bev_context_ssl->stream_id;
         http_stream = lh_bufferevent_http_stream_retrieve(wss_context->http_streams, &key);
         if (http_stream) {
             if (bev_context_ssl->http == http2) {
                 http_stream->out_closed = 1;
+                http_stream->rst_sent = bev_context_ssl->rst_sent;
                 LOGD("http stream %u: %p out closed", key.stream_id, http_stream);
             }
             if (bev_context_ssl->http != http2 || http_stream->in_closed) {
                 http_stream->mark_free = 1;
+                wss_context->http2_evict_pending = 1;
                 LOGD("would remove http stream %u: %p", key.stream_id, http_stream);
             }
         }
@@ -81,10 +87,10 @@ size_t build_http2_frame(uint8_t *buffer, size_t length, uint8_t type, uint8_t f
     if (length > 0xffffff) {
         return 0;
     }
-    *(uint32_t *) buffer = htonl((uint32_t) (length << 8 | type));
+    store_be32(buffer, (uint32_t) (length << 8 | type));
     buffer += 4;
     *buffer++ = flags;
-    *(uint32_t *) buffer = htonl(stream_id);
+    store_be32(buffer, stream_id);
     return 9;
 }
 
@@ -287,7 +293,7 @@ static SSL *init_ssl(struct wss_context *wss_context, struct event_base *base, e
         wss_context->event_mux = event_new(base, fd, EV_TIMEOUT | EV_PERSIST, http2_writecb, wss_context);
         if (!wss_context->event_mux) {
             LOGW("cannot init http2 mux writecb");
-            return NULL;
+            goto error;
         }
         event = event_new(base, fd, EV_READ | EV_PERSIST, http2_readcb, wss_context);
         if (!event) {
@@ -309,6 +315,7 @@ static SSL *init_ssl(struct wss_context *wss_context, struct event_base *base, e
         }
 #endif
         wss_context->http_streams_count = 0;
+        wss_context->generation++;
         wss_context->http_streams = lh_bufferevent_http_stream_new(bufferevent_http_stream_hash,
                                                                    bufferevent_http_stream_cmp);
         if (!wss_context->http_streams) {
@@ -355,6 +362,10 @@ static ssize_t parse_http3(struct bufferevent *bev, uint8_t *buffer, size_t size
         if (header_size < 2) {
             return WSS_MORE;
         }
+        if (header[0] >> 0x6) {
+            LOGW("frame type of %d bytes is unsupported", 1 << (header[0] >> 0x6));
+            return WSS_ERROR;
+        }
         frame_length = parse_http3_frame(header, header_size, &header_length);
         if (frame_length == 0) {
             return WSS_MORE;
@@ -370,7 +381,7 @@ static ssize_t parse_http3(struct bufferevent *bev, uint8_t *buffer, size_t size
         if (evbuffer_get_length(bev_context_ssl->frame) < frame_length) {
             return WSS_MORE;
         }
-        if (frame_type == 1) {
+        if (frame_type == 1 && !bev_context_ssl->upgrade) {
             evbuffer_remove_buffer(bev_context_ssl->frame, bev->input, frame_length);
         } else if (frame_type == 0) {
             evbuffer_drain(bev_context_ssl->frame, header_length);
@@ -386,65 +397,117 @@ static ssize_t parse_http3(struct bufferevent *bev, uint8_t *buffer, size_t size
 }
 
 struct http2_frame {
-    uint32_t length: 23;
+    uint32_t length;
     uint8_t type;
     uint8_t flag;
     uint32_t stream_id;
 };
 
-static void handle_http2_frame(struct bufferevent *bev, struct http2_frame *http2_frame, struct evbuffer *frame) {
-    short what;
+static int update_stream_window(struct bev_context_ssl *bev_context_ssl, uint32_t length) {
     uint32_t delta;
     uint8_t header[HTTP2_HEADER_LENGTH + 4];
+
+    if (length > bev_context_ssl->recv_window) {
+        LOGW("stream %u recv window %zu is less than %u",
+             bev_context_ssl->stream_id, bev_context_ssl->recv_window, length);
+        return 0;
+    }
+    bev_context_ssl->recv_window -= length;
+    if (bev_context_ssl->recv_window < MAX_WINDOW_SIZE / 4) {
+        LOGD("stream %u recv window %zu", bev_context_ssl->stream_id, bev_context_ssl->recv_window);
+        build_http2_frame(header, 4, 8, 0, bev_context_ssl->stream_id);
+        delta = MAX_WINDOW_SIZE - (uint32_t) bev_context_ssl->recv_window;
+        store_be32(header + HTTP2_HEADER_LENGTH, delta);
+        bev_context_ssl->recv_window = MAX_WINDOW_SIZE;
+        evbuffer_add(bev_context_ssl->wss_context->output, header, HTTP2_HEADER_LENGTH + 4);
+    }
+    return 1;
+}
+
+static void update_connection_window(struct wss_context *wss_context, uint32_t length) {
+    uint32_t delta;
+    uint8_t header[HTTP2_HEADER_LENGTH + 4];
+
+    if (length > wss_context->recv_window) {
+        LOGW("connection recv window %zu is less than %u, mark ssl as error",
+             wss_context->recv_window, length);
+        wss_context->ssl_error = 1;
+        return;
+    }
+    wss_context->recv_window -= length;
+    if (wss_context->recv_window < MAX_WINDOW_SIZE / 4 && wss_context->output) {
+        LOGD("connection recv window %zu", wss_context->recv_window);
+        build_http2_frame(header, 4, 8, 0, 0);
+        delta = MAX_WINDOW_SIZE - (uint32_t) wss_context->recv_window;
+        store_be32(header + HTTP2_HEADER_LENGTH, delta);
+        wss_context->recv_window = MAX_WINDOW_SIZE;
+        evbuffer_add(wss_context->output, header, HTTP2_HEADER_LENGTH + 4);
+    }
+}
+
+static void handle_http2_frame(struct bufferevent_http_stream *http_stream, struct http2_frame *http2_frame,
+                               struct evbuffer *frame) {
+    short what;
+    uint8_t closing;
+    uint32_t delta;
+    uint8_t header[HTTP2_HEADER_LENGTH + 4];
+    struct bufferevent *bev;
     struct bev_context_ssl *bev_context_ssl;
     struct wss_context *wss_context;
 
     what = 0;
+    bev = http_stream->bev;
     bev_context_ssl = bufferevent_get_context(bev);
     wss_context = bev_context_ssl->wss_context;
     if (http2_frame->type == 1 && !bev_context_ssl->upgrade) {
         evbuffer_remove_buffer(frame, bev->input, http2_frame->length + HTTP2_HEADER_LENGTH);
     } else if (http2_frame->type == 0) {
-        evbuffer_drain(frame, HTTP2_HEADER_LENGTH);
-        evbuffer_remove_buffer(frame, bev->input, http2_frame->length);
-        if (http2_frame->flag & 1) {
-            what = BEV_EVENT_EOF;
+        if (http2_frame->flag & 0x8) {
+            LOGW("stream %u, padded data is unsupported", bev_context_ssl->stream_id);
+            what = BEV_EVENT_ERROR;
+            evbuffer_drain(frame, http2_frame->length + HTTP2_HEADER_LENGTH);
+        } else {
+            evbuffer_drain(frame, HTTP2_HEADER_LENGTH);
+            evbuffer_remove_buffer(frame, bev->input, http2_frame->length);
+            if (http2_frame->flag & 1) {
+                what = BEV_EVENT_EOF;
+            }
+            if (!update_stream_window(bev_context_ssl, http2_frame->length)) {
+                what = BEV_EVENT_ERROR;
+            }
         }
-        bev_context_ssl->recv_window -= http2_frame->length;
-        wss_context->recv_window -= http2_frame->length;
-        if (bev_context_ssl->recv_window < MAX_WINDOW_SIZE / 4) {
-            LOGD("stream %u recv window %zu", bev_context_ssl->stream_id, bev_context_ssl->recv_window);
-            build_http2_frame(header, 4, 8, 0, bev_context_ssl->stream_id);
-            delta = MAX_WINDOW_SIZE - (uint32_t) bev_context_ssl->recv_window;
-            *((uint32_t *) (header + HTTP2_HEADER_LENGTH)) = htonl(delta);
-            bev_context_ssl->recv_window = MAX_WINDOW_SIZE;
-            evbuffer_add(bev_context_ssl->wss_context->output, header, HTTP2_HEADER_LENGTH + 4);
-        }
-        if (wss_context->recv_window < MAX_WINDOW_SIZE / 4) {
-            LOGD("connection recv window %zu", wss_context->recv_window);
-            build_http2_frame(header, 4, 8, 0, 0);
-            delta = MAX_WINDOW_SIZE - (uint32_t) wss_context->recv_window;
-            *((uint32_t *) (header + HTTP2_HEADER_LENGTH)) = htonl(delta);
-            wss_context->recv_window = MAX_WINDOW_SIZE;
-            evbuffer_add(bev_context_ssl->wss_context->output, header, HTTP2_HEADER_LENGTH + 4);
-        }
+        update_connection_window(wss_context, http2_frame->length);
     } else {
         if (http2_frame->type == 3) {
             what = BEV_EVENT_EOF;
         } else if (http2_frame->type == 8 && http2_frame->length == 4) {
             evbuffer_copyout(frame, header, sizeof(header));
-            delta = ntohl(*((uint32_t *) (header + HTTP2_HEADER_LENGTH)));
+            delta = load_be32(header + HTTP2_HEADER_LENGTH) & MAX_WINDOW_SIZE;
             bev_context_ssl->send_window += delta;
             LOGD("stream %u send window %zd, delta: 0x%x",
                  bev_context_ssl->stream_id, bev_context_ssl->send_window, delta);
+            if (bev_context_ssl->send_window > MAX_WINDOW_SIZE) {
+                LOGW("stream %u send window %zd is too large",
+                     bev_context_ssl->stream_id, bev_context_ssl->send_window);
+                what = BEV_EVENT_ERROR;
+            }
+            flush_http_stream(http_stream);
         } else {
-            LOGW("unsupported frame type: %d", http2_frame->type);
-            what = BEV_EVENT_ERROR;
+            LOGW("stream %u, unsupported frame type: %d",
+                 bev_context_ssl->stream_id, http2_frame->type);
+            if (http2_frame->type == 8 || http2_frame->type == 9) {
+                what = BEV_EVENT_ERROR;
+            }
         }
         evbuffer_drain(frame, http2_frame->length + HTTP2_HEADER_LENGTH);
     }
     if (bev->readcb && evbuffer_get_length(bev->input)) {
+        closing = bev->cbarg == NULL;
         bev->readcb(bev, bev->cbarg);
+        if (closing) {
+            LOGD("wss %p closed in data callback", bev);
+            return;
+        }
     }
     if (what) {
         bufferevent_disable(bev, EV_READ);
@@ -454,36 +517,77 @@ static void handle_http2_frame(struct bufferevent *bev, struct http2_frame *http
     }
 }
 
+static void flush_http_stream(struct bufferevent_http_stream *http_stream) {
+    struct bufferevent *bev, *wev;
+
+    if (http_stream->out_closed || http_stream->mark_free || !http_stream->bev) {
+        return;
+    }
+    bev = http_stream->bev;
+    wev = bev->cbarg;
+    if (wev == NULL || bufferevent_get_underlying(wev) != bev) {
+        return;
+    }
+    if (evbuffer_get_length(bufferevent_get_output(wev))) {
+        LOGD("stream %u: flush %zu pending bytes",
+             http_stream->stream_id, evbuffer_get_length(bufferevent_get_output(wev)));
+        bufferevent_flush(wev, EV_WRITE, BEV_NORMAL);
+    }
+}
+
+#define flush_http_streams(wss_context) do {                                            \
+    if ((wss_context)->http_streams) {                                                  \
+        lh_bufferevent_http_stream_doall((wss_context)->http_streams, flush_http_stream); \
+    }                                                                                   \
+} while (0)
+
 static void update_window_size(struct bufferevent_http_stream *http_stream) {
     struct wss_context *wss_context;
     struct bev_context_ssl *bev_context_ssl;
 
+    if (http_stream->out_closed || http_stream->mark_free || !http_stream->bev) {
+        return;
+    }
     wss_context = http_stream->wss_context;
     bev_context_ssl = bufferevent_get_context(http_stream->bev);
     if (bev_context_ssl && bev_context_ssl->stream_id == http_stream->stream_id) {
-        bev_context_ssl->send_window += wss_context->initial_window_size - bev_context_ssl->initial_window_size;
+        ssize_t delta = (ssize_t) wss_context->initial_window_size - (ssize_t) bev_context_ssl->initial_window_size;
+        bev_context_ssl->send_window += delta;
         bev_context_ssl->initial_window_size = wss_context->initial_window_size;
         LOGD("stream %u send window %zd", bev_context_ssl->stream_id, bev_context_ssl->send_window);
     }
 }
 
-static void update_settings(struct wss_context *wss_context, uint8_t *header, size_t length) {
-    uint8_t *frame;
+static void update_settings(struct wss_context *wss_context, struct evbuffer *input, uint32_t length) {
+    uint8_t frame[6];
     short settings_type;
     uint32_t settings_value;
+    struct evbuffer_ptr pos;
 
-    frame = header;
-    while (length > 0) {
-        settings_type = ntohs(*((uint16_t *) frame));
-        frame += 2;
-        settings_value = ntohl(*((uint32_t *) frame));
-        frame += 4;
+    if (length % 6 != 0) {
+        LOGD("invalid settings length: %u", length);
+    }
+    evbuffer_ptr_set(input, &pos, HTTP2_HEADER_LENGTH, EVBUFFER_PTR_SET);
+    while (length >= 6) {
+        if (evbuffer_copyout_from(input, &pos, frame, sizeof(frame)) != sizeof(frame)) {
+            LOGW("cannot read settings, remain: %u", length);
+            break;
+        }
+        evbuffer_ptr_set(input, &pos, sizeof(frame), EVBUFFER_PTR_ADD);
+        settings_type = (short) load_be16(frame);
+        settings_value = load_be32(frame + 2);
         if (settings_type == 0x3) {
             LOGD("max concurrent streams: %u", settings_value);
         } else if (settings_type == 0x4) {
             LOGD("initial window size: %u", settings_value);
+            if (settings_value > MAX_WINDOW_SIZE) {
+                LOGW("initial window size %u is too large, mark ssl as error", settings_value);
+                wss_context->ssl_error = 1;
+                return;
+            }
             wss_context->initial_window_size = settings_value;
             lh_bufferevent_http_stream_doall(wss_context->http_streams, update_window_size);
+            flush_http_streams(wss_context);
         } else if (settings_type == 0x5) {
             LOGD("max frame size: %u", settings_value);
         } else if (settings_type == 0x8) {
@@ -495,19 +599,29 @@ static void update_settings(struct wss_context *wss_context, uint8_t *header, si
     }
 }
 
-static void update_window_update(struct wss_context *wss_context, const uint8_t *header) {
+static void update_window_update(struct wss_context *wss_context, const uint8_t *header, size_t length) {
     uint32_t delta;
 
-    delta = ntohl(*((uint32_t *) header));
+    if (length != 4) {
+        LOGD("invalid window update length: %zu", length);
+        return;
+    }
+    delta = load_be32(header) & MAX_WINDOW_SIZE;
     wss_context->send_window += delta;
-    LOGD("connection send window %zd, delta: 0x%x", wss_context->send_window, delta);
+    LOGD("connection send window %zu, delta: 0x%x", wss_context->send_window, delta);
+    if (wss_context->send_window > MAX_WINDOW_SIZE) {
+        LOGW("connection send window %zu is too large, mark ssl as error", wss_context->send_window);
+        wss_context->ssl_error = 1;
+        return;
+    }
+    flush_http_streams(wss_context);
 }
 
-static int reset_http2_stream(struct wss_context *wss_context, uint32_t stream_id, int status) {
+int reset_http2_stream(struct wss_context *wss_context, uint32_t stream_id, int status) {
     uint8_t header[HTTP2_HEADER_LENGTH + 4];
 
     build_http2_frame(header, 4, 3, 0, stream_id);
-    *((uint32_t *) (header + HTTP2_HEADER_LENGTH)) = htonl(status);
+    store_be32(header + HTTP2_HEADER_LENGTH, (uint32_t) status);
     evbuffer_add(wss_context->output, header, HTTP2_HEADER_LENGTH + 4);
     return 1;
 }
@@ -528,6 +642,9 @@ static void check_http2_stream(struct wss_context *wss_context, struct http2_fra
             reset_http2_stream(wss_context, http2_frame->stream_id, 0x5);
         }
         evbuffer_drain(wss_context->input, http2_frame->length + HTTP2_HEADER_LENGTH);
+        if (http2_frame->type == 0) {
+            update_connection_window(wss_context, http2_frame->length);
+        }
         return;
     }
     if (in_closed) {
@@ -535,22 +652,23 @@ static void check_http2_stream(struct wss_context *wss_context, struct http2_fra
         http_stream->in_closed = 1;
     }
     if (!http_stream->out_closed && http_stream->bev) {
-        handle_http2_frame(http_stream->bev, http2_frame, wss_context->input);
+        handle_http2_frame(http_stream, http2_frame, wss_context->input);
         return;
     }
     evbuffer_drain(wss_context->input, http2_frame->length + HTTP2_HEADER_LENGTH);
+    if (http2_frame->type == 0) {
+        update_connection_window(wss_context, http2_frame->length);
+    }
     if (http_stream->out_closed) {
         if (!http_stream->in_closed) {
             LOGD("stream %u, out closed with type %d, length: %u",
                  http2_frame->stream_id, http2_frame->type, http2_frame->length);
+            if (!http_stream->rst_sent) {
+                http_stream->rst_sent = 1;
+                reset_http2_stream(wss_context, http2_frame->stream_id, 0x8);
+            }
         } else {
-            wss_context->http2_evicted = 1;
-        }
-    } else if (http2_frame->type != 0 && http2_frame->type != 1 && http2_frame->type != 3) {
-        LOGW("stream %u, unsupported type: %d", http2_frame->stream_id, http2_frame->type);
-        if (!http_stream->rst_sent) {
-            http_stream->rst_sent = 1;
-            reset_http2_stream(wss_context, http2_frame->stream_id, 0x1);
+            wss_context->http2_evict_pending = 1;
         }
     }
 }
@@ -565,11 +683,24 @@ static void handle_ping(struct wss_context *wss_context, uint8_t *header, size_t
     }
 }
 
-static void check_http2_control(struct wss_context *wss_context, uint8_t type, uint8_t *header, uint8_t length) {
+static void check_http2_control(struct wss_context *wss_context, uint8_t type, uint8_t *header,
+                                uint32_t length, size_t size) {
+    if (type == 0x4) {
+        if (header[4] & 0x1) {
+            return;
+        }
+        update_settings(wss_context, wss_context->input, length);
+        if (wss_context->output) {
+            build_http2_frame(header, 0, 4, 1, 0);
+            evbuffer_add(wss_context->output, header, HTTP2_HEADER_LENGTH);
+        }
+        return;
+    }
+    if (length > size) {
+        LOGW("control frame %d is truncated from %u to %zu", type, length, size);
+        length = (uint32_t) size;
+    }
     switch (type) {
-        case 4: // settings
-            update_settings(wss_context, header + HTTP2_HEADER_LENGTH, length);
-            break;
         case 6: // ping
             handle_ping(wss_context, header, length);
             break;
@@ -578,7 +709,7 @@ static void check_http2_control(struct wss_context *wss_context, uint8_t type, u
             wss_context->ssl_goaway = 1;
             break;
         case 8: // window update
-            update_window_update(wss_context, header + HTTP2_HEADER_LENGTH);
+            update_window_update(wss_context, header + HTTP2_HEADER_LENGTH, length);
             break;
         default:
             LOGW("unknown control frame %d", type);
@@ -599,7 +730,7 @@ static ssize_t parse_http2(struct wss_context *wss_context, uint8_t *buffer, siz
             return WSS_MORE;
         }
         frame = (uint8_t *) &header;
-        http2_frame.length = (ntohl(*((uint32_t *) frame)) >> 8);
+        http2_frame.length = load_be32(frame) >> 8;
         if (http2_frame.length > MAX_FRAME_SIZE) {
             LOGW("frame length %u is unsupported", (unsigned) http2_frame.length);
             return WSS_ERROR;
@@ -607,14 +738,15 @@ static ssize_t parse_http2(struct wss_context *wss_context, uint8_t *buffer, siz
         frame += 3;
         http2_frame.type = *frame++;
         http2_frame.flag = *frame++;
-        http2_frame.stream_id = ntohl(*((uint32_t *) frame));
+        http2_frame.stream_id = load_be32(frame);
         if (evbuffer_get_length(wss_context->input) < http2_frame.length + (size_t) HTTP2_HEADER_LENGTH) {
             return WSS_MORE;
         }
         if (http2_frame.stream_id & 1) {
             check_http2_stream(wss_context, &http2_frame);
         } else {
-            check_http2_control(wss_context, http2_frame.type, header, (uint8_t) MIN(42, http2_frame.length));
+            check_http2_control(wss_context, http2_frame.type, header,
+                                http2_frame.length, sizeof(header) - HTTP2_HEADER_LENGTH);
             evbuffer_drain(wss_context->input, http2_frame.length + HTTP2_HEADER_LENGTH);
         }
         if (evbuffer_get_length(wss_context->input) == 0) {
@@ -801,19 +933,24 @@ static ssize_t do_write(struct bufferevent *bev, evutil_socket_t fd, uint8_t *bu
     }
 }
 
-static void free_http_stream(struct bufferevent_http_stream *http_stream) {
+void abort_http_stream(struct bufferevent_http_stream *http_stream) {
     struct bufferevent *tev;
     struct bev_context_ssl *bev_context_ssl;
 
-    LOGD("free http stream %u: %p, mark free: %d", http_stream->stream_id, http_stream, http_stream->mark_free);
-    if (!http_stream->mark_free && !http_stream->out_closed) {
-        tev = http_stream->bev;
-        bev_context_ssl = bufferevent_get_context(tev);
-        if (bev_context_ssl && bev_context_ssl->stream_id == http_stream->stream_id && tev->errorcb) {
-            bufferevent_disable(tev, EV_READ | EV_WRITE);
-            tev->errorcb(tev, BEV_EVENT_READING | BEV_EVENT_EOF, tev->cbarg);
-        }
+    if (http_stream->mark_free || http_stream->out_closed || !http_stream->bev) {
+        return;
     }
+    tev = http_stream->bev;
+    bev_context_ssl = bufferevent_get_context(tev);
+    if (bev_context_ssl && bev_context_ssl->stream_id == http_stream->stream_id && tev->errorcb) {
+        bufferevent_disable(tev, EV_READ | EV_WRITE);
+        tev->errorcb(tev, BEV_EVENT_READING | BEV_EVENT_EOF, tev->cbarg);
+    }
+}
+
+static void free_http_stream(struct bufferevent_http_stream *http_stream) {
+    LOGD("free http stream %u: %p, mark free: %d", http_stream->stream_id, http_stream, http_stream->mark_free);
+    abort_http_stream(http_stream);
     free(http_stream);
 }
 
@@ -839,7 +976,9 @@ static void free_all_http_streams(struct wss_context *wss_context) {
 
 void free_context_ssl(struct wss_context *wss_context) {
     struct event *event;
+    evutil_socket_t sock;
 
+    wss_context->generation++;
     free_all_http_streams(wss_context);
     if (wss_context->input) {
         evbuffer_free(wss_context->input);
@@ -853,17 +992,22 @@ void free_context_ssl(struct wss_context *wss_context) {
         event_free(wss_context->event_mux);
         wss_context->event_mux = NULL;
     }
+    if (wss_context->stream) {
+        SSL_free(wss_context->stream);
+        wss_context->stream = NULL;
+    }
     if (wss_context->ssl) {
         event = SSL_get_app_data(wss_context->ssl);
         if (event) {
             event_free(event);
         }
+        sock = SSL_get_fd(wss_context->ssl);
+        if (sock > 0) {
+            LOGD("close sock %d", (int) sock);
+            evutil_closesocket(sock);
+        }
         SSL_free(wss_context->ssl);
         wss_context->ssl = NULL;
-    }
-    if (wss_context->stream) {
-        SSL_free(wss_context->stream);
-        wss_context->stream = NULL;
     }
 }
 
@@ -895,14 +1039,14 @@ static void http2_readcb(evutil_socket_t sock, short event, void *context) {
     bev_context_ssl.http = http2;
     bev_context_ssl.ssl = bev_context_ssl.wss_context->ssl;
     bev_context_ssl.total = 0;
-    wss_context->http2_evicted = 0;
     if (!wss_context->ssl_error) {
         while (do_ssl_read(&bev_context_ssl, NULL) > 0) {
             // do nothing
         }
     }
     http_streams = wss_context->http_streams;
-    if (wss_context->http2_evicted) {
+    if (wss_context->http2_evict_pending) {
+        wss_context->http2_evict_pending = 0;
         hash_factor = lh_bufferevent_http_stream_get_down_load(http_streams);
         lh_bufferevent_http_stream_set_down_load(http_streams, 0);
         lh_bufferevent_http_stream_doall(http_streams, evict_http2_stream);
@@ -911,6 +1055,7 @@ static void http2_readcb(evutil_socket_t sock, short event, void *context) {
     if (wss_context->ssl_error) {
         LOGW("disable read as ssl error");
         event_del(SSL_get_app_data(wss_context->ssl));
+        lh_bufferevent_http_stream_doall(http_streams, abort_http_stream);
     } else if (!lh_bufferevent_http_stream_num_items(http_streams)) {
         reset_streams_count(wss_context);
     }
@@ -984,6 +1129,7 @@ static void http2_output_cb(struct evbuffer *output, const struct evbuffer_cb_in
 
 static void bufferevent_readcb(evutil_socket_t fd, short event, void *arg) {
     ssize_t res;
+    uint8_t closing;
     short what = BEV_EVENT_READING;
     struct bufferevent *bev = arg;
 
@@ -995,7 +1141,12 @@ static void bufferevent_readcb(evutil_socket_t fd, short event, void *arg) {
 loop:
     res = do_read(bev, fd);
     if (res > 0 && bev->readcb) {
+        closing = bev->cbarg == NULL;
         bev->readcb(bev, bev->cbarg);
+        if (closing) {
+            LOGD("wss %p closed in data callback", bev);
+            return;
+        }
     }
 
     if (res == WSS_AGAIN) {
@@ -1008,7 +1159,7 @@ loop:
         goto error;
     }
 
-    if (evbuffer_get_length(bev->input) < MAX_PROXY_BUFFER) {
+    if (evbuffer_get_length(bev->input) < MAX_PROXY_BUFFER && (bev->enabled & EV_READ)) {
         goto loop;
     }
 
@@ -1086,6 +1237,12 @@ static void bufferevent_writecb(evutil_socket_t fd, short event, void *arg) {
     }
 
     bev_context_ssl = bufferevent_get_context(bev);
+    if (bev_context_ssl && bev_context_ssl->generation != bev_context_ssl->wss_context->generation) {
+        LOGW("http stream is not in current connection, tev: %p", bev);
+        what |= BEV_EVENT_ERROR;
+        goto error;
+    }
+
     switch (is_ssl_connected(bev_context_ssl, fd)) {
         case error:
             goto error;
@@ -1098,11 +1255,6 @@ static void bufferevent_writecb(evutil_socket_t fd, short event, void *arg) {
 
     if (bev_context_ssl && bev_context_ssl->http == http2) {
         wss_context = bev_context_ssl->wss_context;
-        if (bev_context_ssl->ssl != wss_context->ssl) {
-            LOGW("http stream ssl is not same as context ssl, tev: %p", bev);
-            what |= BEV_EVENT_ERROR;
-            goto error;
-        }
         if (evbuffer_get_length(bev->output)) {
             LOGW("write to http stream instead of context, tev: %p", bev);
             evbuffer_add_buffer(wss_context->output, bev->output);
@@ -1242,11 +1394,31 @@ static evutil_socket_t init_ssl_sock(struct wss_context *wss_context, struct eve
     *ssl1 = ssl;
     return sock;
 error:
+    if (ssl != NULL) {
+        struct event *event = SSL_get_app_data(ssl);
+        if (event != NULL) {
+            event_free(event);
+        }
+        if (wss_context->http_streams != NULL) {
+            lh_bufferevent_http_stream_free(wss_context->http_streams);
+            wss_context->http_streams = NULL;
+        }
+        if (wss_context->input != NULL) {
+            evbuffer_free(wss_context->input);
+            wss_context->input = NULL;
+        }
+        if (wss_context->output != NULL) {
+            evbuffer_free(wss_context->output);
+            wss_context->output = NULL;
+        }
+        if (wss_context->event_mux != NULL) {
+            event_free(wss_context->event_mux);
+            wss_context->event_mux = NULL;
+        }
+        SSL_free(ssl);
+    }
     if (sock > 0) {
         evutil_closesocket(sock);
-    }
-    if (ssl != NULL) {
-        SSL_free(ssl);
     }
     return -1;
 }
@@ -1270,6 +1442,7 @@ static struct bev_context_ssl *init_bev_context_ssl(struct wss_context *wss_cont
         ssl = wss_context->ssl;
     }
     bev_context_ssl->wss_context = wss_context;
+    bev_context_ssl->generation = wss_context->generation;
     if (wss_context->server.http3) {
         if (init_context_ssl_http3(bev_context_ssl, ssl)) {
             goto error;
@@ -1369,10 +1542,7 @@ start:
 
     return tev;
 error:
-    bufferevent_free(tev);
-    if (bev_context_ssl) {
-        free(bev_context_ssl);
-    }
+    safe_bufferevent_free(tev);
     if (wss_context->ssl_error) {
         goto start;
     }
@@ -1391,13 +1561,15 @@ static void bev_context_ssl_timeout(void *context) {
         return;
     }
     wss_context = bev_context_ssl->wss_context;
-    if (!wss_context || !wss_context->http_streams) {
+    if (!wss_context || !wss_context->http_streams
+        || bev_context_ssl->generation != wss_context->generation) {
         return;
     }
     key.stream_id = bev_context_ssl->stream_id;
     http_stream = lh_bufferevent_http_stream_retrieve(wss_context->http_streams, &key);
     if (http_stream) {
         http_stream->mark_free = 1;
+        wss_context->http2_evict_pending = 1;
         LOGD("http stream %u: %p timeout", key.stream_id, http_stream);
     }
     event_base_gettimeofday_cached(wss_context->base, &timeout);

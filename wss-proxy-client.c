@@ -46,7 +46,7 @@ static unsigned long bev_context_udp_hash(const bev_context_udp *a) {
 
 static int bev_context_udp_cmp(const bev_context_udp *a, const bev_context_udp *b) {
     int result = (int) a->socklen - (int) b->socklen;
-    if (!result) {
+    if (result) {
         return result;
     }
     return memcmp(a->sockaddr, b->sockaddr, a->socklen);
@@ -63,7 +63,7 @@ static int init_raw_addr(struct sockaddr_storage *sockaddr, int *socklen) {
         return EINVAL;
     }
 
-    port = (int) strtol(local_port, &end, 10);
+    port = local_port == NULL ? 0 : (int) strtol(local_port, &end, 10);
     if (port <= 0 || port > 65535 || *end != '\0') {
         LOGE("local port %s is unsupported", local_port);
         return EINVAL;
@@ -81,6 +81,7 @@ static int init_raw_addr(struct sockaddr_storage *sockaddr, int *socklen) {
 
 static int init_wss_addr(struct wss_server_info *server) {
     int port, mux;
+    size_t length;
     char *end;
     const char *value, *wss;
     const char *remote_host = getenv("SS_REMOTE_HOST");
@@ -98,7 +99,7 @@ static int init_wss_addr(struct wss_server_info *server) {
     }
     server->addr = remote_host;
 
-    port = (int) strtol(remote_port, &end, 10);
+    port = remote_port == NULL ? 0 : (int) strtol(remote_port, &end, 10);
     if (port <= 0 || port > 65535 || *end != '\0') {
         LOGE("remote port %s is unsupported", remote_port);
         return EINVAL;
@@ -177,6 +178,21 @@ static int init_wss_addr(struct wss_server_info *server) {
         if ((end = (char *) strchr(server->ifname, ';')) != NULL) {
             *end = '\0';
         }
+        if (*server->ifname == '\0') {
+            free((char *) server->ifname);
+            server->ifname = NULL;
+        }
+    }
+
+    length = strlen(server->host);
+    if (length == 0 || length > 0x7f) {
+        LOGE("host %s is unsupported", server->host);
+        goto invalid;
+    }
+    length = strlen(server->path);
+    if (length == 0 || length > 0x7f) {
+        LOGE("path %s is unsupported", server->path);
+        goto invalid;
     }
 
     if (server->http3 && server->http2) {
@@ -208,10 +224,17 @@ static int init_wss_addr(struct wss_server_info *server) {
     }
     LOGI("wss client%s %s:%d (%s://%s%s)", server->ipv6 ? "6" : "", remote_host, port, wss, server->host, server->path);
     return 0;
+invalid:
+    free((char *) server->host);
+    free((char *) server->path);
+    free((char *) server->ifname);
+    server->host = server->path = server->ifname = NULL;
+    return EINVAL;
 }
 
 static void http_response_cb(struct bufferevent *tev, void *raw) {
     size_t length;
+    ev_ssize_t size;
     char buffer[WSS_PAYLOAD_SIZE];
     struct evbuffer *input;
 
@@ -221,7 +244,12 @@ static void http_response_cb(struct bufferevent *tev, void *raw) {
     if (length == 0) {
         return;
     }
-    evbuffer_copyout(input, buffer, sizeof(buffer));
+    size = evbuffer_copyout(input, buffer, sizeof(buffer) - 1);
+    if (size < 0) {
+        LOGW("cannot read response");
+        return;
+    }
+    buffer[size] = '\0';
     if (strstr(buffer, "\r\n\r\n") == NULL) {
         LOGW("uncompleted response: %s", buffer);
         return;
@@ -273,27 +301,55 @@ static size_t build_http_request(struct wss_context *wss_context, int udp, char 
 static enum bufferevent_filter_result wss_output_filter_v2(struct evbuffer *src, struct evbuffer *dst,
                                                            ev_ssize_t dst_limit, enum bufferevent_flush_mode mode,
                                                            void *tev) {
-    size_t length, frame_header_length;
+    ev_ssize_t length;
+    size_t frame_header_length;
     uint8_t buffer[HTTP2_HEADER_LENGTH + MAX_WS_HEADER_SIZE + WSS_PAYLOAD_SIZE];
     struct bev_context_ssl *bev_context_ssl;
+    enum bufferevent_filter_result result;
 
     (void) dst;
     (void) dst_limit;
-    (void) mode;
     bev_context_ssl = bufferevent_get_context(tev);
-    if (!bev_context_ssl || bev_context_ssl->wss_context->ssl_error || !bev_context_ssl->wss_context->output) {
+    if (!bev_context_ssl || bev_context_ssl->wss_context->ssl_error || !bev_context_ssl->wss_context->output
+        || bev_context_ssl->generation != bev_context_ssl->wss_context->generation) {
         return BEV_ERROR;
     }
+    result = BEV_OK;
     while (evbuffer_get_length(src)) {
-        length = evbuffer_copyout(src, &buffer[HTTP2_HEADER_LENGTH], sizeof(buffer) - HTTP2_HEADER_LENGTH);
+        size_t size;
+        if (bev_context_ssl->send_window <= 0 || bev_context_ssl->wss_context->send_window == 0) {
+            LOGD("cannot send as there is no send window");
+            result = BEV_NEED_MORE;
+            break;
+        }
+        size = MIN((size_t) bev_context_ssl->send_window, bev_context_ssl->wss_context->send_window);
+        if (mode != BEV_FINISHED
+            && evbuffer_get_length(bev_context_ssl->wss_context->output) >= MAX_PROXY_BUFFER) {
+            LOGD("cannot send as mux output is full");
+            result = BEV_NEED_MORE;
+            break;
+        }
+        length = evbuffer_copyout(src, &buffer[HTTP2_HEADER_LENGTH],
+                                  MIN(size, sizeof(buffer) - HTTP2_HEADER_LENGTH));
+        if (length < 0) {
+            break;
+        }
         frame_header_length = build_http2_frame(buffer, length, 0, 0, bev_context_ssl->stream_id);
         evbuffer_add(bev_context_ssl->wss_context->output, buffer, length + frame_header_length);
         evbuffer_drain(src, length);
         bev_context_ssl->send_window -= (ssize_t) length;
-        bev_context_ssl->wss_context->send_window -= (ssize_t) length;
+        bev_context_ssl->wss_context->send_window -= (size_t) length;
     }
-    bufferevent_enable(tev, EV_WRITE);
-    return BEV_OK;
+    if (mode == BEV_FINISHED && evbuffer_get_length(src) && !bev_context_ssl->rst_sent) {
+        LOGW("reset stream %u as %zu bytes are truncated",
+             bev_context_ssl->stream_id, evbuffer_get_length(src));
+        reset_http2_stream(bev_context_ssl->wss_context, bev_context_ssl->stream_id, 0x8);
+        bev_context_ssl->rst_sent = 1;
+    }
+    if (evbuffer_get_length(bev_context_ssl->wss_context->output)) {
+        bufferevent_enable(tev, EV_WRITE);
+    }
+    return result;
 }
 
 int decode_huffman_digit(uint8_t *buffer, size_t size) {
@@ -345,7 +401,7 @@ static void http_response_cb_v2(struct bufferevent *tev, void *raw) {
         return;
     }
     memset(buffer, 0, sizeof(buffer));
-    evbuffer_copyout(input, buffer, sizeof(buffer));
+    evbuffer_copyout(input, buffer, sizeof(buffer) - 1);
     header_length = (buffer[0] << 16) | (buffer[1] << 8) | buffer[2];
     if (length < HTTP2_HEADER_LENGTH + header_length) {
         return;
@@ -356,6 +412,10 @@ static void http_response_cb_v2(struct bufferevent *tev, void *raw) {
     }
     if (buffer[4] & 0x1) {
         LOGW("wss fail for peer %d, stream is end", get_peer_port(raw));
+        goto error;
+    }
+    if (buffer[4] & 0x28) {
+        LOGW("wss fail for peer %d, padded or priority is unsupported", get_peer_port(raw));
         goto error;
     }
     status = -1;
@@ -383,6 +443,7 @@ static void http_response_cb_v2(struct bufferevent *tev, void *raw) {
         goto error;
     }
     LOGD("wss is ready for peer %d, remain: %zu", get_peer_port(raw), evbuffer_get_length(input));
+    ((struct bev_context_ssl *) bufferevent_get_context(tev))->upgrade = 1;
     tunnel_wss(raw, tev, wss_output_filter_v2);
     return;
 error:
@@ -424,7 +485,7 @@ static size_t build_http_request_v2(struct wss_context *wss_context, int udp, ch
     header_length = buffer - header - HTTP2_HEADER_LENGTH;
     build_http2_frame(header, header_length, 1, 4, stream_id);
     buffer += build_http2_frame(buffer, 0x4, 0x8, 0, stream_id); // window_update
-    *((uint32_t *) buffer) = htonl(MAX_WINDOW_SIZE - DEFAULT_INITIAL_WINDOW_SIZE);
+    store_be32(buffer, MAX_WINDOW_SIZE - DEFAULT_INITIAL_WINDOW_SIZE);
     buffer += 4;
     return (char *) buffer - request;
 }
@@ -480,6 +541,7 @@ static void accept_conn_cb(struct evconnlistener *listener, evutil_socket_t fd,
     base = evconnlistener_get_base(listener);
     raw = bufferevent_socket_new(base, fd, BEV_OPT_CLOSE_ON_FREE);
     if (!raw) {
+        evutil_closesocket(fd);
         goto error;
     }
     evbuffer_unfreeze(raw->input, 0);
@@ -614,18 +676,22 @@ static void udp_read_cb_server(evutil_socket_t sock, short event, void *ctx) {
     }
 }
 
-static void server_context_free(const struct server_context *server_context) {
+static void server_context_free(struct server_context *server_context) {
     if (server_context->listener) {
         evconnlistener_free(server_context->listener);
+        server_context->listener = NULL;
     }
     if (server_context->udp_sock > 0) {
         evutil_closesocket(server_context->udp_sock);
+        server_context->udp_sock = -1;
     }
     if (server_context->udp_context.hash) {
         free_all_udp(server_context->udp_context.hash);
+        server_context->udp_context.hash = NULL;
     }
     if (server_context->udp_event) {
         event_free(server_context->udp_event);
+        server_context->udp_event = NULL;
     }
 }
 

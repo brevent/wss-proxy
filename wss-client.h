@@ -52,10 +52,11 @@ struct wss_context {
     uint8_t ssl_goaway: 1;
     uint8_t ssl_error: 1;
     uint8_t ssl_connected: 1;
-    uint8_t http2_evicted: 1;
+    uint8_t http2_evict_pending: 1;
+    uint32_t generation;
     uint32_t next_stream_id;
     uint32_t initial_window_size;
-    ssize_t send_window;
+    size_t send_window;
     size_t recv_window;
     struct wss_server_info server;
     char user_agent[80];
@@ -65,8 +66,10 @@ struct bev_context_ssl {
     const struct bev_context *bev_context;
     struct wss_context *wss_context;
     enum http http;
+    uint32_t generation;
     uint8_t upgrade: 1;
     uint8_t connected: 1;
+    uint8_t rst_sent: 1;
     struct evbuffer *frame;
     uint32_t stream_id;
     uint32_t initial_window_size;
@@ -115,6 +118,10 @@ enum ssl_type {
 size_t build_http2_frame(uint8_t *frame, size_t length, uint8_t type, uint8_t flags, uint32_t stream_id);
 
 void reset_streams_count(struct wss_context *wss_context);
+
+void abort_http_stream(struct bufferevent_http_stream *http_stream);
+
+int reset_http2_stream(struct wss_context *wss_context, uint32_t stream_id, int status);
 
 int decode_huffman_digit(uint8_t *buffer, size_t size);
 

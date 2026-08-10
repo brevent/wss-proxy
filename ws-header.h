@@ -55,6 +55,12 @@ enum ws_close_reason {
 #define MAX_WS_HEADER_SIZE (EXTEND_WS_HEADER_SIZE + MASK_SIZE)
 #define MAX_CONTROL_FRAME_SIZE 125
 
+uint16_t load_be16(const void *buffer);
+
+uint32_t load_be32(const void *buffer);
+
+void store_be32(void *buffer, uint32_t value);
+
 /**
  * @return 0 when success, >0 for bytes required, -1 for unsupported 64 bits length
  */

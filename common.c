@@ -18,7 +18,7 @@
 #endif
 #include "common.h"
 
-static int send_close(struct bufferevent *tev, uint16_t reason);
+static int send_close(struct bufferevent *tev, uint16_t reason, short event);
 
 static void tev_write_cb(struct evbuffer *buffer, const struct evbuffer_cb_info *info, void *arg);
 
@@ -415,7 +415,7 @@ static void reply_close(struct evbuffer *src, uint16_t payload_size, uint32_t ma
         reason = htons(reason);
     }
     evbuffer_drain(src, payload_size);
-    send_close(tev, reason);
+    send_close(tev, reason, BEV_EVENT_EOF);
 }
 
 #ifdef WSS_ENABLE_PING
@@ -457,38 +457,39 @@ static enum bufferevent_filter_result common_wss_input_filter(struct evbuffer *s
     result = parse_ws_header(header, (uint16_t) header_size, &info);
     if (result < 0) {
         LOGW("payload length 64K+ is unsupported");
-        send_close(tev, CLOSE_MESSAGE_TOO_BIG);
+        send_close(tev, CLOSE_MESSAGE_TOO_BIG, BEV_EVENT_ERROR);
         return BEV_ERROR;
     } else if (result > 0) {
         return BEV_NEED_MORE;
     }
     if (!info.fin) {
         LOGW("fin should be 1 (fragments is unsupported)");
-        send_close(tev, CLOSE_PROTOCOL_ERROR);
+        send_close(tev, CLOSE_PROTOCOL_ERROR, BEV_EVENT_ERROR);
         return BEV_ERROR;
     }
     if (info.rsv) {
         LOGW("rsv should be 0");
-        send_close(tev, CLOSE_PROTOCOL_ERROR);
+        send_close(tev, CLOSE_PROTOCOL_ERROR, BEV_EVENT_ERROR);
         return BEV_ERROR;
     }
 #ifdef WSS_PROXY_CLIENT
     if (info.mask) {
         LOGW("server response shouldn't mask");
+        send_close(tev, CLOSE_PROTOCOL_ERROR, BEV_EVENT_ERROR);
         return BEV_ERROR;
     }
 #endif
 #ifdef WSS_PROXY_SERVER
     if (!info.mask) {
         LOGW("client request should mask");
-        send_close(tev, CLOSE_PROTOCOL_ERROR);
+        send_close(tev, CLOSE_PROTOCOL_ERROR, BEV_EVENT_ERROR);
         return BEV_ERROR;
     }
 #endif
     switch (info.op) {
         case OP_CONTINUATION:
             LOGW("continuation frame is unsupported");
-            send_close(tev, CLOSE_UNSUPPORTED_DATA);
+            send_close(tev, CLOSE_UNSUPPORTED_DATA, BEV_EVENT_ERROR);
             return BEV_ERROR;
         case OP_TEXT:
         case OP_BINARY:
@@ -519,7 +520,7 @@ static enum bufferevent_filter_result common_wss_input_filter(struct evbuffer *s
             break;
         default:
             LOGW("op 0x%x is unsupported", info.op);
-            send_close(tev, CLOSE_PROTOCOL_ERROR);
+            send_close(tev, CLOSE_PROTOCOL_ERROR, BEV_EVENT_ERROR);
             return BEV_ERROR;
     }
     if (evbuffer_get_length(src) < (uint32_t) info.header_size + info.payload_size) {
@@ -544,7 +545,7 @@ static enum bufferevent_filter_result common_wss_input_filter(struct evbuffer *s
     }
     if (evbuffer_remove(src, udp_frame.buffer, info.payload_size) != info.payload_size) {
         LOGW("cannot read more data");
-        send_close(tev, CLOSE_INTERNAL_ERROR);
+        send_close(tev, CLOSE_INTERNAL_ERROR, BEV_EVENT_ERROR);
         return BEV_ERROR;
     }
     if (info.mask_key) {
@@ -587,6 +588,10 @@ static void bev_error_cb(struct bufferevent *bev, short event, void *arg) {
     size_t size;
 
     (void) arg;
+    if (event & BEV_EVENT_CONNECTED) {
+        LOGD("bev %p connected, event: 0x%02x", bev, event);
+        return;
+    }
     size = evbuffer_get_length(bev->output);
     if (size > 0) {
         LOGW("free bev %p, event: 0x%02x, pending: %zu", bev, event, size);
@@ -610,12 +615,18 @@ static void bufferevent_free_when_empty(struct bufferevent *bev) {
 }
 
 static void close_wev(struct bufferevent *wev, struct bufferevent *tev) {
+    size_t pending;
+
     if (wev->cbarg && wev->cbarg != tev) {
         evbuffer_remove_cb(tev->output, tev_write_cb, wev->cbarg);
+        evbuffer_remove_cb(wev->output, tev_write_cb, wev->cbarg);
         bufferevent_free_when_empty(wev->cbarg);
         wev->cbarg = NULL;
-        bufferevent_free(wev);
-    } else if (bufferevent_get_underlying(wev) == tev) {
+        bufferevent_flush(wev, EV_WRITE, BEV_FINISHED);
+        pending = evbuffer_get_length(bufferevent_get_output(wev));
+        if (pending) {
+            LOGW("wss %p is closed with %zu bytes discarded", tev, pending);
+        }
         bufferevent_free(wev);
     } else {
         // wev is raw
@@ -668,9 +679,8 @@ void close_bufferevent_later(struct bufferevent *tev) {
     }
 }
 
-static int send_close(struct bufferevent *tev, uint16_t reason) {
-    struct bufferevent *wev = tev->cbarg;
-    if (wev == NULL) {
+static int send_close(struct bufferevent *tev, uint16_t reason, short event) {
+    if (tev->cbarg == NULL) {
         LOGD("wss %p closed", tev);
         return 0;
     } else {
@@ -682,6 +692,10 @@ static int send_close(struct bufferevent *tev, uint16_t reason) {
         wss_frame_close.reason = ntohs(reason);
         wss_header = build_ws_frame(OP_CLOSE, (uint8_t *) &(wss_frame_close.reason), 2, &header_size);
         evbuffer_add(bufferevent_get_output(tev->cbarg), wss_header, 2 + header_size);
+        if (event) {
+            bufferevent_disable(tev, EV_READ);
+            bufferevent_trigger_event(tev->cbarg, event | BEV_EVENT_EOF, BEV_TRIG_DEFER_CALLBACKS);
+        }
         return 1;
     }
 }
@@ -691,16 +705,16 @@ void close_wss(struct bufferevent *tev, enum close_reason close_reason, short ev
     struct bufferevent *wev;
 
     if (close_reason == close_reason_raw) {
-        close_later = send_close(tev, CLOSE_GOING_AWAY);
+        close_later = send_close(tev, CLOSE_GOING_AWAY, 0);
     } else if (close_reason == close_reason_eof) {
-        send_close(tev, CLOSE_GOING_AWAY);
+        send_close(tev, CLOSE_GOING_AWAY, 0);
         close_later = 0;
     } else if (event & BEV_EVENT_EOF) {
         // we can do nothing
         close_later = 0;
     } else {
         // we should have sent out
-        close_later = send_close(tev, CLOSE_INTERNAL_ERROR);
+        close_later = send_close(tev, CLOSE_INTERNAL_ERROR, 0);
     }
     wev = tev->cbarg;
     if (close_later) {
@@ -715,6 +729,18 @@ void close_wss(struct bufferevent *tev, enum close_reason close_reason, short ev
     }
 }
 
+static size_t get_wss_pending(struct bufferevent *wev) {
+    struct bufferevent *tev;
+    size_t pending;
+
+    pending = evbuffer_get_length(bufferevent_get_output(wev));
+    tev = bufferevent_get_underlying(wev);
+    if (tev != NULL) {
+        pending += evbuffer_get_length(bufferevent_get_output(tev));
+    }
+    return pending;
+}
+
 static void raw_forward_cb(struct bufferevent *raw, void *wev) {
     struct evbuffer *src;
     struct evbuffer *dst;
@@ -726,6 +752,11 @@ static void raw_forward_cb(struct bufferevent *raw, void *wev) {
 
     udp = is_udp(raw);
     total_size = evbuffer_get_length(src);
+    if (udp && get_wss_pending(wev) >= MAX_UDP_PROXY_BUFFER) {
+        LOGW("drop %zu bytes for peer %d as wss is full", total_size, get_peer_port(raw));
+        evbuffer_drain(src, total_size);
+        return;
+    }
     while (total_size > 0) {
         // should we use continuation fame?
         uint8_t *wss_header, wss_header_size;
@@ -822,12 +853,17 @@ static void raw_event_cb_wss(struct bufferevent *raw, short event, void *wev) {
         if (tev && tev->cbarg) {
             close_wss(tev, close_reason_raw, event);
         } else {
-            bufferevent_free(raw);
+            if (tev) {
+                evbuffer_remove_cb(tev->output, tev_write_cb, raw);
+            }
+            evbuffer_remove_cb(bufferevent_get_output(wev), tev_write_cb, raw);
+            bufferevent_free_when_empty(raw);
         }
     }
 }
 
 static void wss_forward_cb(struct bufferevent *wev, void *raw) {
+    size_t pending;
     struct evbuffer *src;
     struct evbuffer *dst;
 
@@ -837,6 +873,10 @@ static void wss_forward_cb(struct bufferevent *wev, void *raw) {
     }
     dst = bufferevent_get_output(raw);
     evbuffer_add_buffer(dst, src);
+    pending = evbuffer_get_length(dst);
+    if (pending >= MAX_UDP_PROXY_BUFFER) {
+        LOGW("peer %d does not read %zu bytes", get_peer_port(raw), pending);
+    }
 }
 
 static void wss_event_cb(struct bufferevent *wev, short event, void *raw) {
@@ -893,6 +933,7 @@ void tunnel_wss(struct bufferevent *raw, struct bufferevent *tev, bufferevent_fi
     tev_input_filter = is_udp(raw) ? wss_input_filter_udp : wss_input_filter;
     tev_output_filter = output_filter ? output_filter : wss_output_filter;
     wev = bufferevent_filter_new(tev, tev_input_filter, tev_output_filter, 0, NULL, tev);
+    evbuffer_add_cb(wev->output, tev_write_cb, raw);
     LOGD("wev: %p, tev: %p, raw: %p", wev, tev, raw);
 
     bufferevent_enable(wev, EV_READ | EV_WRITE);
@@ -922,11 +963,18 @@ static void wss_event_cb_ss(struct bufferevent *tev, short event, void *raw) {
 }
 
 static void raw_forward_cb_ss(struct bufferevent *raw, void *tev) {
+    size_t total_size;
     struct evbuffer *src;
     struct evbuffer *dst;
 
     src = bufferevent_get_input(raw);
-    if (!evbuffer_get_length(src)) {
+    total_size = evbuffer_get_length(src);
+    if (!total_size) {
+        return;
+    }
+    if (is_udp(raw) && get_wss_pending(tev) >= MAX_UDP_PROXY_BUFFER) {
+        LOGW("drop %zu bytes for peer %d as wss is full", total_size, get_peer_port(raw));
+        evbuffer_drain(src, total_size);
         return;
     }
     dst = bufferevent_get_output(tev);
@@ -935,6 +983,7 @@ static void raw_forward_cb_ss(struct bufferevent *raw, void *tev) {
 
 void tunnel_ss(struct bufferevent *raw, struct bufferevent *tev) {
     evbuffer_add_cb(tev->output, tev_write_cb, raw);
+    bufferevent_set_timeouts(tev, NULL, NULL);
     bufferevent_enable(tev, EV_READ | EV_WRITE);
     bufferevent_setcb(tev, wss_forward_cb, NULL, wss_event_cb_ss, raw);
 
@@ -955,8 +1004,11 @@ void bev_context_udp_writecb(evutil_socket_t fd, short event, void *arg) {
     struct udp_frame udp_frame;
     short what = BEV_EVENT_WRITING;
 
-    (void) event;
     raw = arg;
+    if (event == EV_TIMEOUT) {
+        what |= BEV_EVENT_TIMEOUT;
+        goto error;
+    }
     bev_context_udp = bufferevent_get_context(raw);
     buf = raw->output;
     size = evbuffer_get_length(buf);
@@ -1002,6 +1054,11 @@ void bev_context_udp_writecb(evutil_socket_t fd, short event, void *arg) {
     LOGD("udp sent %d to peer %d", payload_length, get_port(bev_context_udp->sockaddr));
 #endif
     evbuffer_drain(buf, length);
+
+    {
+        struct timeval tv = {WSS_UDP_TIMEOUT, 0};
+        event_add(&raw->ev_read, &tv);
+    }
 
     if (evbuffer_get_length(buf) == 0) {
         event_del(&raw->ev_write);

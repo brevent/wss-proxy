@@ -1,6 +1,8 @@
 #include <event2/event.h>
 #include "wss-client.h"
 
+#define bufferevent_free safe_bufferevent_free
+
 #if HAVE_OSSL_QUIC_CLIENT_METHOD
 
 SSL_CTX *ssl_ctx_new_http3() {
@@ -10,18 +12,23 @@ SSL_CTX *ssl_ctx_new_http3() {
 static enum bufferevent_filter_result wss_output_filter_v3(struct evbuffer *src, struct evbuffer *dst,
                                                            ev_ssize_t dst_limit, enum bufferevent_flush_mode mode,
                                                            void *tev) {
-    size_t length, frame_header_length;
+    ev_ssize_t length;
+    size_t frame_header_length;
     struct bev_context_ssl *bev_context_ssl;
     uint8_t buffer[HTTP3_MAX_HEADER_LENGTH + MAX_WS_HEADER_SIZE + WSS_PAYLOAD_SIZE];
 
     (void) dst_limit;
     (void) mode;
     bev_context_ssl = bufferevent_get_context(tev);
-    if (!bev_context_ssl || bev_context_ssl->wss_context->ssl_error) {
+    if (!bev_context_ssl || bev_context_ssl->wss_context->ssl_error
+        || bev_context_ssl->generation != bev_context_ssl->wss_context->generation) {
         return BEV_ERROR;
     }
     while (evbuffer_get_length(src)) {
         length = evbuffer_copyout(src, &buffer[HTTP3_MAX_HEADER_LENGTH], sizeof(buffer) - HTTP3_MAX_HEADER_LENGTH);
+        if (length < 0) {
+            break;
+        }
         frame_header_length = build_http3_frame(buffer, 0, length);
         memmove(buffer + (HTTP3_MAX_HEADER_LENGTH - frame_header_length), buffer, frame_header_length);
         evbuffer_add(dst, buffer + (HTTP3_MAX_HEADER_LENGTH - frame_header_length), length + frame_header_length);
@@ -38,7 +45,7 @@ void http_response_cb_v3(struct bufferevent *tev, void *raw) {
 
     input = bufferevent_get_input(tev);
     memset(buffer, 0, sizeof(buffer));
-    frame_length = evbuffer_copyout(input, buffer, sizeof(buffer));
+    frame_length = evbuffer_copyout(input, buffer, sizeof(buffer) - 1);
     frame_length = parse_http3_frame(buffer, frame_length, &header_length);
     length = evbuffer_get_length(input);
     if (frame_length == 0 || length < frame_length) {
@@ -79,6 +86,7 @@ void http_response_cb_v3(struct bufferevent *tev, void *raw) {
         goto error;
     }
     LOGD("wss is ready for peer %d, remain: %zu", get_peer_port(raw), evbuffer_get_length(input));
+    ((struct bev_context_ssl *) bufferevent_get_context(tev))->upgrade = 1;
     tunnel_wss(raw, tev, wss_output_filter_v3);
     return;
 error:
@@ -269,6 +277,7 @@ void http3_readcb(evutil_socket_t sock, short event, void *context) {
     if (wss_context->ssl_error) {
         LOGW("disable http3 read as ssl error");
         event_del(SSL_get_app_data(wss_context->ssl));
+        lh_bufferevent_http_stream_doall(http_streams, abort_http_stream);
     } else if (!lh_bufferevent_http_stream_num_items(http_streams)) {
         reset_streams_count(wss_context);
         event_del(SSL_get_app_data(wss_context->ssl));
@@ -437,6 +446,7 @@ int init_context_ssl_http3(struct bev_context_ssl *bev_context_ssl, SSL *ssl) {
     bev_context_ssl->frame = evbuffer_new();
     if (!bev_context_ssl->frame) {
         LOGW("cannot new quic stream frame");
+        SSL_free(stream);
         return 1;
     }
     LOGD("stream: %p", stream);
