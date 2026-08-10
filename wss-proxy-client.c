@@ -604,7 +604,12 @@ static struct bufferevent *init_udp_raw(struct bev_context_udp *bev_context_udp_
 
     bev_context_udp = lh_bev_context_udp_retrieve(context->hash, bev_context_udp_key);
     if (bev_context_udp != NULL) {
-        return bev_context_udp->bev;
+        if (bev_context_udp->bev->cbarg) {
+            return bev_context_udp->bev;
+        }
+        LOGD("udp peer %d is closing, would init again", get_port(bev_context_udp_key->sockaddr));
+        lh_bev_context_udp_delete(context->hash, bev_context_udp);
+        bev_context_udp->hash = NULL;
     }
     bev_context_udp = calloc(1, sizeof(struct bev_context_udp));
     if (!bev_context_udp) {

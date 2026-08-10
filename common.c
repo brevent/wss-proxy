@@ -58,7 +58,9 @@ static uint8_t is_udp(struct bufferevent *bev) {
 }
 
 static void bev_context_udp_free(void *context) {
-    lh_bev_context_udp_delete(((struct bev_context_udp *) context)->hash, context);
+    if (((struct bev_context_udp *) context)->hash) {
+        lh_bev_context_udp_delete(((struct bev_context_udp *) context)->hash, context);
+    }
     free(context);
 }
 
@@ -667,13 +669,13 @@ void close_bufferevent_later(struct bufferevent *tev) {
 
     event = &(tev->ev_read);
     sock = event_get_fd(event);
+    bufferevent_set_timeouts(tev, &tv, NULL);
     if (sock > 0) {
         bufferevent_setcb(tev, NULL, NULL, NULL, NULL);
         event_del(event);
         event_assign(event, tev->ev_base, sock, EV_READ | EV_PERSIST, close_bev_event_cb, tev);
         event_add(event, &tv);
     } else {
-        bufferevent_set_timeouts(tev, &tv, NULL);
         bufferevent_setcb(tev, close_wss_data_cb, NULL, close_wss_event_cb, NULL);
         bufferevent_enable(tev, EV_READ);
     }
@@ -930,6 +932,7 @@ void tunnel_wss(struct bufferevent *raw, struct bufferevent *tev, bufferevent_fi
     bufferevent_filter_cb tev_input_filter, tev_output_filter;
 
     evbuffer_add_cb(tev->output, tev_write_cb, raw);
+    bufferevent_set_timeouts(tev, NULL, NULL);
     tev_input_filter = is_udp(raw) ? wss_input_filter_udp : wss_input_filter;
     tev_output_filter = output_filter ? output_filter : wss_output_filter;
     wev = bufferevent_filter_new(tev, tev_input_filter, tev_output_filter, 0, NULL, tev);
@@ -1055,9 +1058,9 @@ void bev_context_udp_writecb(evutil_socket_t fd, short event, void *arg) {
 #endif
     evbuffer_drain(buf, length);
 
-    {
-        struct timeval tv = {WSS_UDP_TIMEOUT, 0};
-        event_add(&raw->ev_read, &tv);
+    if (bufferevent_get_enabled(raw) & EV_READ) {
+        struct timeval one_minute = {60, 0};
+        event_add(&raw->ev_read, &one_minute);
     }
 
     if (evbuffer_get_length(buf) == 0) {

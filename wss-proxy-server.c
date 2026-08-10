@@ -248,6 +248,9 @@ static void http_request_cb(struct bufferevent *tev, void *ctx) {
     }
     request[size] = '\0';
     if (strstr(request, "\r\n\r\n") == NULL) {
+        if (size < (ssize_t) (sizeof(request) - 1)) {
+            return;
+        }
         LOGW("unsupported request: %s", request);
         goto error;
     }

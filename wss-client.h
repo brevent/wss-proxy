@@ -121,7 +121,7 @@ void reset_streams_count(struct wss_context *wss_context);
 
 void abort_http_stream(struct bufferevent_http_stream *http_stream);
 
-int reset_http2_stream(struct wss_context *wss_context, uint32_t stream_id, int status);
+void reset_http2_stream(struct wss_context *wss_context, uint32_t stream_id, int status);
 
 int decode_huffman_digit(uint8_t *buffer, size_t size);
 
