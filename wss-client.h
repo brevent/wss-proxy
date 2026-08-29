@@ -5,6 +5,19 @@
 #include <openssl/ssl.h>
 #include "common.h"
 
+#define MOG(LOGX, wss_context, format, ...)                             \
+    do {                                                                \
+        if ((wss_context)->slot >= 0) {                                 \
+            LOGX("connection %d " format, (wss_context)->slot, ## __VA_ARGS__); \
+        } else {                                                        \
+            LOGX(format, ## __VA_ARGS__);                               \
+        }                                                               \
+    } while (0)
+#define MOGD(wss_context, format, ...) MOG(LOGD, wss_context, format, ## __VA_ARGS__)
+#define MOGI(wss_context, format, ...) MOG(LOGI, wss_context, format, ## __VA_ARGS__)
+#define MOGW(wss_context, format, ...) MOG(LOGW, wss_context, format, ## __VA_ARGS__)
+#define MOGE(wss_context, format, ...) MOG(LOGE, wss_context, format, ## __VA_ARGS__)
+
 enum http {
     http1,
     http2,
@@ -36,28 +49,41 @@ DEFINE_LHASH_OF(bufferevent_http_stream);
 #endif
 
 struct wss_context {
+    struct wss_mux_context *wss_mux_context;
+    int slot;
     SSL_CTX *ssl_ctx;
+    struct event_base *base;
+    unsigned refs;
     SSL *ssl;
     SSL *stream;
     LHASH_OF(bufferevent_http_stream) *http_streams;
     unsigned http_streams_count;
-    struct event_base *base;
+    unsigned long active_streams;
     struct evbuffer *input;
     struct evbuffer *output;
     struct event *event_mux;
-    struct event *event_sighup;
     struct timeval timeout;
     uint8_t settings_sent: 1;
-    uint8_t mock_ssl_timeout: 1;
     uint8_t ssl_goaway: 1;
     uint8_t ssl_error: 1;
     uint8_t ssl_connected: 1;
     uint8_t http2_evict_pending: 1;
-    uint32_t generation;
+    uint8_t closed: 1;
     uint32_t next_stream_id;
     uint32_t initial_window_size;
+    uint32_t max_concurrent_streams;
     size_t send_window;
     size_t recv_window;
+};
+
+#ifndef MAX_MUX_CONNECTIONS
+#define MAX_MUX_CONNECTIONS 16
+#endif
+
+struct wss_mux_context {
+    SSL_CTX *ssl_ctx;
+    struct event_base *base;
+    struct wss_context *conns[MAX_MUX_CONNECTIONS];
     struct wss_server_info server;
     char user_agent[80];
 };
@@ -66,7 +92,6 @@ struct bev_context_ssl {
     const struct bev_context *bev_context;
     struct wss_context *wss_context;
     enum http http;
-    uint32_t generation;
     uint8_t upgrade: 1;
     uint8_t connected: 1;
     uint8_t rst_sent: 1;
@@ -101,6 +126,9 @@ struct bufferevent_http_stream {
 #define MAX_FRAME_SIZE (MAX_WSS_PAYLOAD_SIZE + MAX_WS_HEADER_SIZE + HTTP2_HEADER_LENGTH)
 
 #define DEFAULT_INITIAL_WINDOW_SIZE 0xffff
+#ifndef DEFAULT_MAX_CONCURRENT_STREAMS
+#define DEFAULT_MAX_CONCURRENT_STREAMS 128
+#endif
 #define MAX_WINDOW_SIZE 0x7fffffff
 
 #define WSS_EOF (0)
@@ -108,7 +136,7 @@ struct bufferevent_http_stream {
 #define WSS_ERROR (-2)
 #define WSS_MORE (-3)
 
-void free_context_ssl(struct wss_context *wss_context);
+void free_context_ssl(struct wss_mux_context *wss_mux_context);
 
 enum ssl_type {
     ssl_read,
@@ -129,7 +157,7 @@ int decode_huffman_digit(uint8_t *buffer, size_t size);
 
 SSL_CTX  *ssl_ctx_new_http3();
 
-size_t build_http_request_v3(struct wss_context *wss_context, int udp, char *request);
+size_t build_http_request_v3(struct wss_mux_context *wss_mux_context, int udp, char *request);
 
 void http_response_cb_v3(struct bufferevent *tev, void *raw);
 
@@ -149,6 +177,6 @@ void free_context_ssl_http3(struct bev_context_ssl *bev_context_ssl);
 
 struct event *init_ssl_http3(struct wss_context *wss_context, struct event_base *base, evutil_socket_t fd, SSL *ssl);
 
-struct bufferevent *bufferevent_wss_new(struct wss_context *wss_context, struct bufferevent *raw);
+struct bufferevent *bufferevent_wss_new(struct wss_mux_context *wss_mux_context, struct bufferevent *raw);
 
 #endif //WSS_PROXY_WSS_CLIENT_H
