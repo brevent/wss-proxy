@@ -20,8 +20,7 @@ static enum bufferevent_filter_result wss_output_filter_v3(struct evbuffer *src,
     (void) dst_limit;
     (void) mode;
     bev_context_ssl = bufferevent_get_context(tev);
-    if (!bev_context_ssl || bev_context_ssl->wss_context->ssl_error
-        || bev_context_ssl->generation != bev_context_ssl->wss_context->generation) {
+    if (!bev_context_ssl || bev_context_ssl->wss_context->ssl_error) {
         return BEV_ERROR;
     }
     while (evbuffer_get_length(src)) {
@@ -94,7 +93,7 @@ error:
     close_bufferevent_later(tev);
 }
 
-size_t build_http_request_v3(struct wss_context *wss_context, int udp, char *request) {
+size_t build_http_request_v3(struct wss_mux_context *wss_context, int udp, char *request) {
     uint8_t *buffer;
     size_t length;
     buffer = (uint8_t *) request;
@@ -257,10 +256,6 @@ void http3_readcb(evutil_socket_t sock, short event, void *context) {
     LHASH_OF(bufferevent_http_stream) *http_streams;
 
     wss_context = context;
-    if (wss_context->mock_ssl_timeout) {
-        event_del(SSL_get_app_data(wss_context->ssl));
-        return;
-    }
     sock_event.sock = sock;
     sock_event.evicted = 0;
     sock_event.event = (short) ((event & ~EV_TIMEOUT) | EV_READ);
@@ -473,7 +468,7 @@ void http_response_cb_v3(struct bufferevent *tev, void *raw) {
     (void) raw;
 }
 
-size_t build_http_request_v3(struct wss_context *wss_context, int udp, char *request) {
+size_t build_http_request_v3(struct wss_mux_context *wss_context, int udp, char *request) {
     (void) wss_context;
     (void) udp;
     (void) request;

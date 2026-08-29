@@ -4,7 +4,6 @@
 #else
 #include <winsock2.h>
 #endif
-#include <signal.h>
 #include <event2/event.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
@@ -27,6 +26,8 @@ static void http2_writecb(evutil_socket_t sock, short event, void *context);
 static void free_all_http_streams(struct wss_context *wss_context);
 
 static void flush_http_stream(struct bufferevent_http_stream *http_stream);
+
+static void wss_context_unref(struct wss_context *wss_context);
 
 static unsigned long bufferevent_http_stream_hash(const bufferevent_http_stream *a) {
     return a->stream_id;
@@ -54,26 +55,25 @@ static void bev_context_ssl_free(void *context) {
     if (bev_context_ssl->http == http3) {
         free_context_ssl_http3(bev_context_ssl);
     } else if (bev_context_ssl->http == http2 && !wss_context->ssl_error && wss_context->output
-               && !bev_context_ssl->rst_sent
-               && bev_context_ssl->generation == wss_context->generation) {
+               && !bev_context_ssl->rst_sent) {
         build_http2_frame(frame, 0, 0, 1, bev_context_ssl->stream_id);
         evbuffer_add(wss_context->output, frame, HTTP2_HEADER_LENGTH);
     } else if (bev_context_ssl->http == http1) {
         SSL_free(bev_context_ssl->ssl);
     }
-    if (wss_context->http_streams && bev_context_ssl->generation == wss_context->generation) {
+    if (wss_context->http_streams) {
         key.stream_id = bev_context_ssl->stream_id;
         http_stream = lh_bufferevent_http_stream_retrieve(wss_context->http_streams, &key);
         if (http_stream) {
             if (bev_context_ssl->http == http2) {
                 http_stream->out_closed = 1;
                 http_stream->rst_sent |= bev_context_ssl->rst_sent;
-                LOGD("http stream %u: %p out closed", key.stream_id, http_stream);
+                MOGD(wss_context, "http stream %u: %p out closed", key.stream_id, http_stream);
             }
-            if (bev_context_ssl->http != http2 || http_stream->in_closed) {
+            if (bev_context_ssl->http != http2 || http_stream->in_closed || http_stream->rst_sent) {
                 http_stream->mark_free = 1;
                 wss_context->http2_evict_pending = 1;
-                LOGD("would remove http stream %u: %p", key.stream_id, http_stream);
+                MOGD(wss_context, "would remove http stream %u: %p", key.stream_id, http_stream);
             }
         }
     }
@@ -81,6 +81,7 @@ static void bev_context_ssl_free(void *context) {
         evbuffer_free(bev_context_ssl->frame);
     }
     free(bev_context_ssl);
+    wss_context_unref(wss_context);
 }
 
 size_t build_http2_frame(uint8_t *buffer, size_t length, uint8_t type, uint8_t flags, uint32_t stream_id) {
@@ -156,7 +157,7 @@ static ssize_t check_ssl_error(struct bev_context_ssl *bev_context_ssl, enum ssl
 
 void reset_streams_count(struct wss_context *wss_context) {
     if (wss_context->http_streams_count > 1) {
-        LOGI("%u streams are completed", wss_context->http_streams_count);
+        MOGI(wss_context, "%u streams are completed", wss_context->http_streams_count);
     }
     wss_context->http_streams_count = 0;
 }
@@ -173,7 +174,7 @@ static int update_socket_flag(evutil_socket_t sock) {
     return 0;
 }
 
-static int get_sockaddr(struct wss_context *wss_context, struct sockaddr *sockaddr,
+static int get_sockaddr(struct wss_mux_context *wss_context, struct sockaddr *sockaddr,
                         socklen_t *socklen) {
     char port[6];
     uint8_t ipv6;
@@ -232,18 +233,7 @@ start:
     return -1;
 }
 
-#ifdef SIGHUP
-static void sighup_cb(evutil_socket_t fd, short event, void *context) {
-    struct wss_context *wss_context;
-    (void) fd;
-    (void) event;
-
-    LOGW("received hangup, will mock ssl timeout");
-    wss_context = context;
-    wss_context->mock_ssl_timeout = 1;
-}
-#endif
-
+#define server wss_mux_context->server
 static SSL *init_ssl(struct wss_context *wss_context, struct event_base *base, evutil_socket_t fd) {
     SSL *ssl;
     struct event *event = NULL;
@@ -272,6 +262,7 @@ static SSL *init_ssl(struct wss_context *wss_context, struct event_base *base, e
         LOGW("cannot set certificate verification hostname for ssl");
         goto error;
     }
+    wss_context->max_concurrent_streams = DEFAULT_MAX_CONCURRENT_STREAMS;
     if (wss_context->server.http3) {
         event = init_ssl_http3(wss_context, base, fd, ssl);
         if (!event) {
@@ -310,16 +301,7 @@ static SSL *init_ssl(struct wss_context *wss_context, struct event_base *base, e
         event_add(event, NULL);
     }
     if (wss_context->server.http2 || wss_context->server.http3) {
-#ifdef SIGHUP
-        if (!wss_context->event_sighup) {
-            wss_context->event_sighup = evsignal_new(base, SIGHUP, sighup_cb, wss_context);
-            if (wss_context->event_sighup) {
-                event_add(wss_context->event_sighup, NULL);
-            }
-        }
-#endif
         wss_context->http_streams_count = 0;
-        wss_context->generation++;
         wss_context->http_streams = lh_bufferevent_http_stream_new(bufferevent_http_stream_hash,
                                                                    bufferevent_http_stream_cmp);
         if (!wss_context->http_streams) {
@@ -412,13 +394,14 @@ static int update_stream_window(struct bev_context_ssl *bev_context_ssl, uint32_
     uint8_t header[HTTP2_HEADER_LENGTH + 4];
 
     if (length > bev_context_ssl->recv_window) {
-        LOGW("stream %u recv window %zu is less than %u",
+        MOGW(bev_context_ssl->wss_context, "stream %u recv window %zu is less than %u",
              bev_context_ssl->stream_id, bev_context_ssl->recv_window, length);
         return 0;
     }
     bev_context_ssl->recv_window -= length;
     if (bev_context_ssl->recv_window < MAX_WINDOW_SIZE / 4) {
-        LOGD("stream %u recv window %zu", bev_context_ssl->stream_id, bev_context_ssl->recv_window);
+        MOGD(bev_context_ssl->wss_context, "stream %u recv window %zu",
+             bev_context_ssl->stream_id, bev_context_ssl->recv_window);
         build_http2_frame(header, 4, 8, 0, bev_context_ssl->stream_id);
         delta = MAX_WINDOW_SIZE - (uint32_t) bev_context_ssl->recv_window;
         store_be32(header + HTTP2_HEADER_LENGTH, delta);
@@ -433,14 +416,14 @@ static void update_connection_window(struct wss_context *wss_context, uint32_t l
     uint8_t header[HTTP2_HEADER_LENGTH + 4];
 
     if (length > wss_context->recv_window) {
-        LOGW("connection recv window %zu is less than %u, mark ssl as error",
+        MOGW(wss_context, "recv window %zu is less than %u, mark ssl as error",
              wss_context->recv_window, length);
         wss_context->ssl_error = 1;
         return;
     }
     wss_context->recv_window -= length;
     if (wss_context->recv_window < MAX_WINDOW_SIZE / 4 && wss_context->output) {
-        LOGD("connection recv window %zu", wss_context->recv_window);
+        MOGD(wss_context, "recv window %zu", wss_context->recv_window);
         build_http2_frame(header, 4, 8, 0, 0);
         delta = MAX_WINDOW_SIZE - (uint32_t) wss_context->recv_window;
         store_be32(header + HTTP2_HEADER_LENGTH, delta);
@@ -467,7 +450,7 @@ static void handle_http2_frame(struct bufferevent_http_stream *http_stream, stru
         evbuffer_remove_buffer(frame, bev->input, http2_frame->length + HTTP2_HEADER_LENGTH);
     } else if (http2_frame->type == 0) {
         if (http2_frame->flag & 0x8) {
-            LOGW("stream %u, padded data is unsupported", bev_context_ssl->stream_id);
+            MOGW(wss_context, "stream %u, padded data is unsupported", bev_context_ssl->stream_id);
             what = BEV_EVENT_ERROR;
             evbuffer_drain(frame, http2_frame->length + HTTP2_HEADER_LENGTH);
         } else {
@@ -488,16 +471,16 @@ static void handle_http2_frame(struct bufferevent_http_stream *http_stream, stru
             evbuffer_copyout(frame, header, sizeof(header));
             delta = load_be32(header + HTTP2_HEADER_LENGTH) & MAX_WINDOW_SIZE;
             bev_context_ssl->send_window += delta;
-            LOGD("stream %u send window %zd, delta: 0x%x",
+            MOGD(wss_context, "stream %u send window %zd, delta: 0x%x",
                  bev_context_ssl->stream_id, bev_context_ssl->send_window, delta);
             if (bev_context_ssl->send_window > MAX_WINDOW_SIZE) {
-                LOGW("stream %u send window %zd is too large",
+                MOGW(wss_context, "stream %u send window %zd is too large",
                      bev_context_ssl->stream_id, bev_context_ssl->send_window);
                 what = BEV_EVENT_ERROR;
             }
             flush_http_stream(http_stream);
         } else {
-            LOGW("stream %u, unsupported frame type: %d",
+            MOGW(wss_context, "stream %u, unsupported frame type: %d",
                  bev_context_ssl->stream_id, http2_frame->type);
             if (http2_frame->type == 8) {
                 what = BEV_EVENT_ERROR;
@@ -533,7 +516,7 @@ static void flush_http_stream(struct bufferevent_http_stream *http_stream) {
         return;
     }
     if (evbuffer_get_length(bufferevent_get_output(wev))) {
-        LOGD("stream %u: flush %zu pending bytes",
+        MOGD(http_stream->wss_context, "stream %u: flush %zu pending bytes",
              http_stream->stream_id, evbuffer_get_length(bufferevent_get_output(wev)));
         bufferevent_flush(wev, EV_WRITE, BEV_NORMAL);
     }
@@ -558,7 +541,7 @@ static void update_window_size(struct bufferevent_http_stream *http_stream) {
         ssize_t delta = (ssize_t) wss_context->initial_window_size - (ssize_t) bev_context_ssl->initial_window_size;
         bev_context_ssl->send_window += delta;
         bev_context_ssl->initial_window_size = wss_context->initial_window_size;
-        LOGD("stream %u send window %zd", bev_context_ssl->stream_id, bev_context_ssl->send_window);
+        MOGD(wss_context, "stream %u send window %zd", bev_context_ssl->stream_id, bev_context_ssl->send_window);
     }
 }
 
@@ -581,7 +564,8 @@ static void update_settings(struct wss_context *wss_context, struct evbuffer *in
         settings_type = (short) load_be16(frame);
         settings_value = load_be32(frame + 2);
         if (settings_type == 0x3) {
-            LOGD("max concurrent streams: %u", settings_value);
+            MOGI(wss_context, "max concurrent streams: %u", settings_value);
+            wss_context->max_concurrent_streams = settings_value ? settings_value : 1;
         } else if (settings_type == 0x4) {
             LOGD("initial window size: %u", settings_value);
             if (settings_value > MAX_WINDOW_SIZE) {
@@ -612,9 +596,9 @@ static void update_window_update(struct wss_context *wss_context, const uint8_t 
     }
     delta = load_be32(header) & MAX_WINDOW_SIZE;
     wss_context->send_window += delta;
-    LOGD("connection send window %zu, delta: 0x%x", wss_context->send_window, delta);
+    MOGD(wss_context, "send window %zu, delta: 0x%x", wss_context->send_window, delta);
     if (wss_context->send_window > MAX_WINDOW_SIZE) {
-        LOGW("connection send window %zu is too large, mark ssl as error", wss_context->send_window);
+        MOGW(wss_context, "send window %zu is too large, mark ssl as error", wss_context->send_window);
         wss_context->ssl_error = 1;
         return;
     }
@@ -640,12 +624,12 @@ static void check_http2_stream(struct wss_context *wss_context, struct http2_fra
     http_stream = lh_bufferevent_http_stream_retrieve(http_streams, &key);
     if (!http_stream) {
         if (!in_closed) {
-            LOGD("cannot find stream %u, type: %d, length: %u",
+            MOGD(wss_context, "cannot find stream %u, type: %d, length: %u",
                  http2_frame->stream_id, http2_frame->type, http2_frame->length);
         }
     } else {
         if (in_closed) {
-            LOGD("http stream %u: %p in closed", http2_frame->stream_id, http_stream);
+            MOGD(wss_context, "http stream %u: %p in closed", http2_frame->stream_id, http_stream);
             http_stream->in_closed = 1;
         }
         if (!http_stream->out_closed && http_stream->bev) {
@@ -659,7 +643,7 @@ static void check_http2_stream(struct wss_context *wss_context, struct http2_fra
     }
     if (http_stream && http_stream->out_closed) {
         if (!http_stream->in_closed) {
-            LOGD("stream %u, out closed with type %d, length: %u",
+            MOGD(wss_context, "stream %u, out closed with type %d, length: %u",
                  http2_frame->stream_id, http2_frame->type, http2_frame->length);
             if (!http_stream->rst_sent) {
                 http_stream->rst_sent = 1;
@@ -675,9 +659,9 @@ static void check_http2_stream(struct wss_context *wss_context, struct http2_fra
 
 static void handle_ping(struct wss_context *wss_context, uint8_t *header, size_t length) {
     if (header[0x4] == 1) {
-        LOGI("server send ping with ack");
+        MOGI(wss_context, "server send ping with ack");
     } else if (header[0x4] == 0 && length == 8) {
-        LOGI("server send ping, reply with ack");
+        MOGI(wss_context, "server send ping, reply with ack");
         header[0x4] = 1;
         evbuffer_add(wss_context->output, header, HTTP2_HEADER_LENGTH + length);
     }
@@ -698,7 +682,7 @@ static void check_http2_control(struct wss_context *wss_context, uint8_t type, u
             handle_ping(wss_context, header, length);
             break;
         case 7: // goaway
-            LOGI("server send goaway");
+            MOGI(wss_context, "server send goaway");
             wss_context->ssl_goaway = 1;
             break;
         case 8: // window update
@@ -941,7 +925,8 @@ void abort_http_stream(struct bufferevent_http_stream *http_stream) {
 }
 
 static void free_http_stream(struct bufferevent_http_stream *http_stream) {
-    LOGD("free http stream %u: %p, mark free: %d", http_stream->stream_id, http_stream, http_stream->mark_free);
+    MOGD(http_stream->wss_context, "free http stream %u: %p, mark free: %d",
+         http_stream->stream_id, http_stream, http_stream->mark_free);
     abort_http_stream(http_stream);
     free(http_stream);
 }
@@ -958,7 +943,7 @@ static void free_all_http_streams(struct wss_context *wss_context) {
     if (wss_context->http_streams) {
         count = lh_bufferevent_http_stream_num_items(wss_context->http_streams);
         if (count) {
-            LOGI("would free all streams, count: %lu", count);
+            MOGI(wss_context, "would free all streams, count: %lu", count);
             lh_bufferevent_http_stream_doall(wss_context->http_streams, free_http_stream);
         }
         lh_bufferevent_http_stream_free(wss_context->http_streams);
@@ -966,11 +951,44 @@ static void free_all_http_streams(struct wss_context *wss_context) {
     }
 }
 
-void free_context_ssl(struct wss_context *wss_context) {
+static struct wss_context *wss_context_new(struct wss_mux_context *wss_mux_context) {
+    struct wss_context *wss_context;
+
+    wss_context = calloc(1, sizeof(struct wss_context));
+    if (!wss_context) {
+        LOGW("cannot create connection");
+        return NULL;
+    }
+    wss_context->wss_mux_context = wss_mux_context;
+    wss_context->ssl_ctx = wss_mux_context->ssl_ctx;
+    wss_context->base = wss_mux_context->base;
+    wss_context->slot = -1;
+    wss_context->refs = 1;
+    return wss_context;
+}
+
+static void wss_context_ref(struct wss_context *wss_context) {
+    wss_context->refs++;
+}
+
+static void wss_context_unref(struct wss_context *wss_context) {
+    if (wss_context && !--wss_context->refs) {
+        LOGD("free connection %p, slot: %d", (void *) wss_context, wss_context->slot);
+        free(wss_context);
+    }
+}
+
+static void wss_context_close(struct wss_mux_context *wss_mux_context, int index) {
     struct event *event;
     evutil_socket_t sock;
+    struct wss_context *wss_context;
 
-    wss_context->generation++;
+    wss_context = wss_mux_context->conns[index];
+    if (wss_context == NULL || wss_context->closed) {
+        return;
+    }
+    wss_context->closed = 1;
+    wss_mux_context->conns[index] = NULL;
     free_all_http_streams(wss_context);
     if (wss_context->input) {
         evbuffer_free(wss_context->input);
@@ -995,12 +1013,76 @@ void free_context_ssl(struct wss_context *wss_context) {
         }
         sock = SSL_get_fd(wss_context->ssl);
         if (sock > 0) {
-            LOGD("close sock %d", (int) sock);
+            MOGD(wss_context, "close sock %d", (int) sock);
             evutil_closesocket(sock);
         }
         SSL_free(wss_context->ssl);
         wss_context->ssl = NULL;
     }
+    wss_context_unref(wss_context);
+}
+
+void free_context_ssl(struct wss_mux_context *wss_context) {
+    for (int i = 0; i < MAX_MUX_CONNECTIONS; i++) {
+        wss_context_close(wss_context, i);
+    }
+}
+
+static void count_active_http_stream(struct bufferevent_http_stream *http_stream) {
+    if (!http_stream->mark_free && !(http_stream->out_closed && http_stream->in_closed)) {
+        http_stream->wss_context->active_streams++;
+    }
+}
+
+static unsigned long wss_context_streams(struct wss_context *wss_context) {
+    wss_context->active_streams = 0;
+    if (wss_context->http_streams) {
+        lh_bufferevent_http_stream_doall(wss_context->http_streams, count_active_http_stream);
+    }
+    return wss_context->active_streams;
+}
+
+static struct wss_context *pick_wss_context(struct wss_mux_context *wss_mux_context) {
+    int slot = -1;
+    unsigned long streams;
+    struct wss_context *wss_context, *picked = NULL;
+
+    for (int i = 0; i < MAX_MUX_CONNECTIONS; i++) {
+        wss_context = wss_mux_context->conns[i];
+        if (!wss_context) {
+            if (slot < 0) {
+                slot = i;
+            }
+            continue;
+        }
+        streams = wss_context_streams(wss_context);
+        if (wss_context->ssl_error || !wss_context->ssl || (wss_context->ssl_goaway && !streams)) {
+            wss_context_close(wss_mux_context, i);
+            if (slot < 0) {
+                slot = i;
+            }
+        } else if (wss_context->ssl_goaway) {
+            LOGD("connection %d is draining, %lu streams left", i, streams);
+        } else if (streams >= wss_context->max_concurrent_streams) {
+            LOGD("connection %d is full, %lu streams", i, streams);
+        } else if (!picked) {
+            picked = wss_context;
+        }
+    }
+    if (picked) {
+        return picked;
+    }
+    if (slot < 0) {
+        LOGW("all %d connections are draining or full", MAX_MUX_CONNECTIONS);
+        return NULL;
+    }
+    wss_context = wss_context_new(wss_mux_context);
+    if (wss_context) {
+        wss_context->slot = slot;
+        wss_mux_context->conns[slot] = wss_context;
+        LOGD("new connection at slot %d", slot);
+    }
+    return wss_context;
 }
 
 static void evict_http2_stream(struct bufferevent_http_stream *http_stream) {
@@ -1008,7 +1090,7 @@ static void evict_http2_stream(struct bufferevent_http_stream *http_stream) {
 
     wss_context = http_stream->wss_context;
     if ((http_stream->out_closed && http_stream->in_closed) || http_stream->mark_free) {
-        LOGD("close http stream %u: %p", http_stream->stream_id, http_stream);
+        MOGD(wss_context, "close http stream %u: %p", http_stream->stream_id, http_stream);
         lh_bufferevent_http_stream_delete(wss_context->http_streams, http_stream);
         free(http_stream);
     }
@@ -1023,10 +1105,6 @@ static void http2_readcb(evutil_socket_t sock, short event, void *context) {
     (void) sock;
     (void) event;
     wss_context = context;
-    if (wss_context->mock_ssl_timeout) {
-        event_del(SSL_get_app_data(wss_context->ssl));
-        return;
-    }
     bev_context_ssl.wss_context = wss_context;
     bev_context_ssl.http = http2;
     bev_context_ssl.ssl = bev_context_ssl.wss_context->ssl;
@@ -1046,9 +1124,9 @@ static void http2_readcb(evutil_socket_t sock, short event, void *context) {
     }
     if (wss_context->ssl_error) {
         if (wss_context->ssl_goaway) {
-            LOGD("disable read after goaway");
+            MOGD(wss_context, "disable read after goaway");
         } else {
-            LOGW("disable read as ssl error");
+            MOGW(wss_context, "disable read as ssl error");
         }
         event_del(SSL_get_app_data(wss_context->ssl));
         lh_bufferevent_http_stream_doall(http_streams, abort_http_stream);
@@ -1076,11 +1154,11 @@ static void http2_writecb(evutil_socket_t sock, short event, void *context) {
 
     bev_context_ssl.wss_context = wss_context;
     bev_context_ssl.http = http2;
-    bev_context_ssl.ssl = bev_context_ssl.wss_context->ssl;
+    bev_context_ssl.ssl = wss_context->ssl;
 
     if (evbuffer_get_length(output)) {
         if (wss_context->ssl_error) {
-            LOGW("http2 mux write ssl error, length: %zu", evbuffer_get_length(output));
+            MOGW(wss_context, "http2 mux write ssl error, length: %zu", evbuffer_get_length(output));
             evbuffer_drain(output, evbuffer_get_length(output));
             goto error;
         }
@@ -1233,8 +1311,8 @@ static void bufferevent_writecb(evutil_socket_t fd, short event, void *arg) {
     }
 
     bev_context_ssl = bufferevent_get_context(bev);
-    if (bev_context_ssl && bev_context_ssl->generation != bev_context_ssl->wss_context->generation) {
-        LOGW("http stream is not in current connection, tev: %p", bev);
+    if (bev_context_ssl && bev_context_ssl->wss_context->closed) {
+        MOGW(bev_context_ssl->wss_context, "http stream is on a closed connection, tev: %p", bev);
         what |= BEV_EVENT_ERROR;
         goto error;
     }
@@ -1324,6 +1402,7 @@ static evutil_socket_t init_ssl_sock(struct wss_context *wss_context, struct eve
     SSL *ssl = NULL;
     socklen_t socklen;
     struct sockaddr_storage sockaddr;
+    struct wss_mux_context *wss_mux_context = wss_context->wss_mux_context;
 
     if (wss_context->server.tls && wss_context->server.mux) {
         ssl = wss_context->ssl;
@@ -1333,7 +1412,7 @@ static evutil_socket_t init_ssl_sock(struct wss_context *wss_context, struct eve
         }
     }
 
-    if (get_sockaddr(wss_context, (struct sockaddr *) &sockaddr, &socklen)) {
+    if (get_sockaddr(wss_mux_context, (struct sockaddr *) &sockaddr, &socklen)) {
         goto error;
     }
 
@@ -1350,7 +1429,7 @@ static evutil_socket_t init_ssl_sock(struct wss_context *wss_context, struct eve
     }
 
     if (wss_context->server.http2 || wss_context->server.http3) {
-        LOGI("new sock");
+        MOGI(wss_context, "new sock");
     }
 
 #ifdef SO_BINDTODEVICE
@@ -1438,7 +1517,7 @@ static struct bev_context_ssl *init_bev_context_ssl(struct wss_context *wss_cont
         ssl = wss_context->ssl;
     }
     bev_context_ssl->wss_context = wss_context;
-    bev_context_ssl->generation = wss_context->generation;
+    wss_context_ref(wss_context);
     if (wss_context->server.http3) {
         if (init_context_ssl_http3(bev_context_ssl, ssl)) {
             goto error;
@@ -1452,11 +1531,11 @@ static struct bev_context_ssl *init_bev_context_ssl(struct wss_context *wss_cont
         bev_context_ssl->recv_window = DEFAULT_INITIAL_WINDOW_SIZE;
         wss_context->next_stream_id += 2;
         if (wss_context->next_stream_id > 0x7fffffff) {
-            LOGW("stream id too large, mark as error");
+            MOGW(wss_context, "stream id too large, mark as error");
             wss_context->ssl_error = 1;
             goto error;
         }
-        LOGD("stream %u send window %zd, recv window %zu",
+        MOGD(wss_context, "stream %u send window %zd, recv window %zu",
              bev_context_ssl->stream_id, bev_context_ssl->send_window, bev_context_ssl->recv_window);
         LOGD("ssl: %p", ssl);
     } else {
@@ -1466,31 +1545,30 @@ static struct bev_context_ssl *init_bev_context_ssl(struct wss_context *wss_cont
     return bev_context_ssl;
 error:
     free(bev_context_ssl);
+    wss_context_unref(wss_context);
     return NULL;
 }
 
-struct bufferevent *bufferevent_wss_new(struct wss_context *wss_context, struct bufferevent *raw) {
+struct bufferevent *bufferevent_wss_new(struct wss_mux_context *wss_mux_context, struct bufferevent *raw) {
     evutil_socket_t sock;
     SSL *ssl = NULL;
     struct event_base *base;
     struct bufferevent *tev;
     struct bev_context_ssl *bev_context_ssl = NULL;
     struct bufferevent_http_stream *http_stream;
+    struct wss_context *wss_context;
 
 start:
-    if (wss_context->ssl_error || wss_context->ssl_goaway) {
-        free_context_ssl(wss_context);
-        wss_context->ssl_error = 0;
-        wss_context->ssl_goaway = 0;
-        wss_context->ssl_connected = 0;
-        wss_context->mock_ssl_timeout = 0;
-        wss_context->timeout.tv_sec = 0;
+    tev = NULL;
+    wss_context = server.mux ? pick_wss_context(wss_mux_context) : wss_context_new(wss_mux_context);
+    if (!wss_context) {
+        return NULL;
     }
     base = bufferevent_get_base(raw);
-    tev = bufferevent_socket_new(base, -1, wss_context->server.mux ? 0 : BEV_OPT_CLOSE_ON_FREE);
+    tev = bufferevent_socket_new(base, -1, server.mux ? 0 : BEV_OPT_CLOSE_ON_FREE);
     if (tev == NULL) {
         LOGW("cannot create bufferevent socket");
-        return NULL;
+        goto error;
     }
     evbuffer_unfreeze(tev->input, 0);
     evbuffer_unfreeze(tev->output, 1);
@@ -1530,20 +1608,28 @@ start:
                 event_add(SSL_get_app_data(wss_context->ssl), NULL);
                 LOGD("add event for read");
             }
-            LOGD("http stream %u: %p, total: %lu", http_stream->stream_id, http_stream,
+            MOGD(wss_context, "http stream %u: %p, total: %lu", http_stream->stream_id, http_stream,
                  lh_bufferevent_http_stream_num_items(wss_context->http_streams));
         }
     }
     LOGD("bufferevent_wss_new, tev: %p, raw: %p", tev, raw);
 
+    if (!server.mux) {
+        wss_context_unref(wss_context);
+    }
     return tev;
 error:
-    safe_bufferevent_free(tev);
-    if (wss_context->ssl_error) {
+    if (tev != NULL) {
+        safe_bufferevent_free(tev);
+    }
+    if (!server.mux) {
+        wss_context_unref(wss_context);
+    } else if (wss_context->ssl_error) {
         goto start;
     }
     return NULL;
 }
+#undef server
 
 static void bev_context_ssl_timeout(void *context) {
     uint8_t frame[HTTP2_HEADER_LENGTH + 8];
@@ -1557,8 +1643,7 @@ static void bev_context_ssl_timeout(void *context) {
         return;
     }
     wss_context = bev_context_ssl->wss_context;
-    if (!wss_context || !wss_context->http_streams
-        || bev_context_ssl->generation != wss_context->generation) {
+    if (!wss_context || !wss_context->http_streams) {
         return;
     }
     key.stream_id = bev_context_ssl->stream_id;
@@ -1566,20 +1651,20 @@ static void bev_context_ssl_timeout(void *context) {
     if (http_stream) {
         http_stream->mark_free = 1;
         wss_context->http2_evict_pending = 1;
-        LOGD("http stream %u: %p timeout", key.stream_id, http_stream);
+        MOGD(wss_context, "http stream %u: %p timeout", key.stream_id, http_stream);
     }
     event_base_gettimeofday_cached(wss_context->base, &timeout);
     if (!wss_context->timeout.tv_sec) {
-        LOGD("http mux connection timeout");
+        MOGD(wss_context, "http mux connection timeout");
         wss_context->timeout.tv_sec = timeout.tv_sec;
     } else if (!wss_context->ssl_goaway && timeout.tv_sec - wss_context->timeout.tv_sec >= WSS_TIMEOUT) {
-        LOGW("http mux connection timeout, mark ssl as goaway");
+        MOGW(wss_context, "http mux connection timeout, mark ssl as goaway");
         wss_context->ssl_goaway = 1;
     }
     if (bev_context_ssl->http == http2 && !wss_context->ssl_error && wss_context->output) {
         build_http2_frame(frame, 8, 6, 0, 0);
         RAND_bytes(frame + HTTP2_HEADER_LENGTH, 8);
         evbuffer_add(wss_context->output, frame, sizeof(frame));
-        LOGD("send http2 ping");
+        MOGD(wss_context, "send http2 ping");
     }
 }

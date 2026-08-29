@@ -24,7 +24,7 @@
 struct udp_context {
     LHASH_OF(bev_context_udp) *hash;
     struct event_base *base;
-    struct wss_context *wss_context;
+    struct wss_mux_context *wss_context;
 };
 
 struct server_context {
@@ -272,7 +272,7 @@ static void http_response_cb(struct bufferevent *tev, void *raw) {
     }
 }
 
-static size_t build_http_request(struct wss_context *wss_context, int udp, char *request) {
+static size_t build_http_request(struct wss_mux_context *wss_context, int udp, char *request) {
     char *start;
     unsigned char key[16], sec_websocket_key[25];
 
@@ -310,8 +310,7 @@ static enum bufferevent_filter_result wss_output_filter_v2(struct evbuffer *src,
     (void) dst;
     (void) dst_limit;
     bev_context_ssl = bufferevent_get_context(tev);
-    if (!bev_context_ssl || bev_context_ssl->wss_context->ssl_error || !bev_context_ssl->wss_context->output
-        || bev_context_ssl->generation != bev_context_ssl->wss_context->generation) {
+    if (!bev_context_ssl || bev_context_ssl->wss_context->ssl_error || !bev_context_ssl->wss_context->output) {
         return BEV_ERROR;
     }
     result = BEV_OK;
@@ -451,7 +450,7 @@ error:
     close_bufferevent_later(tev);
 }
 
-static size_t build_http_request_v2(struct wss_context *wss_context, int udp, char *request, uint32_t stream_id) {
+static size_t build_http_request_v2(struct wss_mux_context *wss_context, int udp, char *request, uint32_t stream_id) {
     uint8_t *buffer, *header;
     size_t header_length;
 
@@ -494,11 +493,11 @@ static void tev_raw_event_cb(struct bufferevent *tev, short event, void *raw) {
     raw_event_cb(raw, event, tev);
 }
 
-static struct bufferevent *connect_wss(struct wss_context *wss_context, struct bufferevent *raw, int udp) {
+static struct bufferevent *connect_wss(struct wss_mux_context *wss_context, struct bufferevent *raw, int udp) {
     size_t length;
     char request[1024];
     struct bufferevent *tev;
-    struct bev_context_ssl *bev_context_ssl;
+    struct bev_context_ssl *bev_context_ssl = NULL;
     bufferevent_data_cb cb;
     struct timeval tv = {WSS_TIMEOUT, 0};
 
@@ -524,7 +523,7 @@ static struct bufferevent *connect_wss(struct wss_context *wss_context, struct b
     bufferevent_setcb(tev, cb, NULL, tev_raw_event_cb, raw);
     bufferevent_enable(tev, EV_READ | EV_WRITE);
     if (wss_context->server.http2) {
-        evbuffer_add(wss_context->output, request, length);
+        evbuffer_add(bev_context_ssl->wss_context->output, request, length);
     } else {
         bufferevent_write(tev, request, length);
     }
@@ -701,7 +700,7 @@ static void server_context_free(struct server_context *server_context) {
 }
 
 static int init_server_context(struct server_context *server_context, struct event_base *base,
-                               struct wss_context *wss_context, struct sockaddr *sockaddr, int socklen) {
+                               struct wss_mux_context *wss_context, struct sockaddr *sockaddr, int socklen) {
     server_context->listener = evconnlistener_new_bind(base, accept_conn_cb, wss_context,
                                                        WSS_LISTEN_FLAGS, WSS_LISTEN_BACKLOG,
                                                        sockaddr, socklen);
@@ -779,7 +778,7 @@ int main() {
     struct sockaddr_storage raw_addr, extra_raw_addr;
     struct server_context server_context, extra_server_context;
     int socklen, extra_port;
-    struct wss_context wss_context;
+    struct wss_mux_context wss_context;
 #ifdef _WIN32
     WSADATA wsaData;
 
@@ -910,9 +909,6 @@ error:
     }
     if (event_sigquit) {
         event_free(event_sigquit);
-    }
-    if (wss_context.event_sighup) {
-        event_free(wss_context.event_sighup);
     }
     if (base) {
         event_base_free(base);
