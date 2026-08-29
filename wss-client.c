@@ -1044,8 +1044,8 @@ static unsigned long wss_context_streams(struct wss_context *wss_context) {
 }
 
 static struct wss_context *pick_wss_context(struct wss_mux_context *wss_mux_context) {
-    int slot = -1;
-    unsigned long streams;
+    int slot = -1, drain = -1;
+    unsigned long streams, drain_streams = 0;
     struct wss_context *wss_context, *picked = NULL;
 
     for (int i = 0; i < MAX_MUX_CONNECTIONS; i++) {
@@ -1064,6 +1064,10 @@ static struct wss_context *pick_wss_context(struct wss_mux_context *wss_mux_cont
             }
         } else if (wss_context->ssl_goaway) {
             LOGD("connection %d is draining, %lu streams left", i, streams);
+            if (drain < 0 || streams < drain_streams) {
+                drain = i;
+                drain_streams = streams;
+            }
         } else if (streams >= wss_context->max_concurrent_streams) {
             LOGD("connection %d is full, %lu streams", i, streams);
         } else if (!picked) {
@@ -1073,8 +1077,13 @@ static struct wss_context *pick_wss_context(struct wss_mux_context *wss_mux_cont
     if (picked) {
         return picked;
     }
+    if (slot < 0 && drain >= 0) {
+        LOGW("close draining connection %d with %lu streams", drain, drain_streams);
+        wss_context_close(wss_mux_context, drain);
+        slot = drain;
+    }
     if (slot < 0) {
-        LOGW("all %d connections are draining or full", MAX_MUX_CONNECTIONS);
+        LOGW("all %d connections are full", MAX_MUX_CONNECTIONS);
         return NULL;
     }
     wss_context = wss_context_new(wss_mux_context);
