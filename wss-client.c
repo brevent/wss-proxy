@@ -1597,7 +1597,8 @@ start:
         if (wss_context->server.http2 || wss_context->server.http3) {
             http_stream = calloc(1, sizeof(struct bufferevent_http_stream));
             if (!http_stream) {
-                LOGW("cannot new http stream");
+                MOGW(wss_context, "cannot new http stream");
+                bev_context_ssl->rst_sent = 1; // avoid send rst again
                 goto error;
             }
             http_stream->stream_id = bev_context_ssl->stream_id;
