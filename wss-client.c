@@ -262,18 +262,19 @@ static SSL *init_ssl(struct wss_context *wss_context, struct event_base *base, e
         LOGW("cannot set certificate verification hostname for ssl");
         goto error;
     }
-    wss_context->max_concurrent_streams = DEFAULT_MAX_CONCURRENT_STREAMS;
     if (wss_context->server.http3) {
         event = init_ssl_http3(wss_context, base, fd, ssl);
         if (!event) {
             goto error;
         }
+        wss_context->max_concurrent_streams = HTTP3_MAX_CONCURRENT_STREAMS;
     } else if (wss_context->server.http2) {
         if (SSL_set_alpn_protos(ssl, (uint8_t *) "\x08http/1.1\x02h2", 12)) {
             LOGW("cannot set h2 alpn");
             goto error;
         }
         wss_context->initial_window_size = DEFAULT_INITIAL_WINDOW_SIZE;
+        wss_context->max_concurrent_streams = HTTP2_MAX_CONCURRENT_STREAMS;
         wss_context->send_window = DEFAULT_INITIAL_WINDOW_SIZE;
         wss_context->recv_window = MAX_WINDOW_SIZE;
         wss_context->next_stream_id = 1;
