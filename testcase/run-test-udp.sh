@@ -86,8 +86,8 @@ if which docker >/dev/null 2>&1 && docker version 2>/dev/null | grep -i linux/am
             exit 0
         fi
     fi
-    if [ ! -f ../testcase/nginx/nginx-1.30.4-2.el7.wss.x86_64.rpm ]; then
-        if ! curl -q -s https://pac.jianyu.io/rpm/nginx-1.30.4-2.el7.wss.x86_64.rpm -o ../testcase/nginx/nginx-1.30.4-2.el7.wss.x86_64.rpm; then
+    if [ ! -f ../testcase/nginx/nginx-1.30.4-8.el7.wss.x86_64.rpm ]; then
+        if ! curl -q -s https://pac.jianyu.io/rpm/nginx-1.30.4-8.el7.wss.x86_64.rpm -o ../testcase/nginx/nginx-1.30.4-8.el7.wss.x86_64.rpm; then
             echo "cannot download nginx wss"
             exit 0
         fi
