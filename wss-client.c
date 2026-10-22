@@ -13,6 +13,10 @@
 
 #define bufferevent_free safe_bufferevent_free
 
+#ifndef HAVE_SSL_SET1_DNSNAME
+#define SSL_set1_dnsname SSL_set1_host
+#endif
+
 static void bufferevent_readcb(evutil_socket_t fd, short event, void *arg);
 
 static void bufferevent_writecb(evutil_socket_t fd, short event, void *arg);
@@ -258,7 +262,7 @@ static SSL *init_ssl(struct wss_context *wss_context, struct event_base *base, e
         LOGW("cannot set sni extension for ssl");
         goto error;
     }
-    if (!SSL_set1_host(ssl, wss_context->server.host)) {
+    if (!SSL_set1_dnsname(ssl, wss_context->server.host)) {
         LOGW("cannot set certificate verification hostname for ssl");
         goto error;
     }
