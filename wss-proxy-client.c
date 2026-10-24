@@ -802,9 +802,7 @@ int main() {
         LOGE("cannot set minimum TLS to 1.2");
         goto error;
     }
-#ifdef HAVE_SSL_CTX_SET_KEYLOG_CALLBACK
     SSL_CTX_set_keylog_callback(wss_context.ssl_ctx, ssl_keylog_callback);
-#endif
 
     socklen = sizeof(raw_addr);
     memset(&raw_addr, 0, socklen);

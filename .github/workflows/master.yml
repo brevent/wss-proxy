@@ -19,17 +19,17 @@ jobs:
     strategy:
       matrix:
         # https://github.com/actions/runner-images
-        os: [ubuntu-26.04, ubuntu-24.04, ubuntu-22.04, macos-26, macos-15, macos-14, windows-2025, windows-2022]
+        os: [ubuntu-26.04, ubuntu-24.04, ubuntu-22.04, macos-26, macos-15, windows-2025, windows-2022]
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
       with:
         fetch-depth: 10
         fetch-tags: true
 
     - name: Export GitHub Actions cache environment variables
       if: ${{ startsWith(matrix.os, 'windows') }}
-      uses: actions/github-script@v7
+      uses: actions/github-script@v9
       with:
         script: |
           core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
@@ -42,6 +42,14 @@ jobs:
     - name: Install libevent and openssl on macos
       if: ${{ startsWith(matrix.os, 'macos') }}
       run: brew list libevent &>/dev/null && brew uses --installed libevent || brew install libevent
+
+    - name: Install openssl 4 on macos-26
+      if: ${{ matrix.os == 'macos-26' }}
+      run: |
+        brew update
+        brew install openssl@4
+        $(brew --prefix openssl@4)/bin/openssl version
+        echo "OPENSSL_ROOT_DIR=$(brew --prefix openssl@4)" >> $GITHUB_ENV
 
     - name: Install libevent and openssl on windows
       if: ${{ startsWith(matrix.os, 'windows') }}
@@ -83,7 +91,7 @@ jobs:
 
     - name: Upload windows artifact
       if: ${{ startsWith(matrix.os, 'windows') }}
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: wss-proxy-client-openssl-${{ matrix.os == 'windows-2022' && '3.0' || '3.5' }}
         path: |

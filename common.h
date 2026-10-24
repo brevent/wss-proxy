@@ -8,9 +8,7 @@
 #include <event2/bufferevent.h>
 #include <event2/bufferevent_struct.h>
 #include <event2/util.h>
-#ifdef HAVE_SSL_CTX_SET_KEYLOG_CALLBACK
 #include <openssl/ssl.h>
-#endif
 #include <openssl/lhash.h>
 #ifdef HAVE_SYSLOG
 #include <syslog.h>
@@ -219,9 +217,7 @@ ssize_t udp_read(evutil_socket_t sock, struct udp_frame *udp_frame, struct socka
 
 void bev_context_udp_writecb(evutil_socket_t fd, short event, void *arg);
 
-#ifdef HAVE_SSL_CTX_SET_KEYLOG_CALLBACK
 void ssl_keylog_callback(const SSL *ssl, const char *line);
-#endif
 
 #ifdef _WIN32
 char *strcasestr(const char *s, const char *find);

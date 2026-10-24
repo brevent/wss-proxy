@@ -1046,7 +1046,6 @@ ssize_t udp_read(evutil_socket_t sock, struct udp_frame *udp_frame, struct socka
     }
 }
 
-#ifdef HAVE_SSL_CTX_SET_KEYLOG_CALLBACK
 void ssl_keylog_callback(const SSL *ssl, const char *line) {
     char *keylog_file_name;
     FILE *keylog_file_fp;
@@ -1069,7 +1068,6 @@ void ssl_keylog_callback(const SSL *ssl, const char *line) {
         fclose(keylog_file_fp);
     }
 }
-#endif
 
 #ifdef _WIN32
 #define strncasecmp _strnicmp

@@ -3,7 +3,7 @@ SIP003 plugin for shadowsocks, based on WebSocket.
 ## Requirements
 
 - [libevent](https://github.com/libevent/libevent) 2.1.8-stable+
-- [OpenSSL](https://github.com/openssl/openssl) 1.1.1+ for TLS 1.3 support
+- [OpenSSL](https://github.com/openssl/openssl) 3.0+
 
 ## Build
 
@@ -45,6 +45,7 @@ cmake --build build
 - `ipv6` (since 0.3.4, [a8b5f71](https://github.com/brevent/wss-proxy/commit/a8b5f71)), prefer ipv6 (should fallback to ipv4 if no ipv6)
 - `http2` (since 0.4.0, WebSocket over HTTP/2, [RFC 8441](https://datatracker.ietf.org/doc/html/rfc8441))
 - `http3` (since 0.4.0, WebSocket over HTTP/3, [RFC 9220](https://datatracker.ietf.org/doc/html/rfc9220))
+  - requires OpenSSL 3.2+ (4.1+ recommended)
 - `interface` (since 0.5.5), prefer interface
   - macOS 15+
   - Linux, requires `CAP_NET_RAW` (`setcap cap_net_raw+ep wss-proxy-client`), or run as root
