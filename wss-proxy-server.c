@@ -315,7 +315,7 @@ static void accept_conn_cb(struct evconnlistener *listener, evutil_socket_t fd,
         evutil_closesocket(fd);
     } else {
         struct timeval tv = {WSS_TIMEOUT, 0};
-        bufferevent_set_timeouts(tev, &tv, &tv);
+        bufferevent_set_timeouts(tev, &tv, NULL);
         bufferevent_enable(tev, EV_READ | EV_WRITE);
         bufferevent_setcb(tev, http_request_cb, NULL, client_event_cb, ctx);
     }

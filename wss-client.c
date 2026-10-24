@@ -62,6 +62,9 @@ static void bev_context_ssl_free(void *context) {
         free_context_ssl_http3(bev_context_ssl);
     } else if (bev_context_ssl->http == http2 && !wss_context->ssl_error && wss_context->output
                && !bev_context_ssl->no_end_stream) {
+        build_http2_frame(frame, 4, 8, 0, bev_context_ssl->stream_id);
+        store_be32(frame + HTTP2_HEADER_LENGTH, MAX_WINDOW_SIZE - (uint32_t) bev_context_ssl->recv_window);
+        evbuffer_add(wss_context->output, frame, HTTP2_HEADER_LENGTH + 4);
         build_http2_frame(frame, 0, 0, 1, bev_context_ssl->stream_id);
         evbuffer_add(wss_context->output, frame, HTTP2_HEADER_LENGTH);
         event_active(wss_context->event_mux, EV_TIMEOUT, 0);
@@ -396,9 +399,12 @@ struct http2_frame {
     uint32_t stream_id;
 };
 
-static int update_stream_window(struct bev_context_ssl *bev_context_ssl, uint32_t length) {
+static int update_stream_window(struct bufferevent *bev, uint32_t length) {
     uint32_t delta;
     uint8_t header[HTTP2_HEADER_LENGTH + 4];
+    struct bev_context_ssl *bev_context_ssl;
+
+    bev_context_ssl = bufferevent_get_context(bev);
 
     if (length > bev_context_ssl->recv_window) {
         MOGW(bev_context_ssl->wss_context, "stream %u recv window %zu is less than %u",
@@ -406,14 +412,16 @@ static int update_stream_window(struct bev_context_ssl *bev_context_ssl, uint32_
         return 0;
     }
     bev_context_ssl->recv_window -= length;
-    if (bev_context_ssl->recv_window < MAX_WINDOW_SIZE / 4) {
+    if (bev_context_ssl->recv_window < HTTP2_STREAM_WINDOW_SIZE / 2 && (bufferevent_get_enabled(bev) & EV_READ)
+        && bev_context_ssl->wss_context->output) {
         MOGD(bev_context_ssl->wss_context, "stream %u recv window %zu",
              bev_context_ssl->stream_id, bev_context_ssl->recv_window);
         build_http2_frame(header, 4, 8, 0, bev_context_ssl->stream_id);
-        delta = MAX_WINDOW_SIZE - (uint32_t) bev_context_ssl->recv_window;
+        delta = HTTP2_STREAM_WINDOW_SIZE - (uint32_t) bev_context_ssl->recv_window;
         store_be32(header + HTTP2_HEADER_LENGTH, delta);
-        bev_context_ssl->recv_window = MAX_WINDOW_SIZE;
+        bev_context_ssl->recv_window = HTTP2_STREAM_WINDOW_SIZE;
         evbuffer_add(bev_context_ssl->wss_context->output, header, HTTP2_HEADER_LENGTH + 4);
+        event_active(bev_context_ssl->wss_context->event_mux, EV_TIMEOUT, 0);
     }
     return 1;
 }
@@ -466,7 +474,7 @@ static void handle_http2_frame(struct bufferevent_http_stream *http_stream, stru
             if (http2_frame->flag & 1) {
                 what = BEV_EVENT_EOF;
             }
-            if (!update_stream_window(bev_context_ssl, http2_frame->length)) {
+            if (!update_stream_window(bev, http2_frame->length)) {
                 what = BEV_EVENT_ERROR;
             }
         }
@@ -1190,11 +1198,18 @@ static void bufferevent_readcb(evutil_socket_t fd, short event, void *arg) {
     uint8_t closing;
     short what = BEV_EVENT_READING;
     struct bufferevent *bev = arg;
+    struct bev_context_ssl *bev_context_ssl;
 
     (void) fd;
     if (event == EV_TIMEOUT) {
         what |= BEV_EVENT_TIMEOUT;
         goto error;
+    }
+
+    bev_context_ssl = bufferevent_get_context(bev);
+    if (bev_context_ssl->http == http2) {
+        update_stream_window(bev, 0);
+        return;
     }
 
 loop:

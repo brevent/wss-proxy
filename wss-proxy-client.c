@@ -448,7 +448,7 @@ static size_t build_http_request_v2(struct wss_mux_context *wss_context, int udp
     header_length = buffer - header - HTTP2_HEADER_LENGTH;
     build_http2_frame(header, header_length, 1, 4, stream_id);
     buffer += build_http2_frame(buffer, 0x4, 0x8, 0, stream_id); // window_update
-    store_be32(buffer, MAX_WINDOW_SIZE - DEFAULT_INITIAL_WINDOW_SIZE);
+    store_be32(buffer, HTTP2_STREAM_WINDOW_SIZE - DEFAULT_INITIAL_WINDOW_SIZE);
     buffer += 4;
     return (char *) buffer - request;
 }
@@ -476,14 +476,14 @@ static struct bufferevent *connect_wss(struct wss_mux_context *wss_context, stru
     } else if (wss_context->server.http2) {
         bev_context_ssl = bufferevent_get_context(tev);
         length = build_http_request_v2(wss_context, udp, request, bev_context_ssl->stream_id);
-        bev_context_ssl->recv_window = MAX_WINDOW_SIZE;
+        bev_context_ssl->recv_window = HTTP2_STREAM_WINDOW_SIZE;
         LOGD("stream %u recv window %zu", bev_context_ssl->stream_id, bev_context_ssl->recv_window);
         cb = http_response_cb_v2;
     } else {
         length = build_http_request(wss_context, udp, request);
         cb = http_response_cb;
     }
-    bufferevent_set_timeouts(tev, &tv, &tv);
+    bufferevent_set_timeouts(tev, &tv, NULL);
     bufferevent_setcb(tev, cb, NULL, tev_raw_event_cb, raw);
     bufferevent_enable(tev, EV_READ | EV_WRITE);
     if (wss_context->server.http2) {
