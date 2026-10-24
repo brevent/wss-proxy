@@ -83,7 +83,7 @@ static int init_wss_addr(struct wss_server_info *server) {
     int port, mux;
     size_t length;
     char *end;
-    const char *value, *wss;
+    const char *value;
     const char *remote_host = getenv("SS_REMOTE_HOST");
     const char *remote_port = getenv("SS_REMOTE_PORT");
     const char *options = getenv("SS_PLUGIN_OPTIONS");
@@ -121,10 +121,6 @@ static int init_wss_addr(struct wss_server_info *server) {
     if (server->path == NULL) {
         server->path = "/";
     }
-    // tls
-    if ((value = find_option(options, "tls", "1")) != NULL) {
-        server->tls = strtol(value, NULL, 10) == 1;
-    }
     // http2
     if ((value = find_option(options, "http2", "1")) != NULL) {
         server->http2 = strtol(value, NULL, 10) == 1;
@@ -137,6 +133,12 @@ static int init_wss_addr(struct wss_server_info *server) {
         return EINVAL;
 #endif
     }
+    // tls
+    if (!server->http2 && !server->http3
+        && ((value = find_option(options, "tls", "1")) == NULL || strtol(value, NULL, 10) != 1)) {
+        LOGE("tls, http2 or http3 is required");
+        return EINVAL;
+    }
     // loglevel
     if ((value = find_option(options, "loglevel", NULL)) != NULL) {
         init_log_level(value);
@@ -147,13 +149,6 @@ static int init_wss_addr(struct wss_server_info *server) {
         mux = strtol(value, NULL, 10) == 1;
     } else {
         mux = 1;
-    }
-
-    // wss
-    if ((value = find_option(options, "ws", "1")) != NULL) {
-        server->ws = strtol(value, NULL, 10) == 1;
-    } else {
-        server->ws = 1;
     }
 
     // ipv6
@@ -199,30 +194,12 @@ static int init_wss_addr(struct wss_server_info *server) {
         server->http2 = 0;
     }
 
-    if (server->http3 || server->http2) {
-        server->tls = 1;
-        server->ws = 1;
-        server->mux = 1;
-        LOGI("%s (tls%s ws)", server->http3 ? "http3" : "http2", server->mux ? " mux" : "");
-    } else if (server->ws && mux) {
-        server->mux = 0;
+    if (!server->http2 && !server->http3 && mux) {
         LOGW("mux %d is unsupported", mux);
     }
 
-    if (server->ws) {
-        if (server->tls) {
-            wss = "wss";
-        } else {
-            wss = "ws";
-        }
-    } else {
-        if (server->tls) {
-            wss = "sss";
-        } else {
-            wss = "ss";
-        }
-    }
-    LOGI("wss client%s %s:%d (%s://%s%s)", server->ipv6 ? "6" : "", remote_host, port, wss, server->host, server->path);
+    LOGI("wss client%s %s:%d (wss://%s%s%s)", server->ipv6 ? "6" : "", remote_host, port, server->host, server->path,
+         server->http3 ? " over http3" : server->http2 ? " over http2" : "");
     return 0;
 invalid:
     free((char *) server->host);
@@ -259,11 +236,7 @@ static void http_response_cb(struct bufferevent *tev, void *raw) {
     // 0123456789abc
     if (memcmp(&buffer[9], "101 ", 4) == 0) {
         LOGD("wss is ready for peer %d", get_peer_port(raw));
-        if (strcasestr(buffer, X_UPGRADE ": " SHADOWSOCKS "\r\n")) {
-            tunnel_ss(raw, tev);
-        } else {
-            tunnel_wss(raw, tev, NULL);
-        }
+        tunnel_wss(raw, tev, NULL);
     } else {
         buffer[0xc] = '\0';
         LOGE("wss fail for peer %d, status: %s", get_peer_port(raw), &buffer[9]);
@@ -290,9 +263,6 @@ static size_t build_http_request(struct wss_mux_context *wss_context, int udp, c
                         sec_websocket_key, wss_context->user_agent);
     if (udp) {
         append_buffer(request, X_SOCK_TYPE ": " SOCK_TYPE_UDP "\r\n");
-    }
-    if (!wss_context->server.ws) {
-        append_buffer(request, X_UPGRADE ": " SHADOWSOCKS "\r\n");
     }
     append_buffer(request, "\r\n");
     return request - start;
@@ -774,7 +744,7 @@ int main() {
     int code = 1;
     struct event_base *base = NULL;
     struct event_config *cfg = NULL;
-    struct event *event_parent = NULL, *event_sigquit = NULL;
+    struct event *event_parent = NULL;
     struct sockaddr_storage raw_addr, extra_raw_addr;
     struct server_context server_context, extra_server_context;
     int socklen, extra_port;
@@ -796,47 +766,45 @@ int main() {
         return 1;
     }
 
-    if (wss_context.server.tls) {
-        if (wss_context.server.http3) {
-            wss_context.ssl_ctx = ssl_ctx_new_http3();
-        } else {
-            wss_context.ssl_ctx = SSL_CTX_new(TLS_client_method());
-        }
-        if (!wss_context.ssl_ctx) {
-            LOGE("cannot create ssl bev_context");
-            goto error;
-        }
-        SSL_CTX_set_mode(wss_context.ssl_ctx, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
-        SSL_CTX_set_verify(wss_context.ssl_ctx,
-                           strcmp(wss_context.server.host, "localhost") == 0 ? SSL_VERIFY_NONE : SSL_VERIFY_PEER,
-                           NULL);
-#ifdef _WIN32
-        {
-            size_t count = 0;
-            X509_STORE *store = SSL_CTX_get_cert_store(wss_context.ssl_ctx);
-            add_cert_for_store(store, "ROOT", &count);
-            add_cert_for_store(store, "CA", &count);
-            if (!count) {
-                LOGW("cannot add trusted certificate store");
-            } else {
-                LOGI("added %zu certs", count);
-            }
-        }
-#else
-        if (!SSL_CTX_set_default_verify_paths(wss_context.ssl_ctx)) {
-            LOGE("cannot set default trusted certificate store");
-            goto error;
-        }
-#endif
-        if (!wss_context.server.http3
-            && !SSL_CTX_set_min_proto_version(wss_context.ssl_ctx, TLS1_2_VERSION)) {
-            LOGE("cannot set minimum TLS to 1.2");
-            goto error;
-        }
-#ifdef HAVE_SSL_CTX_SET_KEYLOG_CALLBACK
-        SSL_CTX_set_keylog_callback(wss_context.ssl_ctx, ssl_keylog_callback);
-#endif
+    if (wss_context.server.http3) {
+        wss_context.ssl_ctx = ssl_ctx_new_http3();
+    } else {
+        wss_context.ssl_ctx = SSL_CTX_new(TLS_client_method());
     }
+    if (!wss_context.ssl_ctx) {
+        LOGE("cannot create ssl bev_context");
+        goto error;
+    }
+    SSL_CTX_set_mode(wss_context.ssl_ctx, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
+    SSL_CTX_set_verify(wss_context.ssl_ctx,
+                       strcmp(wss_context.server.host, "localhost") == 0 ? SSL_VERIFY_NONE : SSL_VERIFY_PEER,
+                       NULL);
+#ifdef _WIN32
+    {
+        size_t count = 0;
+        X509_STORE *store = SSL_CTX_get_cert_store(wss_context.ssl_ctx);
+        add_cert_for_store(store, "ROOT", &count);
+        add_cert_for_store(store, "CA", &count);
+        if (!count) {
+            LOGW("cannot add trusted certificate store");
+        } else {
+            LOGI("added %zu certs", count);
+        }
+    }
+#else
+    if (!SSL_CTX_set_default_verify_paths(wss_context.ssl_ctx)) {
+        LOGE("cannot set default trusted certificate store");
+        goto error;
+    }
+#endif
+    if (!wss_context.server.http3
+        && !SSL_CTX_set_min_proto_version(wss_context.ssl_ctx, TLS1_2_VERSION)) {
+        LOGE("cannot set minimum TLS to 1.2");
+        goto error;
+    }
+#ifdef HAVE_SSL_CTX_SET_KEYLOG_CALLBACK
+    SSL_CTX_set_keylog_callback(wss_context.ssl_ctx, ssl_keylog_callback);
+#endif
 
     socklen = sizeof(raw_addr);
     memset(&raw_addr, 0, socklen);
@@ -883,7 +851,7 @@ int main() {
              WSS_PROXY_VERSION, event_get_version(), OpenSSL_version(OPENSSL_VERSION));
 #endif
 
-    if (init_event_signal(base, &event_parent, &event_sigquit)) {
+    if (init_event_signal(base, &event_parent)) {
         goto error;
     }
 
@@ -906,9 +874,6 @@ error:
     free_context_ssl(&wss_context);
     if (event_parent) {
         event_free(event_parent);
-    }
-    if (event_sigquit) {
-        event_free(event_sigquit);
     }
     if (base) {
         event_base_free(base);

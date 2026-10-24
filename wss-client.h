@@ -25,12 +25,9 @@ enum http {
 };
 
 struct wss_server_info {
-    uint8_t tls: 1;
-    uint8_t ws: 1;
     uint8_t ipv6: 1;
     uint8_t http2: 1;
     uint8_t http3: 1;
-    uint8_t mux: 1;
     uint16_t port;
     const char *addr;
     const char *host;

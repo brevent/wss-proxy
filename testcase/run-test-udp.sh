@@ -44,7 +44,7 @@ function update_tls_server() {
 }
 
 function cleanup() {
-    echo $echo_server_pid "$lpid" "$lpid2" "$lpid3" "$lpid4" "$lpid5" $spid | xargs echo | xargs kill
+    echo $echo_server_pid "$lpid" "$lpid2" "$lpid3" $spid | xargs echo | xargs kill
     if which docker >/dev/null 2>&1 && docker version 2>/dev/null | grep -i linux/amd64; then
         docker ps | grep -F ':9999->443/udp' | awk '{print $1}' | xargs docker stop
     else
@@ -66,18 +66,6 @@ function check() {
 }
 
 trap cleanup SIGINT SIGTERM ERR EXIT
-
-echo wss-proxy client - ss
-$sslocal -c ../testcase/sip003u-client-ss.json &
-lpid=$!
-sleep 1
-check 1081
-
-echo wss-proxy client - ws
-$sslocal -c ../testcase/sip003u-client-ws.json &
-lpid2=$!
-sleep 1
-check 1082
 
 if which docker >/dev/null 2>&1 && docker version 2>/dev/null | grep -i linux/amd64; then
     if [ ! -f ../testcase/nginx/pcre2-10.23-2.el7.x86_64.rpm ]; then
@@ -114,13 +102,13 @@ fi
 
 echo wss-proxy client - tls
 $sslocal -c ../testcase/sip003u-client-tls.json &
-lpid3=$!
+lpid=$!
 sleep 1
 check 1083
 
 echo wss-proxy client - http2
 $sslocal -c ../testcase/sip003u-client-http2.json &
-lpid4=$!
+lpid2=$!
 sleep 1
 check 1084
 
@@ -132,7 +120,7 @@ fi
 if ! grep -a "http3 is unsupported" $wss_proxy_client >/dev/null; then
     echo wss-proxy client - http3
     $sslocal -c ../testcase/sip003u-client-http3.json &
-    lpid5=$!
+    lpid3=$!
     sleep 1
     check 1085
 fi

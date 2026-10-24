@@ -232,7 +232,7 @@ static void http_request_cb(struct bufferevent *tev, void *ctx) {
     struct bufferevent *raw;
     struct raw_server_info *raw_server_info = ctx;
     char request[1024], sec_websocket_accept[29], *response;
-    int ss, udp;
+    int udp;
 
     memset(request, 0, sizeof(request));
     input = bufferevent_get_input(tev);
@@ -272,23 +272,15 @@ static void http_request_cb(struct bufferevent *tev, void *ctx) {
     }
     bufferevent_setcb(raw, NULL, NULL, raw_event_cb, tev);
 
-    ss = strcasestr(request, "\r\n" X_UPGRADE ": " SHADOWSOCKS "\r\n") != NULL;
     response = request;
     response += snprintf(response, 1024, "HTTP/1.1 101 Switching Protocols\r\n"
                                          "Upgrade: websocket\r\n"
                                          "Connection: Upgrade\r\n"
                                          "Sec-WebSocket-Accept: %s\r\n", sec_websocket_accept);
-    if (ss) {
-        append_buffer(response, X_UPGRADE ": " SHADOWSOCKS "\r\n");
-    }
     append_buffer(response, "\r\n");
     bufferevent_write(tev, request, response - request);
 
-    if (ss) {
-        tunnel_ss(raw, tev);
-    } else {
-        tunnel_wss(raw, tev, NULL);
-    }
+    tunnel_wss(raw, tev, NULL);
     return;
 error:
     evbuffer_drain(input, evbuffer_get_length(input));
@@ -333,7 +325,7 @@ int main() {
     int code = 1;
     struct event_base *base = NULL;
     struct event_config *cfg = NULL;
-    struct event *event_parent = NULL, *event_sigquit = NULL;
+    struct event *event_parent = NULL;
     const char *addr;
     int port;
     struct sockaddr_storage sockaddr_storage;
@@ -403,7 +395,7 @@ int main() {
         goto error;
     }
 
-    if (init_event_signal(base, &event_parent, &event_sigquit)) {
+    if (init_event_signal(base, &event_parent)) {
         goto error;
     }
 
@@ -431,9 +423,6 @@ error:
     }
     if (event_parent) {
         event_free(event_parent);
-    }
-    if (event_sigquit) {
-        event_free(event_sigquit);
     }
     if (listener) {
         evconnlistener_free(listener);

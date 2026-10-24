@@ -33,15 +33,13 @@ cmake --build build
 ```
 
 #### Options compatible with [v2ray-plugin](https://github.com/shadowsocks/v2ray-plugin/)
-- `tls`, `tls` for https / wss, otherwise http / ws
+- `tls`, `tls` for https / wss (only `tls` is supported)
 - `host`, host name
 - `path`, default `/`
 - `loglevel`, default `INFO`, support `DEBUG`, `INFO`, `WARN`, `ERROR`
 - `mux`, default `1` (only `0` is supported, specify for compatible with `v2ray-plugin`)
 
 #### Options for `wss-proxy-client` only
-- `ws` (since 0.2.6, [e7b7f36](https://github.com/brevent/wss-proxy/commit/e7b7f36)), default `1` to use websocket after handshake, `0` to use raw shadowsocks after handshake
-  - don't use it if you're unsure
 - `extra-listen-port` (since 0.3.0, [689f0e7](https://github.com/brevent/wss-proxy/commit/689f0e7)), extra listen port for shadowsocks client without sip003u
 - `syslog` (since 0.3.3, [47d4681](https://github.com/brevent/wss-proxy/commit/47d4681)), log to syslog if supported
 - `ipv6` (since 0.3.4, [a8b5f71](https://github.com/brevent/wss-proxy/commit/a8b5f71)), prefer ipv6 (should fallback to ipv4 if no ipv6)
