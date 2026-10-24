@@ -91,7 +91,7 @@ struct bev_context_ssl {
     enum http http;
     uint8_t upgrade: 1;
     uint8_t connected: 1;
-    uint8_t rst_sent: 1;
+    uint8_t no_end_stream: 1;
     struct evbuffer *frame;
     uint32_t stream_id;
     uint32_t initial_window_size;
@@ -107,7 +107,6 @@ struct bufferevent_http_stream {
     volatile uint8_t mark_free: 1;
     uint8_t in_closed: 1;
     uint8_t out_closed: 1;
-    uint8_t rst_sent: 1;
     struct wss_context *wss_context;
 };
 
@@ -148,8 +147,6 @@ size_t build_http2_frame(uint8_t *frame, size_t length, uint8_t type, uint8_t fl
 void reset_streams_count(struct wss_context *wss_context);
 
 void abort_http_stream(struct bufferevent_http_stream *http_stream);
-
-void reset_http2_stream(struct wss_context *wss_context, uint32_t stream_id, int status);
 
 int decode_huffman_digit(uint8_t *buffer, size_t size);
 
