@@ -867,51 +867,12 @@ error:
     return check_ssl_error(bev_context_ssl, ssl_write, ret);
 }
 
-static ssize_t check_socket_error(ssize_t n, evutil_socket_t fd) {
-    int err;
-
-    (void) fd;
-    if (n >= 0) {
-        return n;
-    }
-    err = evutil_socket_geterror(fd);
-    if (EVUTIL_ERR_RW_RETRIABLE(err)) {
-        return WSS_AGAIN;
-    } else {
-        LOGW("socket error: %s (%d)", evutil_socket_error_to_string(err), err);
-        return WSS_ERROR;
-    }
+static ssize_t do_read(struct bufferevent *bev) {
+    return do_ssl_read(bufferevent_get_context(bev), bev);
 }
 
-static ssize_t do_read(struct bufferevent *bev, evutil_socket_t fd) {
-    ssize_t res;
-    uint8_t buffer[WSS_PAYLOAD_SIZE];
-    struct bev_context_ssl *bev_context_ssl;
-
-    bev_context_ssl = bufferevent_get_context(bev);
-    if (bev_context_ssl) {
-        return do_ssl_read(bev_context_ssl, bev);
-    } else if (fd > 0) {
-        res = check_socket_error(recv(fd, (char *) &buffer, sizeof(buffer), 0), fd);
-        if (res > 0) {
-            evbuffer_add(bev->input, buffer, res);
-        }
-        return res;
-    } else {
-        LOGW("no ssl and no fd");
-        return WSS_ERROR;
-    }
-}
-
-static ssize_t do_write(struct bufferevent *bev, evutil_socket_t fd, uint8_t *buffer, size_t size) {
-    struct bev_context_ssl *bev_context_ssl;
-
-    bev_context_ssl = bufferevent_get_context(bev);
-    if (bev_context_ssl != NULL) {
-        return do_ssl_write(bev_context_ssl, buffer, size);
-    } else {
-        return check_socket_error(send(fd, (const char *) buffer, (int) size, 0), fd);
-    }
+static ssize_t do_write(struct bufferevent *bev, uint8_t *buffer, size_t size) {
+    return do_ssl_write(bufferevent_get_context(bev), buffer, size);
 }
 
 void abort_http_stream(struct bufferevent_http_stream *http_stream) {
@@ -1221,13 +1182,14 @@ static void bufferevent_readcb(evutil_socket_t fd, short event, void *arg) {
     short what = BEV_EVENT_READING;
     struct bufferevent *bev = arg;
 
+    (void) fd;
     if (event == EV_TIMEOUT) {
         what |= BEV_EVENT_TIMEOUT;
         goto error;
     }
 
 loop:
-    res = do_read(bev, fd);
+    res = do_read(bev);
     if (res > 0 && bev->readcb) {
         closing = bev->cbarg == NULL;
         bev->readcb(bev, bev->cbarg);
@@ -1274,16 +1236,14 @@ static enum status is_ssl_connected(struct bev_context_ssl *bev_context_ssl, evu
     int err;
     ev_socklen_t len;
 
-    if (bev_context_ssl) {
-        if (bev_context_ssl->http == http1 && bev_context_ssl->connected) {
-            return connected;
-        }
-        if (bev_context_ssl->http == http2 && bev_context_ssl->wss_context->ssl_connected) {
-            return connected;
-        }
-        if (bev_context_ssl->http == http3) {
-            return connected;
-        }
+    if (bev_context_ssl->http == http1 && bev_context_ssl->connected) {
+        return connected;
+    }
+    if (bev_context_ssl->http == http2 && bev_context_ssl->wss_context->ssl_connected) {
+        return connected;
+    }
+    if (bev_context_ssl->http == http3) {
+        return connected;
     }
     len = sizeof(err);
     if (getsockopt(fd, SOL_SOCKET, SO_ERROR, (void *) &err, &len) < 0) {
@@ -1299,13 +1259,11 @@ static enum status is_ssl_connected(struct bev_context_ssl *bev_context_ssl, evu
             return error;
         }
     }
-    if (bev_context_ssl) {
-        if (bev_context_ssl->http == http1) {
-            bev_context_ssl->connected = 1;
-        }
-        if (bev_context_ssl->http == http2) {
-            bev_context_ssl->wss_context->ssl_connected = 1;
-        }
+    if (bev_context_ssl->http == http1) {
+        bev_context_ssl->connected = 1;
+    }
+    if (bev_context_ssl->http == http2) {
+        bev_context_ssl->wss_context->ssl_connected = 1;
     }
     return connected;
 }
@@ -1325,7 +1283,7 @@ static void bufferevent_writecb(evutil_socket_t fd, short event, void *arg) {
     }
 
     bev_context_ssl = bufferevent_get_context(bev);
-    if (bev_context_ssl && bev_context_ssl->wss_context->closed) {
+    if (bev_context_ssl->wss_context->closed) {
         MOGW(bev_context_ssl->wss_context, "http stream is on a closed connection, tev: %p", bev);
         what |= BEV_EVENT_ERROR;
         goto error;
@@ -1341,7 +1299,7 @@ static void bufferevent_writecb(evutil_socket_t fd, short event, void *arg) {
             break;
     }
 
-    if (bev_context_ssl && bev_context_ssl->http == http2) {
+    if (bev_context_ssl->http == http2) {
         wss_context = bev_context_ssl->wss_context;
         if (evbuffer_get_length(bev->output)) {
             LOGW("write to http stream instead of context, tev: %p", bev);
@@ -1353,7 +1311,7 @@ static void bufferevent_writecb(evutil_socket_t fd, short event, void *arg) {
     }
 
     while (evbuffer_get_length(output)) {
-        if (bev_context_ssl && bev_context_ssl->wss_context->ssl_error) {
+        if (bev_context_ssl->wss_context->ssl_error) {
             LOGW("http mux write ssl error, length: %zu, tev: %p", evbuffer_get_length(output), bev);
             evbuffer_drain(output, evbuffer_get_length(output));
             what |= BEV_EVENT_ERROR;
@@ -1365,7 +1323,7 @@ static void bufferevent_writecb(evutil_socket_t fd, short event, void *arg) {
             what |= BEV_EVENT_ERROR;
             goto error;
         }
-        res = do_write(bev, fd, buffer, size);
+        res = do_write(bev, buffer, size);
         if (res <= 0) {
             goto check;
         }
@@ -1418,7 +1376,7 @@ static evutil_socket_t init_ssl_sock(struct wss_context *wss_context, struct eve
     struct sockaddr_storage sockaddr;
     struct wss_mux_context *wss_mux_context = wss_context->wss_mux_context;
 
-    if (wss_context->server.tls && wss_context->server.mux) {
+    if (wss_context->server.http2 || wss_context->server.http3) {
         ssl = wss_context->ssl;
         if (ssl) {
             *ssl1 = ssl;
@@ -1461,10 +1419,6 @@ static evutil_socket_t init_ssl_sock(struct wss_context *wss_context, struct eve
             LOGW("cannot connect: %s", evutil_socket_error_to_string(socket_error));
             goto error;
         }
-    }
-
-    if (!wss_context->server.tls) {
-        return sock;
     }
 
     ssl = init_ssl(wss_context, base, sock);
@@ -1520,9 +1474,6 @@ static const struct bev_context const_bev_context_ssl = {
 
 static struct bev_context_ssl *init_bev_context_ssl(struct wss_context *wss_context, SSL *ssl) {
     struct bev_context_ssl *bev_context_ssl;
-    if (!wss_context->server.tls) {
-        return NULL;
-    }
     bev_context_ssl = calloc(1, sizeof(struct bev_context_ssl));
     if (!bev_context_ssl) {
         return NULL;
@@ -1571,15 +1522,17 @@ struct bufferevent *bufferevent_wss_new(struct wss_mux_context *wss_mux_context,
     struct bev_context_ssl *bev_context_ssl = NULL;
     struct bufferevent_http_stream *http_stream;
     struct wss_context *wss_context;
+    int mux;
 
+    mux = server.http2 || server.http3;
 start:
     tev = NULL;
-    wss_context = server.mux ? pick_wss_context(wss_mux_context) : wss_context_new(wss_mux_context);
+    wss_context = mux ? pick_wss_context(wss_mux_context) : wss_context_new(wss_mux_context);
     if (!wss_context) {
         return NULL;
     }
     base = bufferevent_get_base(raw);
-    tev = bufferevent_socket_new(base, -1, server.mux ? 0 : BEV_OPT_CLOSE_ON_FREE);
+    tev = bufferevent_socket_new(base, -1, mux ? 0 : BEV_OPT_CLOSE_ON_FREE);
     if (tev == NULL) {
         LOGW("cannot create bufferevent socket");
         goto error;
@@ -1600,36 +1553,34 @@ start:
                  EV_READ | EV_PERSIST | EV_FINALIZE, bufferevent_readcb, tev);
     event_assign(&tev->ev_write, tev->ev_base, sock,
                  EV_WRITE | EV_PERSIST | EV_FINALIZE, bufferevent_writecb, tev);
-    if (wss_context->server.tls) {
-        bev_context_ssl = init_bev_context_ssl(wss_context, ssl);
-        if (!bev_context_ssl) {
+    bev_context_ssl = init_bev_context_ssl(wss_context, ssl);
+    if (!bev_context_ssl) {
+        goto error;
+    }
+    bev_context_ssl->bev_context = &const_bev_context_ssl;
+    bufferevent_set_context(tev, bev_context_ssl);
+    if (wss_context->server.http2 || wss_context->server.http3) {
+        http_stream = calloc(1, sizeof(struct bufferevent_http_stream));
+        if (!http_stream) {
+            MOGW(wss_context, "cannot new http stream");
+            bev_context_ssl->rst_sent = 1; // avoid send rst again
             goto error;
         }
-        bev_context_ssl->bev_context = &const_bev_context_ssl;
-        bufferevent_set_context(tev, bev_context_ssl);
-        if (wss_context->server.http2 || wss_context->server.http3) {
-            http_stream = calloc(1, sizeof(struct bufferevent_http_stream));
-            if (!http_stream) {
-                MOGW(wss_context, "cannot new http stream");
-                bev_context_ssl->rst_sent = 1; // avoid send rst again
-                goto error;
-            }
-            http_stream->stream_id = bev_context_ssl->stream_id;
-            http_stream->bev = tev;
-            http_stream->wss_context = wss_context;
-            lh_bufferevent_http_stream_insert(wss_context->http_streams, http_stream);
-            wss_context->http_streams_count++;
-            if (!event_pending(SSL_get_app_data(wss_context->ssl), EV_READ, NULL)) {
-                event_add(SSL_get_app_data(wss_context->ssl), NULL);
-                LOGD("add event for read");
-            }
-            MOGD(wss_context, "http stream %u: %p, total: %lu", http_stream->stream_id, http_stream,
-                 lh_bufferevent_http_stream_num_items(wss_context->http_streams));
+        http_stream->stream_id = bev_context_ssl->stream_id;
+        http_stream->bev = tev;
+        http_stream->wss_context = wss_context;
+        lh_bufferevent_http_stream_insert(wss_context->http_streams, http_stream);
+        wss_context->http_streams_count++;
+        if (!event_pending(SSL_get_app_data(wss_context->ssl), EV_READ, NULL)) {
+            event_add(SSL_get_app_data(wss_context->ssl), NULL);
+            LOGD("add event for read");
         }
+        MOGD(wss_context, "http stream %u: %p, total: %lu", http_stream->stream_id, http_stream,
+             lh_bufferevent_http_stream_num_items(wss_context->http_streams));
     }
     LOGD("bufferevent_wss_new, tev: %p, raw: %p", tev, raw);
 
-    if (!server.mux) {
+    if (!mux) {
         wss_context_unref(wss_context);
     }
     return tev;
@@ -1637,7 +1588,7 @@ error:
     if (tev != NULL) {
         safe_bufferevent_free(tev);
     }
-    if (!server.mux) {
+    if (!mux) {
         wss_context_unref(wss_context);
     } else if (wss_context->ssl_error) {
         goto start;

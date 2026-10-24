@@ -180,7 +180,7 @@ const char *find_option(const char *options, const char *key, const char *no_val
 
 int find_option_port(const char *key, int default_port);
 
-int init_event_signal(struct event_base *base, struct event **event_parent, struct event **event_sigquit);
+int init_event_signal(struct event_base *base, struct event **event_parent);
 
 int is_websocket_key(const char *websocket_key);
 
@@ -206,10 +206,6 @@ void send_ping(struct bufferevent *tev, const char *payload, uint8_t size);
 
 void set_ping_timeout(struct bufferevent *wev, int sec);
 #endif
-
-#define X_UPGRADE "X-Upgrade"
-#define SHADOWSOCKS "shadowsocks"
-void tunnel_ss(struct bufferevent *raw, struct bufferevent *tev);
 
 #define X_SOCK_TYPE "X-Sock-Type"
 #define SOCK_TYPE_UDP "udp"

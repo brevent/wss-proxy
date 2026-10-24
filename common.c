@@ -277,13 +277,7 @@ static void on_native_signal(int signal) {
     }
 }
 
-static void sigquit_cb(evutil_socket_t fd, short event, void *arg) {
-    (void) fd;
-    (void) event;
-    event_base_loopbreak((struct event_base *) arg);
-}
-
-int init_event_signal(struct event_base *base, struct event **event_parent, struct event **event_sigquit) {
+int init_event_signal(struct event_base *base, struct event **event_parent) {
 #ifdef RLIMIT_NOFILE
     struct rlimit rlimit;
 #endif
@@ -325,19 +319,7 @@ int init_event_signal(struct event_base *base, struct event **event_parent, stru
 #ifdef SIGPIPE
     signal(SIGPIPE, on_native_signal);
 #endif
-#ifdef SIGQUIT
-    *event_sigquit = evsignal_new(base, SIGQUIT, sigquit_cb, base);
-    if (!*event_sigquit) {
-        LOGE("cannot event sigquit");
-        return -1;
-    } else {
-        event_add(*event_sigquit, NULL);
-        return 0;
-    }
-#else
-    (void) event_sigquit;
     return 0;
-#endif
 }
 
 int is_websocket_key(const char *websocket_key) {
@@ -947,51 +929,6 @@ void tunnel_wss(struct bufferevent *raw, struct bufferevent *tev, bufferevent_fi
 
     bufferevent_enable(raw, EV_READ | EV_WRITE);
     bufferevent_setcb(raw, raw_forward_cb, NULL, raw_event_cb_wss, wev);
-    raw->readcb(raw, raw->cbarg);
-}
-
-static void wss_event_cb_ss(struct bufferevent *tev, short event, void *raw) {
-    uint16_t port;
-    if (event & (BEV_EVENT_EOF | BEV_EVENT_ERROR)) {
-#ifdef WSS_PROXY_CLIENT
-        port = get_peer_port(raw);
-#endif
-#ifdef WSS_PROXY_SERVER
-        (void) raw;
-        port = get_peer_port(tev);
-#endif
-        LOGD("connection %u closing from wss %p, event: 0x%02x", port, tev, event);
-        do_close_wss(tev);
-    }
-}
-
-static void raw_forward_cb_ss(struct bufferevent *raw, void *tev) {
-    size_t total_size;
-    struct evbuffer *src;
-    struct evbuffer *dst;
-
-    src = bufferevent_get_input(raw);
-    total_size = evbuffer_get_length(src);
-    if (!total_size) {
-        return;
-    }
-    if (is_udp(raw) && get_wss_pending(tev) >= MAX_UDP_PROXY_BUFFER) {
-        LOGW("drop %zu bytes for peer %d as wss is full", total_size, get_peer_port(raw));
-        evbuffer_drain(src, total_size);
-        return;
-    }
-    dst = bufferevent_get_output(tev);
-    evbuffer_add_buffer(dst, src);
-}
-
-void tunnel_ss(struct bufferevent *raw, struct bufferevent *tev) {
-    evbuffer_add_cb(tev->output, tev_write_cb, raw);
-    bufferevent_set_timeouts(tev, NULL, NULL);
-    bufferevent_enable(tev, EV_READ | EV_WRITE);
-    bufferevent_setcb(tev, wss_forward_cb, NULL, wss_event_cb_ss, raw);
-
-    bufferevent_enable(raw, EV_READ | EV_WRITE);
-    bufferevent_setcb(raw, raw_forward_cb_ss, NULL, raw_event_cb, tev);
     raw->readcb(raw, raw->cbarg);
 }
 
