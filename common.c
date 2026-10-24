@@ -18,6 +18,10 @@
 #endif
 #include "common.h"
 
+#ifdef _WIN32
+#define SHUT_WR SD_SEND
+#endif
+
 static int send_close(struct bufferevent *tev, uint16_t reason, short event);
 
 static void tev_write_cb(struct evbuffer *buffer, const struct evbuffer_cb_info *info, void *arg);
@@ -44,6 +48,7 @@ void safe_bufferevent_free(struct bufferevent *bev) {
         LOGD("context type %s", (*bev_context)->name);
         (*bev_context)->free(bev_context);
         bufferevent_set_context(bev, NULL);
+        bufferevent_disable(bev, EV_READ | EV_WRITE);
     }
     bufferevent_free(bev);
 }
@@ -425,6 +430,10 @@ void set_ping_timeout(struct bufferevent *wev, int sec) {
 }
 #endif
 
+static int is_closing(struct bufferevent *tev) {
+    return tev->cbarg == NULL || get_cbarg(tev->cbarg) == NULL;
+}
+
 static enum bufferevent_filter_result common_wss_input_filter(struct evbuffer *src, struct evbuffer *dst,
                                                               void *tev, int tcp) {
     uint8_t header[MAX_WS_HEADER_SIZE];
@@ -433,6 +442,10 @@ static enum bufferevent_filter_result common_wss_input_filter(struct evbuffer *s
     struct ws_header_info info;
     struct udp_frame udp_frame;
 
+    if (is_closing(tev)) {
+        evbuffer_drain(src, evbuffer_get_length(src));
+        return BEV_OK;
+    }
     header_size = evbuffer_copyout(src, header, sizeof(header));
     if (header_size < WS_HEADER_SIZE) {
         return BEV_NEED_MORE;
@@ -560,11 +573,41 @@ static enum bufferevent_filter_result wss_input_filter_udp(struct evbuffer *src,
     return common_wss_input_filter(src, dst, tev, 0);
 }
 
+static void set_close_deadline(struct bufferevent *bev) {
+    struct timeval timeout = {WSS_CLOSE_TIMEOUT, 0}, deadline;
+
+    event_base_gettimeofday_cached(bufferevent_get_base(bev), &deadline);
+    deadline.tv_sec += WSS_CLOSE_TIMEOUT;
+    bufferevent_set_timeouts(bev, &timeout, &deadline);
+}
+
+static void bev_drain_cb(struct bufferevent *bev, void *arg) {
+    struct timeval now;
+
+    (void) arg;
+    evbuffer_drain(bev->input, evbuffer_get_length(bev->input));
+    if (!bev->timeout_write.tv_sec) {
+        return;
+    }
+    event_base_gettimeofday_cached(bufferevent_get_base(bev), &now);
+    if (evutil_timercmp(&now, &bev->timeout_write, >=)) {
+        LOGD("free bev %p after close deadline", bev);
+        bufferevent_free(bev);
+    }
+}
+
 static void bev_empty_cb(struct bufferevent *bev, void *arg) {
     (void) arg;
     if (evbuffer_get_length(bev->output) == 0) {
-        LOGD("free bev %p", bev);
-        bufferevent_free(bev);
+        if ((bufferevent_get_enabled(bev) & EV_READ) && !bufferevent_get_context(bev)
+            && shutdown(bufferevent_getfd(bev), SHUT_WR) == 0) {
+            LOGD("shutdown bev %p", bev);
+            bufferevent_disable(bev, EV_WRITE);
+            set_close_deadline(bev);
+        } else {
+            LOGD("free bev %p", bev);
+            bufferevent_free(bev);
+        }
     }
 }
 
@@ -577,6 +620,10 @@ static void bev_error_cb(struct bufferevent *bev, short event, void *arg) {
         return;
     }
     size = evbuffer_get_length(bev->output);
+    if (event == (BEV_EVENT_READING | BEV_EVENT_EOF) && size > 0 && !bufferevent_get_context(bev)) {
+        LOGD("bev %p eof, pending: %zu", bev, size);
+        return;
+    }
     if (size > 0) {
         LOGW("free bev %p, event: 0x%02x, pending: %zu", bev, event, size);
     } else {
@@ -585,81 +632,64 @@ static void bev_error_cb(struct bufferevent *bev, short event, void *arg) {
     bufferevent_free(bev);
 }
 
-static void bufferevent_free_when_empty(struct bufferevent *bev) {
-    if (evbuffer_get_length(bev->output)) {
-        struct timeval tv = {WSS_TIMEOUT, 0};
-        LOGD("free bev %p later, pending: %zu", bev, evbuffer_get_length(bev->output));
-        bufferevent_disable(bev, EV_READ);
-        bufferevent_enable(bev, EV_WRITE);
-        bufferevent_set_timeouts(bev, NULL, &tv);
-        bufferevent_setcb(bev, NULL, bev_empty_cb, bev_error_cb, NULL);
-    } else {
-        bufferevent_free(bev);
+void close_bufferevent_later(struct bufferevent *bev) {
+    LOGD("close bev %p when empty, pending: %zu", bev, evbuffer_get_length(bev->output));
+    bufferevent_set_timeouts(bev, NULL, NULL);
+    bufferevent_setcb(bev, bev_drain_cb, bev_empty_cb, bev_error_cb, NULL);
+    bufferevent_enable(bev, EV_READ | EV_WRITE);
+    bev_drain_cb(bev, NULL);
+    bev_empty_cb(bev, NULL);
+}
+
+static void wev_empty_cb(struct bufferevent *wev, void *arg) {
+    struct bufferevent *tev;
+
+    (void) arg;
+    if (evbuffer_get_length(bufferevent_get_output(wev)) == 0) {
+        tev = bufferevent_get_underlying(wev);
+        LOGD("free wev %p", wev);
+        bufferevent_free(wev);
+        close_bufferevent_later(tev);
     }
 }
 
-static void close_wev(struct bufferevent *wev, struct bufferevent *tev) {
+static void wev_error_cb(struct bufferevent *wev, short event, void *arg) {
     size_t pending;
 
+    if (!(event & (BEV_EVENT_EOF | BEV_EVENT_ERROR)) || !(event & (BEV_EVENT_READING | BEV_EVENT_WRITING))) {
+        return;
+    }
+    pending = evbuffer_get_length(bufferevent_get_output(wev));
+    if (pending) {
+        LOGW("wss %p is closed with %zu bytes discarded, event: 0x%02x",
+             bufferevent_get_underlying(wev), pending, event);
+    }
+    evbuffer_drain(bufferevent_get_output(wev), pending);
+    wev_empty_cb(wev, arg);
+}
+
+static void close_wev(struct bufferevent *wev, struct bufferevent *tev) {
     if (wev->cbarg && wev->cbarg != tev) {
         evbuffer_remove_cb(tev->output, tev_write_cb, wev->cbarg);
         evbuffer_remove_cb(wev->output, tev_write_cb, wev->cbarg);
-        bufferevent_free_when_empty(wev->cbarg);
-        wev->cbarg = NULL;
-        bufferevent_flush(wev, EV_WRITE, BEV_FINISHED);
-        pending = evbuffer_get_length(bufferevent_get_output(wev));
-        if (pending) {
-            LOGW("wss %p is closed with %zu bytes discarded", tev, pending);
-        }
-        bufferevent_free(wev);
+        close_bufferevent_later(wev->cbarg);
+        bufferevent_set_timeouts(tev, NULL, NULL);
+        bufferevent_enable(tev, EV_READ);
+        bufferevent_setcb(wev, NULL, wev_empty_cb, wev_error_cb, NULL);
+        wev_empty_cb(wev, NULL);
     } else {
         // wev is raw
         evbuffer_remove_cb(tev->output, tev_write_cb, wev);
-        bufferevent_free_when_empty(wev);
+        bufferevent_free(wev);
+        bufferevent_free(tev);
     }
 }
 
 static void do_close_wss(struct bufferevent *tev) {
     if (tev->cbarg) {
         close_wev(tev->cbarg, tev);
-    }
-    bufferevent_free_when_empty(tev);
-}
-
-static void close_wss_data_cb(struct bufferevent *tev, void *arg) {
-    (void) arg;
-    LOGD("close wss %p in data callback", tev);
-    do_close_wss(tev);
-}
-
-static void close_wss_event_cb(struct bufferevent *tev, short event, void *arg) {
-    (void) arg;
-    LOGD("close wss %p in event callback, event: 0x%02x", tev, event);
-    do_close_wss(tev);
-}
-
-static void close_bev_event_cb(evutil_socket_t fd, short event, void *arg) {
-    (void) fd;
-    LOGD("close bev %p in event: 0x%02x", arg, event);
-    do_close_wss(arg);
-}
-
-void close_bufferevent_later(struct bufferevent *tev) {
-    struct event *event;
-    evutil_socket_t sock;
-    struct timeval tv = {1, 0};
-
-    event = &(tev->ev_read);
-    sock = event_get_fd(event);
-    bufferevent_set_timeouts(tev, &tv, NULL);
-    if (sock > 0) {
-        bufferevent_setcb(tev, NULL, NULL, NULL, NULL);
-        event_del(event);
-        event_assign(event, tev->ev_base, sock, EV_READ | EV_PERSIST, close_bev_event_cb, tev);
-        event_add(event, &tv);
     } else {
-        bufferevent_setcb(tev, close_wss_data_cb, NULL, close_wss_event_cb, NULL);
-        bufferevent_enable(tev, EV_READ);
+        close_bufferevent_later(tev);
     }
 }
 
@@ -685,32 +715,14 @@ static int send_close(struct bufferevent *tev, uint16_t reason, short event) {
 }
 
 void close_wss(struct bufferevent *tev, enum close_reason close_reason, short event) {
-    int close_later;
-    struct bufferevent *wev;
-
-    if (close_reason == close_reason_raw) {
-        close_later = send_close(tev, CLOSE_GOING_AWAY, 0);
-    } else if (close_reason == close_reason_eof) {
+    if (close_reason == close_reason_raw || close_reason == close_reason_eof) {
         send_close(tev, CLOSE_GOING_AWAY, 0);
-        close_later = 0;
-    } else if (event & BEV_EVENT_EOF) {
-        // we can do nothing
-        close_later = 0;
-    } else {
+    } else if (!(event & BEV_EVENT_EOF)) {
         // we should have sent out
-        close_later = send_close(tev, CLOSE_INTERNAL_ERROR, 0);
+        send_close(tev, CLOSE_INTERNAL_ERROR, 0);
     }
-    wev = tev->cbarg;
-    if (close_later) {
-        LOGD("close wss %p later", tev);
-        close_bufferevent_later(tev);
-        if (wev) {
-            close_wev(wev, tev);
-        }
-    } else {
-        LOGD("close wss %p", tev);
-        do_close_wss(tev);
-    }
+    LOGD("close wss %p", tev);
+    do_close_wss(tev);
 }
 
 static size_t get_wss_pending(struct bufferevent *wev) {
@@ -841,7 +853,7 @@ static void raw_event_cb_wss(struct bufferevent *raw, short event, void *wev) {
                 evbuffer_remove_cb(tev->output, tev_write_cb, raw);
             }
             evbuffer_remove_cb(bufferevent_get_output(wev), tev_write_cb, raw);
-            bufferevent_free_when_empty(raw);
+            close_bufferevent_later(raw);
         }
     }
 }

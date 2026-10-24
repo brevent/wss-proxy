@@ -31,6 +31,8 @@ static void free_all_http_streams(struct wss_context *wss_context);
 
 static void flush_http_stream(struct bufferevent_http_stream *http_stream);
 
+static void discard_http_stream_output(struct bufferevent *tev);
+
 static void wss_context_unref(struct wss_context *wss_context);
 
 static unsigned long bufferevent_http_stream_hash(const bufferevent_http_stream *a) {
@@ -59,9 +61,10 @@ static void bev_context_ssl_free(void *context) {
     if (bev_context_ssl->http == http3) {
         free_context_ssl_http3(bev_context_ssl);
     } else if (bev_context_ssl->http == http2 && !wss_context->ssl_error && wss_context->output
-               && !bev_context_ssl->rst_sent) {
+               && !bev_context_ssl->no_end_stream) {
         build_http2_frame(frame, 0, 0, 1, bev_context_ssl->stream_id);
         evbuffer_add(wss_context->output, frame, HTTP2_HEADER_LENGTH);
+        event_active(wss_context->event_mux, EV_TIMEOUT, 0);
     } else if (bev_context_ssl->http == http1) {
         SSL_free(bev_context_ssl->ssl);
     }
@@ -71,10 +74,9 @@ static void bev_context_ssl_free(void *context) {
         if (http_stream) {
             if (bev_context_ssl->http == http2) {
                 http_stream->out_closed = 1;
-                http_stream->rst_sent |= bev_context_ssl->rst_sent;
                 MOGD(wss_context, "http stream %u: %p out closed", key.stream_id, http_stream);
             }
-            if (bev_context_ssl->http != http2 || http_stream->in_closed || http_stream->rst_sent) {
+            if (bev_context_ssl->http != http2 || http_stream->in_closed) {
                 http_stream->mark_free = 1;
                 wss_context->http2_evict_pending = 1;
                 MOGD(wss_context, "would remove http stream %u: %p", key.stream_id, http_stream);
@@ -471,6 +473,7 @@ static void handle_http2_frame(struct bufferevent_http_stream *http_stream, stru
         update_connection_window(wss_context, http2_frame->length);
     } else {
         if (http2_frame->type == 3) {
+            discard_http_stream_output(bev);
             what = BEV_EVENT_EOF;
         } else if (http2_frame->type == 8 && http2_frame->length == 4) {
             evbuffer_copyout(frame, header, sizeof(header));
@@ -494,8 +497,10 @@ static void handle_http2_frame(struct bufferevent_http_stream *http_stream, stru
         evbuffer_drain(frame, http2_frame->length + HTTP2_HEADER_LENGTH);
     }
     if (bev->readcb && evbuffer_get_length(bev->input)) {
-        closing = bev->cbarg == NULL;
+        bufferevent_incref(bev);
         bev->readcb(bev, bev->cbarg);
+        closing = bev->errorcb == NULL;
+        bufferevent_decref(bev);
         if (closing) {
             LOGD("wss %p closed in data callback", bev);
             return;
@@ -610,14 +615,6 @@ static void update_window_update(struct wss_context *wss_context, const uint8_t 
     flush_http_streams(wss_context);
 }
 
-void reset_http2_stream(struct wss_context *wss_context, uint32_t stream_id, int status) {
-    uint8_t header[HTTP2_HEADER_LENGTH + 4];
-
-    build_http2_frame(header, 4, 3, 0, stream_id);
-    store_be32(header + HTTP2_HEADER_LENGTH, (uint32_t) status);
-    evbuffer_add(wss_context->output, header, HTTP2_HEADER_LENGTH + 4);
-}
-
 static void check_http2_stream(struct wss_context *wss_context, struct http2_frame *http2_frame) {
     uint8_t in_closed;
     struct bufferevent_http_stream key, *http_stream;
@@ -646,19 +643,8 @@ static void check_http2_stream(struct wss_context *wss_context, struct http2_fra
     if (http2_frame->type == 0) {
         update_connection_window(wss_context, http2_frame->length);
     }
-    if (http_stream && http_stream->out_closed) {
-        if (!http_stream->in_closed) {
-            MOGD(wss_context, "stream %u, out closed with type %d, length: %u",
-                 http2_frame->stream_id, http2_frame->type, http2_frame->length);
-            if (!http_stream->rst_sent) {
-                http_stream->rst_sent = 1;
-                http_stream->mark_free = 1;
-                wss_context->http2_evict_pending = 1;
-                reset_http2_stream(wss_context, http2_frame->stream_id, 0x8);
-            }
-        } else {
-            wss_context->http2_evict_pending = 1;
-        }
+    if (http_stream && http_stream->out_closed && http_stream->in_closed) {
+        wss_context->http2_evict_pending = 1;
     }
 }
 
@@ -875,6 +861,25 @@ static ssize_t do_write(struct bufferevent *bev, uint8_t *buffer, size_t size) {
     return do_ssl_write(bufferevent_get_context(bev), buffer, size);
 }
 
+static void discard_http_stream_output(struct bufferevent *tev) {
+    size_t pending;
+    struct evbuffer *output;
+    struct bufferevent *wev;
+
+    wev = tev->cbarg;
+    if (!wev || bufferevent_get_underlying(wev) != tev) {
+        evbuffer_drain(tev->output, evbuffer_get_length(tev->output));
+        return;
+    }
+    output = bufferevent_get_output(wev);
+    pending = evbuffer_get_length(tev->output) + evbuffer_get_length(output);
+    evbuffer_drain(tev->output, evbuffer_get_length(tev->output));
+    evbuffer_drain(output, evbuffer_get_length(output));
+    if (pending) {
+        LOGW("http stream %p discards %zu bytes", tev, pending);
+    }
+}
+
 void abort_http_stream(struct bufferevent_http_stream *http_stream) {
     struct bufferevent *tev;
     struct bev_context_ssl *bev_context_ssl;
@@ -886,6 +891,7 @@ void abort_http_stream(struct bufferevent_http_stream *http_stream) {
     bev_context_ssl = bufferevent_get_context(tev);
     if (bev_context_ssl && bev_context_ssl->stream_id == http_stream->stream_id && tev->errorcb) {
         bufferevent_disable(tev, EV_READ | EV_WRITE);
+        discard_http_stream_output(tev);
         tev->errorcb(tev, BEV_EVENT_READING | BEV_EVENT_EOF, tev->cbarg);
     }
 }
@@ -954,6 +960,7 @@ static void wss_context_close(struct wss_mux_context *wss_mux_context, int index
         return;
     }
     wss_context->closed = 1;
+    wss_context->ssl_error = 1;
     wss_mux_context->conns[index] = NULL;
     free_all_http_streams(wss_context);
     if (wss_context->input) {
@@ -1131,7 +1138,7 @@ static void http2_writecb(evutil_socket_t sock, short event, void *context) {
     bev_context_ssl.http = http2;
     bev_context_ssl.ssl = wss_context->ssl;
 
-    if (evbuffer_get_length(output)) {
+    while (evbuffer_get_length(output)) {
         if (wss_context->ssl_error) {
             MOGW(wss_context, "http2 mux write ssl error, length: %zu", evbuffer_get_length(output));
             evbuffer_drain(output, evbuffer_get_length(output));
@@ -1149,6 +1156,8 @@ static void http2_writecb(evutil_socket_t sock, short event, void *context) {
             evbuffer_drain(output, res);
         } else if (res == WSS_ERROR || res == WSS_EOF) {
             goto error;
+        } else {
+            break;
         }
     }
 
@@ -1191,8 +1200,10 @@ static void bufferevent_readcb(evutil_socket_t fd, short event, void *arg) {
 loop:
     res = do_read(bev);
     if (res > 0 && bev->readcb) {
-        closing = bev->cbarg == NULL;
+        bufferevent_incref(bev);
         bev->readcb(bev, bev->cbarg);
+        closing = bev->errorcb == NULL;
+        bufferevent_decref(bev);
         if (closing) {
             LOGD("wss %p closed in data callback", bev);
             return;
@@ -1563,7 +1574,7 @@ start:
         http_stream = calloc(1, sizeof(struct bufferevent_http_stream));
         if (!http_stream) {
             MOGW(wss_context, "cannot new http stream");
-            bev_context_ssl->rst_sent = 1; // avoid send rst again
+            bev_context_ssl->no_end_stream = 1;
             goto error;
         }
         http_stream->stream_id = bev_context_ssl->stream_id;

@@ -33,6 +33,10 @@ typedef ev_ssize_t ssize_t;
 #define WSS_TIMEOUT 5
 #endif
 
+#ifndef WSS_CLOSE_TIMEOUT
+#define WSS_CLOSE_TIMEOUT 30
+#endif
+
 #ifndef WSS_LISTEN_BACKLOG
 #define WSS_LISTEN_BACKLOG 511
 #endif

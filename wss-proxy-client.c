@@ -279,6 +279,7 @@ static enum bufferevent_filter_result wss_output_filter_v2(struct evbuffer *src,
 
     (void) dst;
     (void) dst_limit;
+    (void) mode;
     bev_context_ssl = bufferevent_get_context(tev);
     if (!bev_context_ssl || bev_context_ssl->wss_context->ssl_error || !bev_context_ssl->wss_context->output) {
         return BEV_ERROR;
@@ -292,8 +293,7 @@ static enum bufferevent_filter_result wss_output_filter_v2(struct evbuffer *src,
             break;
         }
         size = MIN((size_t) bev_context_ssl->send_window, bev_context_ssl->wss_context->send_window);
-        if (mode != BEV_FINISHED
-            && evbuffer_get_length(bev_context_ssl->wss_context->output) >= MAX_PROXY_BUFFER) {
+        if (evbuffer_get_length(bev_context_ssl->wss_context->output) >= MAX_PROXY_BUFFER) {
             LOGD("cannot send as mux output is full");
             result = BEV_NEED_MORE;
             break;
@@ -308,12 +308,6 @@ static enum bufferevent_filter_result wss_output_filter_v2(struct evbuffer *src,
         evbuffer_drain(src, length);
         bev_context_ssl->send_window -= (ssize_t) length;
         bev_context_ssl->wss_context->send_window -= (size_t) length;
-    }
-    if (mode == BEV_FINISHED && evbuffer_get_length(src) && !bev_context_ssl->rst_sent) {
-        LOGW("reset stream %u as %zu bytes are truncated",
-             bev_context_ssl->stream_id, evbuffer_get_length(src));
-        reset_http2_stream(bev_context_ssl->wss_context, bev_context_ssl->stream_id, 0x8);
-        bev_context_ssl->rst_sent = 1;
     }
     if (evbuffer_get_length(bev_context_ssl->wss_context->output)) {
         bufferevent_enable(tev, EV_WRITE);
