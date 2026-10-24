@@ -129,6 +129,7 @@ struct bufferevent_http_stream {
 #define HTTP3_MAX_CONCURRENT_STREAMS 128
 #endif
 #define MAX_WINDOW_SIZE 0x7fffffff
+#define HTTP2_STREAM_WINDOW_SIZE (6 * 1024 * 1024)
 
 #define WSS_EOF (0)
 #define WSS_AGAIN (-1)

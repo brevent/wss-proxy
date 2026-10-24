@@ -26,6 +26,8 @@ static int send_close(struct bufferevent *tev, uint16_t reason, short event);
 
 static void tev_write_cb(struct evbuffer *buffer, const struct evbuffer_cb_info *info, void *arg);
 
+static void raw_write_cb(struct evbuffer *buffer, const struct evbuffer_cb_info *info, void *arg);
+
 void bufferevent_set_context(struct bufferevent *bev, void *context) {
     if (context == NULL || (!bev->wm_read.low && !bev->wm_write.low)) {
         bev->wm_read.low = bev->wm_write.low = (size_t) context;
@@ -672,6 +674,7 @@ static void close_wev(struct bufferevent *wev, struct bufferevent *tev) {
     if (wev->cbarg && wev->cbarg != tev) {
         evbuffer_remove_cb(tev->output, tev_write_cb, wev->cbarg);
         evbuffer_remove_cb(wev->output, tev_write_cb, wev->cbarg);
+        evbuffer_remove_cb(bufferevent_get_output(wev->cbarg), raw_write_cb, tev);
         close_bufferevent_later(wev->cbarg);
         bufferevent_set_timeouts(tev, NULL, NULL);
         bufferevent_enable(tev, EV_READ);
@@ -851,6 +854,7 @@ static void raw_event_cb_wss(struct bufferevent *raw, short event, void *wev) {
         } else {
             if (tev) {
                 evbuffer_remove_cb(tev->output, tev_write_cb, raw);
+                evbuffer_remove_cb(bufferevent_get_output(raw), raw_write_cb, tev);
             }
             evbuffer_remove_cb(bufferevent_get_output(wev), tev_write_cb, raw);
             close_bufferevent_later(raw);
@@ -921,6 +925,28 @@ static void tev_write_cb(struct evbuffer *buffer, const struct evbuffer_cb_info 
     }
 }
 
+static void raw_write_cb(struct evbuffer *buffer, const struct evbuffer_cb_info *info, void *arg) {
+    size_t length;
+    struct bufferevent *tev;
+
+    tev = arg;
+    length = evbuffer_get_length(buffer);
+    if (info->n_deleted) {
+        if (length <= MIN_PROXY_BUFFER && length + info->n_deleted > MIN_PROXY_BUFFER) {
+            LOGD("enable wss for read, length: %zu", length);
+            bufferevent_enable(tev, EV_READ);
+#ifdef WSS_PROXY_CLIENT
+            event_active(&tev->ev_read, EV_READ, 0);
+#endif
+        }
+    } else if (info->n_added) {
+        if (length >= MAX_PROXY_BUFFER && length - info->n_added < MAX_PROXY_BUFFER) {
+            LOGD("disable wss for read, length: %zu", length);
+            bufferevent_disable(tev, EV_READ);
+        }
+    }
+}
+
 void tunnel_wss(struct bufferevent *raw, struct bufferevent *tev, bufferevent_filter_cb output_filter) {
     struct bufferevent *wev;
     bufferevent_filter_cb tev_input_filter, tev_output_filter;
@@ -931,6 +957,9 @@ void tunnel_wss(struct bufferevent *raw, struct bufferevent *tev, bufferevent_fi
     tev_output_filter = output_filter ? output_filter : wss_output_filter;
     wev = bufferevent_filter_new(tev, tev_input_filter, tev_output_filter, 0, NULL, tev);
     evbuffer_add_cb(wev->output, tev_write_cb, raw);
+    if (!is_udp(raw)) {
+        evbuffer_add_cb(raw->output, raw_write_cb, tev);
+    }
     LOGD("wev: %p, tev: %p, raw: %p", wev, tev, raw);
 
     bufferevent_enable(wev, EV_READ | EV_WRITE);
