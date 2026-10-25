@@ -120,11 +120,7 @@ static ssize_t check_ssl_error(struct bev_context_ssl *bev_context_ssl, enum ssl
     }
     switch (code) {
         case SSL_ERROR_ZERO_RETURN:
-            if (bev_context_ssl->wss_context && bev_context_ssl->wss_context->ssl_goaway) {
-                LOGD("cannot %s ssl, zero return after goaway", s);
-            } else {
-                LOGW("cannot %s ssl, zero return, mark as eof", s);
-            }
+            LOGD("cannot %s ssl, zero return, mark as eof", s);
             what = WSS_EOF;
             break;
         case SSL_ERROR_SSL: {
@@ -447,7 +443,7 @@ static void handle_http2_frame(struct bufferevent_http_stream *http_stream, stru
                                struct evbuffer *frame) {
     short what;
     uint8_t closing;
-    uint32_t delta;
+    uint32_t delta, error_code;
     uint8_t header[HTTP2_HEADER_LENGTH + 4];
     struct bufferevent *bev;
     struct bev_context_ssl *bev_context_ssl;
@@ -477,6 +473,13 @@ static void handle_http2_frame(struct bufferevent_http_stream *http_stream, stru
         update_connection_window(wss_context, http2_frame->length);
     } else {
         if (http2_frame->type == 3) {
+            evbuffer_copyout(frame, header, sizeof(header));
+            error_code = http2_frame->length == 4 ? load_be32(header + HTTP2_HEADER_LENGTH) : 0;
+            if (error_code) {
+                MOGW(wss_context, "stream %u reset by server, error code: %u", bev_context_ssl->stream_id, error_code);
+            } else {
+                MOGD(wss_context, "stream %u reset by server, error code: %u", bev_context_ssl->stream_id, error_code);
+            }
             discard_http_stream_output(bev);
             what = BEV_EVENT_EOF;
         } else if (http2_frame->type == 8 && http2_frame->length == 4) {
@@ -677,7 +680,8 @@ static void check_http2_control(struct wss_context *wss_context, uint8_t type, u
             handle_ping(wss_context, header, length);
             break;
         case 7: // goaway
-            MOGI(wss_context, "server send goaway");
+            MOGI(wss_context, "server send goaway, error code: %u",
+                 length >= 8 ? load_be32(header + HTTP2_HEADER_LENGTH + 4) : 0);
             wss_context->ssl_goaway = 1;
             break;
         case 8: // window update
@@ -913,7 +917,7 @@ static void discard_http_stream_output(struct bufferevent *tev) {
     pending = evbuffer_get_length(tev->output) + evbuffer_get_length(output);
     evbuffer_drain(tev->output, evbuffer_get_length(tev->output));
     evbuffer_drain(output, evbuffer_get_length(output));
-    if (pending) {
+    if (pending > get_close_frame_length(tev)) {
         LOGW("http stream %p discards %zu bytes", tev, pending);
     }
 }
@@ -1404,6 +1408,13 @@ check:
     } else if (res == WSS_ERROR) {
         what |= BEV_EVENT_ERROR;
         goto error;
+    } else if (res == 0 && bev_context_ssl->http == http3) {
+        discard_http_stream_output(bev);
+        bufferevent_disable(bev, EV_WRITE);
+        if (bev->writecb) {
+            bev->writecb(bev, bev->cbarg);
+        }
+        goto done;
     } else if (res == 0) {
         what |= BEV_EVENT_EOF;
         goto error;
@@ -1539,6 +1550,29 @@ static const struct bev_context const_bev_context_ssl = {
         bev_context_ssl_timeout,
         bev_context_ssl_shutdown,
 };
+
+void set_close_frame_length(struct bufferevent *tev, size_t length) {
+    struct bev_context_ssl *bev_context_ssl;
+
+    bev_context_ssl = bufferevent_get_context(tev);
+    if (!bev_context_ssl || bev_context_ssl->bev_context != &const_bev_context_ssl) {
+        return;
+    }
+    if (bev_context_ssl->http == http3) {
+        length += 2;
+    }
+    bev_context_ssl->close_frame_length = (uint8_t) length;
+}
+
+size_t get_close_frame_length(struct bufferevent *tev) {
+    struct bev_context_ssl *bev_context_ssl;
+
+    bev_context_ssl = tev ? bufferevent_get_context(tev) : NULL;
+    if (!bev_context_ssl || bev_context_ssl->bev_context != &const_bev_context_ssl) {
+        return 0;
+    }
+    return bev_context_ssl->close_frame_length;
+}
 
 static struct bev_context_ssl *init_bev_context_ssl(struct wss_context *wss_context, SSL *ssl) {
     struct bev_context_ssl *bev_context_ssl;

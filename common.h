@@ -134,6 +134,14 @@ void safe_bufferevent_free(struct bufferevent *bev);
 
 void close_bufferevent_later(struct bufferevent *bev);
 
+#ifdef WSS_PROXY_CLIENT
+void set_close_frame_length(struct bufferevent *tev, size_t length);
+
+size_t get_close_frame_length(struct bufferevent *tev);
+#else
+#define get_close_frame_length(tev) 0
+#endif
+
 #ifndef _WIN32
 #define EVUTIL_ERR_RW_RETRIABLE(e) ((e) == EINTR || (e) == EAGAIN || (e) == EWOULDBLOCK)
 #define EVUTIL_ERR_CONNECT_RETRIABLE(e) ((e) == EINTR || (e) == EINPROGRESS)

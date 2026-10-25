@@ -255,10 +255,10 @@ int find_option_port(const char *key, int default_port) {
 
 static void on_native_signal(int signal) {
     if (signal == SIGINT) {
-        LOGW("received interrupt, will exit");
+        LOGI("received interrupt, will exit");
         exit(EXIT_SUCCESS);
     } else if (signal == SIGTERM) {
-        LOGW("received termination, will exit");
+        LOGI("received termination, will exit");
         exit(EXIT_SUCCESS);
     }
     switch (signal) {
@@ -636,7 +636,7 @@ static void bev_error_cb(struct bufferevent *bev, short event, void *arg) {
         LOGD("bev %p eof, pending: %zu", bev, size);
         return;
     }
-    if (size > 0) {
+    if (size > get_close_frame_length(bev)) {
         LOGW("free bev %p, event: 0x%02x, pending: %zu", bev, event, size);
     } else {
         LOGD("free bev %p, event: 0x%02x", bev, event);
@@ -672,7 +672,7 @@ static void wev_error_cb(struct bufferevent *wev, short event, void *arg) {
         return;
     }
     pending = evbuffer_get_length(bufferevent_get_output(wev));
-    if (pending) {
+    if (pending > get_close_frame_length(bufferevent_get_underlying(wev))) {
         LOGW("wss %p is closed with %zu bytes discarded, event: 0x%02x",
              bufferevent_get_underlying(wev), pending, event);
     }
@@ -710,6 +710,9 @@ static int send_close(struct bufferevent *tev, uint16_t reason, short event) {
     if (tev->cbarg == NULL) {
         LOGD("wss %p closed", tev);
         return 0;
+    } else if (get_close_frame_length(tev)) {
+        LOGD("wss %p close frame sent", tev);
+        return 0;
     } else {
         uint8_t *wss_header, header_size;
         struct wss_frame_close {
@@ -719,6 +722,9 @@ static int send_close(struct bufferevent *tev, uint16_t reason, short event) {
         wss_frame_close.reason = ntohs(reason);
         wss_header = build_ws_frame(OP_CLOSE, (uint8_t *) &(wss_frame_close.reason), 2, &header_size);
         evbuffer_add(bufferevent_get_output(tev->cbarg), wss_header, 2 + header_size);
+#ifdef WSS_PROXY_CLIENT
+        set_close_frame_length(tev, 2 + header_size);
+#endif
         if (event) {
             bufferevent_disable(tev, EV_READ);
             bufferevent_trigger_event(tev->cbarg, event | BEV_EVENT_EOF, BEV_TRIG_DEFER_CALLBACKS);
@@ -730,11 +736,8 @@ static int send_close(struct bufferevent *tev, uint16_t reason, short event) {
 void close_wss(struct bufferevent *tev, enum close_reason close_reason, short event) {
     if (close_reason == close_reason_raw || close_reason == close_reason_eof) {
         send_close(tev, CLOSE_GOING_AWAY, 0);
-    } else if (!(event & BEV_EVENT_EOF)) {
-        // we should have sent out
-        send_close(tev, CLOSE_INTERNAL_ERROR, 0);
     }
-    LOGD("close wss %p", tev);
+    LOGD("close wss %p, event: 0x%02x", tev, event);
     do_close_wss(tev);
 }
 
@@ -885,7 +888,7 @@ static void wss_forward_cb(struct bufferevent *wev, void *raw) {
     evbuffer_add_buffer(dst, src);
     pending = evbuffer_get_length(dst);
     if (pending >= MAX_UDP_PROXY_BUFFER) {
-        LOGW("peer %d does not read %zu bytes", get_peer_port(raw), pending);
+        LOGD("peer %d does not read %zu bytes", get_peer_port(raw), pending);
     }
 }
 
