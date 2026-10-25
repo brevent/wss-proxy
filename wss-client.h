@@ -98,6 +98,7 @@ struct bev_context_ssl {
     uint8_t upgrade: 1;
     uint8_t connected: 1;
     uint8_t no_end_stream: 1;
+    uint8_t close_frame_length;
     struct evbuffer *frame;
     uint32_t stream_id;
     uint32_t initial_window_size;
