@@ -75,6 +75,7 @@ const struct bev_context const_bev_context_udp = {
         "udp",
         bev_context_udp_free,
         NULL,
+        NULL,
 };
 
 static void free_udp(bev_context_udp *udp) {
@@ -598,11 +599,20 @@ static void bev_drain_cb(struct bufferevent *bev, void *arg) {
     }
 }
 
+static int shutdown_bev(struct bufferevent *bev) {
+    struct bev_context **bev_context;
+
+    bev_context = bufferevent_get_context(bev);
+    if (bev_context == NULL) {
+        return shutdown(bufferevent_getfd(bev), SHUT_WR);
+    }
+    return (*bev_context)->shutdown ? (*bev_context)->shutdown(bev_context) : -1;
+}
+
 static void bev_empty_cb(struct bufferevent *bev, void *arg) {
     (void) arg;
     if (evbuffer_get_length(bev->output) == 0) {
-        if ((bufferevent_get_enabled(bev) & EV_READ) && !bufferevent_get_context(bev)
-            && shutdown(bufferevent_getfd(bev), SHUT_WR) == 0) {
+        if ((bufferevent_get_enabled(bev) & EV_READ) && shutdown_bev(bev) == 0) {
             LOGD("shutdown bev %p", bev);
             bufferevent_disable(bev, EV_WRITE);
             set_close_deadline(bev);

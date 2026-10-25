@@ -45,6 +45,8 @@ DEFINE_LHASH_OF(bufferevent_http_stream);
 #endif
 #endif
 
+#define HTTP3_PEER_STREAMS 3
+
 struct wss_context {
     struct wss_mux_context *wss_mux_context;
     int slot;
@@ -53,6 +55,8 @@ struct wss_context {
     unsigned refs;
     SSL *ssl;
     SSL *stream;
+    SSL *peer_streams[HTTP3_PEER_STREAMS];
+    SSL *control_stream;
     LHASH_OF(bufferevent_http_stream) *http_streams;
     unsigned http_streams_count;
     unsigned long active_streams;
@@ -66,6 +70,8 @@ struct wss_context {
     uint8_t ssl_connected: 1;
     uint8_t http2_evict_pending: 1;
     uint8_t closed: 1;
+    uint8_t http3_reading: 1;
+    uint8_t http3_progress: 1;
     uint32_t next_stream_id;
     uint32_t initial_window_size;
     uint32_t max_concurrent_streams;
@@ -130,6 +136,8 @@ struct bufferevent_http_stream {
 #endif
 #define MAX_WINDOW_SIZE 0x7fffffff
 #define HTTP2_STREAM_WINDOW_SIZE (6 * 1024 * 1024)
+#define HTTP3_CONNECTION_WINDOW_SIZE (1ULL << 40)
+#define HTTP3_MAX_UDP_PAYLOAD_SIZE 1500
 
 #define WSS_EOF (0)
 #define WSS_AGAIN (-1)
@@ -152,6 +160,9 @@ void abort_http_stream(struct bufferevent_http_stream *http_stream);
 int decode_huffman_digit(uint8_t *buffer, size_t size);
 
 #define HTTP3_MAX_HEADER_LENGTH 9
+#define HTTP3_FRAME_GOAWAY 0x7
+#define HTTP3_MAX_CONTROL_LENGTH (64 * 1024)
+#define HTTP3_NO_ERROR 0x100
 
 SSL_CTX  *ssl_ctx_new_http3();
 
@@ -163,15 +174,23 @@ size_t parse_http3_frame(const uint8_t *buffer, size_t length, size_t *out_heade
 
 size_t build_http3_frame(uint8_t *frame, uint8_t type, size_t length);
 
-int get_ssl_error_http3(SSL *ssl, int code);
-
 ssize_t check_ssl_error_http3(struct bev_context_ssl *bev_context_ssl, enum ssl_type ssl_type);
 
 SSL *init_http3_stream(SSL *ssl, struct sockaddr *sockaddr, uint16_t port);
 
 int init_context_ssl_http3(struct bev_context_ssl *bev_context_ssl, SSL *ssl);
 
+void update_max_concurrent_streams_http3(struct wss_context *wss_context, unsigned long streams);
+
+int shutdown_context_ssl_http3(struct bev_context_ssl *bev_context_ssl);
+
 void free_context_ssl_http3(struct bev_context_ssl *bev_context_ssl);
+
+void close_ssl_http3(struct wss_context *wss_context);
+
+void schedule_http3_events(struct wss_context *wss_context);
+
+void resume_ssl_write(struct bufferevent *bev);
 
 struct event *init_ssl_http3(struct wss_context *wss_context, struct event_base *base, evutil_socket_t fd, SSL *ssl);
 
