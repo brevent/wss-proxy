@@ -62,9 +62,6 @@ static void bev_context_ssl_free(void *context) {
         free_context_ssl_http3(bev_context_ssl);
     } else if (bev_context_ssl->http == http2 && !wss_context->ssl_error && wss_context->output
                && !bev_context_ssl->no_end_stream) {
-        build_http2_frame(frame, 4, 8, 0, bev_context_ssl->stream_id);
-        store_be32(frame + HTTP2_HEADER_LENGTH, MAX_WINDOW_SIZE - (uint32_t) bev_context_ssl->recv_window);
-        evbuffer_add(wss_context->output, frame, HTTP2_HEADER_LENGTH + 4);
         build_http2_frame(frame, 0, 0, 1, bev_context_ssl->stream_id);
         evbuffer_add(wss_context->output, frame, HTTP2_HEADER_LENGTH);
         event_active(wss_context->event_mux, EV_TIMEOUT, 0);
@@ -151,7 +148,7 @@ static ssize_t check_ssl_error(struct bev_context_ssl *bev_context_ssl, enum ssl
             what = WSS_ERROR;
             break;
     }
-    if (bev_context_ssl->wss_context && SSL_get_app_data(bev_context_ssl->ssl)) {
+    if (bev_context_ssl->wss_context) {
         bev_context_ssl->wss_context->ssl_error = 1;
     }
     return what;
@@ -481,6 +478,7 @@ static void handle_http2_frame(struct bufferevent_http_stream *http_stream, stru
                 MOGD(wss_context, "stream %u reset by server, error code: %u", bev_context_ssl->stream_id, error_code);
             }
             discard_http_stream_output(bev);
+            bev_context_ssl->no_end_stream = 1;
             what = BEV_EVENT_EOF;
         } else if (http2_frame->type == 8 && http2_frame->length == 4) {
             evbuffer_copyout(frame, header, sizeof(header));
@@ -709,6 +707,7 @@ static ssize_t parse_http2(struct wss_context *wss_context, uint8_t *buffer, siz
         http2_frame.length = load_be32(frame) >> 8;
         if (http2_frame.length > MAX_FRAME_SIZE) {
             LOGW("frame length %u is unsupported", (unsigned) http2_frame.length);
+            wss_context->ssl_error = 1;
             return WSS_ERROR;
         }
         frame += 3;
@@ -749,6 +748,7 @@ static ssize_t do_ssl_read(struct bev_context_ssl *bev_context_ssl, struct buffe
     total = 0;
     ssl = bev_context_ssl->ssl;
     for (;;) {
+        ERR_clear_error();
         if (!SSL_read_ex(ssl, frame, sizeof(frame), &size)) {
             goto error;
         }
@@ -824,6 +824,7 @@ static ssize_t do_ssl_write(struct bev_context_ssl *bev_context_ssl, uint8_t *bu
     ssl = bev_context_ssl->ssl;
     if (bev_context_ssl->http == http2 &&
         !bev_context_ssl->wss_context->settings_sent) {
+        ERR_clear_error();
         if (SSL_write_ex(ssl,
                          "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
                          "\x00\x00\x12\x04\x00"
@@ -839,6 +840,7 @@ static ssize_t do_ssl_write(struct bev_context_ssl *bev_context_ssl, uint8_t *bu
         }
     }
 
+    ERR_clear_error();
     if (SSL_write_ex(ssl, buffer, size, &written)) {
         return (ssize_t) written;
     }
@@ -1159,6 +1161,9 @@ static void http2_readcb(evutil_socket_t sock, short event, void *context) {
     } else if (!lh_bufferevent_http_stream_num_items(http_streams)) {
         reset_streams_count(wss_context);
     }
+    if (wss_context->output && evbuffer_get_length(wss_context->output)) {
+        event_active(wss_context->event_mux, EV_TIMEOUT, 0);
+    }
 }
 
 static void http2_writecb(evutil_socket_t sock, short event, void *context) {
@@ -1246,6 +1251,9 @@ static void bufferevent_readcb(evutil_socket_t fd, short event, void *arg) {
     if (bev_context_ssl->http == http2) {
         update_stream_window(bev, 0);
         return;
+    }
+    if (bev_context_ssl->http == http1) {
+        resume_ssl_write(bev);
     }
 
 loop:
@@ -1421,7 +1429,8 @@ check:
     }
 
 reschedule:
-    if (evbuffer_get_length(output) == 0 || bev_context_ssl->http == http3) {
+    if (evbuffer_get_length(output) == 0 || bev_context_ssl->http == http3
+        || SSL_want_read(bev_context_ssl->ssl)) {
         // should we check again?
         event_del(&bev->ev_write);
     }
@@ -1535,13 +1544,38 @@ error:
     return -1;
 }
 
+static int shutdown_context_ssl_http2(struct bev_context_ssl *bev_context_ssl) {
+    uint8_t frame[HTTP2_HEADER_LENGTH + 4];
+    struct bufferevent_http_stream key, *http_stream;
+    struct wss_context *wss_context;
+
+    wss_context = bev_context_ssl->wss_context;
+    if (wss_context->ssl_error) {
+        return -1;
+    }
+    key.stream_id = bev_context_ssl->stream_id;
+    http_stream = lh_bufferevent_http_stream_retrieve(wss_context->http_streams, &key);
+    if (!http_stream || http_stream->in_closed) {
+        return -1;
+    }
+    build_http2_frame(frame, 4, 8, 0, bev_context_ssl->stream_id);
+    store_be32(frame + HTTP2_HEADER_LENGTH, MAX_WINDOW_SIZE - (uint32_t) bev_context_ssl->recv_window);
+    evbuffer_add(wss_context->output, frame, HTTP2_HEADER_LENGTH + 4);
+    bev_context_ssl->recv_window = MAX_WINDOW_SIZE;
+    event_active(wss_context->event_mux, EV_TIMEOUT, 0);
+    return 0;
+}
+
 static int bev_context_ssl_shutdown(void *context) {
     struct bev_context_ssl *bev_context_ssl = context;
 
     if (bev_context_ssl->http == http3) {
         return shutdown_context_ssl_http3(bev_context_ssl);
     }
-    return -1;
+    if (bev_context_ssl->http == http2) {
+        return shutdown_context_ssl_http2(bev_context_ssl);
+    }
+    return bev_context_ssl->wss_context->ssl_error ? -1 : 0;
 }
 
 static const struct bev_context const_bev_context_ssl = {
@@ -1724,8 +1758,9 @@ static void bev_context_ssl_timeout(void *context) {
     event_base_gettimeofday_cached(wss_context->base, &timeout);
     if (!wss_context->timeout.tv_sec) {
         MOGD(wss_context, "http mux connection timeout");
-        wss_context->timeout.tv_sec = timeout.tv_sec;
-    } else if (!wss_context->ssl_goaway && timeout.tv_sec - wss_context->timeout.tv_sec >= WSS_TIMEOUT) {
+        wss_context->timeout = timeout;
+        wss_context->timeout.tv_sec += WSS_TIMEOUT;
+    } else if (!wss_context->ssl_goaway && evutil_timercmp(&timeout, &wss_context->timeout, >=)) {
         MOGW(wss_context, "http mux connection timeout, mark ssl as goaway");
         wss_context->ssl_goaway = 1;
     }

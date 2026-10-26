@@ -241,7 +241,7 @@ static void http_response_cb(struct bufferevent *tev, void *raw) {
         buffer[0xc] = '\0';
         LOGE("wss fail for peer %d, status: %s", get_peer_port(raw), &buffer[9]);
         bufferevent_free(raw);
-        close_bufferevent_later(tev);
+        bufferevent_free(tev);
     }
 }
 
@@ -411,7 +411,7 @@ static void http_response_cb_v2(struct bufferevent *tev, void *raw) {
     return;
 error:
     bufferevent_free(raw);
-    close_bufferevent_later(tev);
+    bufferevent_free(tev);
 }
 
 static size_t build_http_request_v2(struct wss_mux_context *wss_context, int udp, char *request, uint32_t stream_id) {
