@@ -110,17 +110,17 @@ size_t build_http_request_v3(struct wss_mux_context *wss_context, int udp, char 
     buffer = (uint8_t *) memcpy(buffer, "\x27\x02:protocol\x09websocket", 21) + 21;
     // :scheme = https
     *buffer++ = 0xc0 | 23;
-    // :path = ..., max 127
+    // :path = ..., max 126
     buffer += snprintf((char *) buffer, 0x82, "\x51%c%s",
-                       (char) MIN(strlen(wss_context->server.path), 0x7f), wss_context->server.path);
-    // :authority = ..., max 127
+                       (char) MIN(strlen(wss_context->server.path), 0x7e), wss_context->server.path);
+    // :authority = ..., max 126
     buffer += snprintf((char *) buffer, 0x82, "\x50%c%s",
-                       (char) MIN(strlen(wss_context->server.host), 0x7f), wss_context->server.host);
+                       (char) MIN(strlen(wss_context->server.host), 0x7e), wss_context->server.host);
     // sec-websocket-version = 13
     buffer = (uint8_t *) memcpy(buffer, "\x27\x0esec-websocket-version\x02\x31\x33", 26) + 26;
-    // user-agent = ..., max 127
+    // user-agent = ..., max 126
     buffer += snprintf((char *) buffer, 0x83, "\x5f\x50%c%s",
-                       (char) MIN(strlen(wss_context->user_agent), 0x7f),
+                       (char) MIN(strlen(wss_context->user_agent), 0x7e),
                        wss_context->user_agent);
     if (udp) {
         buffer = (uint8_t *) memcpy(buffer, "\x27\x04x-sock-type\x03udp", 17) + 17;

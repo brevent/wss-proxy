@@ -180,12 +180,12 @@ static int init_wss_addr(struct wss_server_info *server) {
     }
 
     length = strlen(server->host);
-    if (length == 0 || length > 0x7f) {
+    if (length == 0 || length > 0x7e) {
         LOGE("host %s is unsupported", server->host);
         goto invalid;
     }
     length = strlen(server->path);
-    if (length == 0 || length > 0x7f) {
+    if (length == 0 || length > 0x7e) {
         LOGE("path %s is unsupported", server->path);
         goto invalid;
     }
@@ -430,17 +430,17 @@ static size_t build_http_request_v2(struct wss_mux_context *wss_context, int udp
     buffer = (uint8_t *) memcpy(buffer, "\x00\x09:protocol\x09websocket", 21) + 21;
     // :scheme = https
     *buffer++ = 0x87;
-    // :path = ..., max 127
+    // :path = ..., max 126
     buffer += snprintf((char *) buffer, 0x82, "\x04%c%s",
-                       (char) MIN(strlen(wss_context->server.path), 0x7f), wss_context->server.path);
-    // :authority = ..., max 127
+                       (char) MIN(strlen(wss_context->server.path), 0x7e), wss_context->server.path);
+    // :authority = ..., max 126
     buffer += snprintf((char *) buffer, 0x82, "\x01%c%s",
-                       (char) MIN(strlen(wss_context->server.host), 0x7f), wss_context->server.host);
+                       (char) MIN(strlen(wss_context->server.host), 0x7e), wss_context->server.host);
     // sec-websocket-version = 13
     buffer = (uint8_t *) memcpy(buffer, "\x00\x15sec-websocket-version\x02\x31\x33", 26) + 26;
-    // user-agent = ..., max 127
+    // user-agent = ..., max 126
     buffer += snprintf((char *) buffer, 0x83, "\x0f\x2b%c%s",
-                       (char) MIN(strlen(wss_context->user_agent), 0x7f),
+                       (char) MIN(strlen(wss_context->user_agent), 0x7e),
                        wss_context->user_agent);
     if (udp) {
         buffer = (uint8_t *) memcpy(buffer, "\x00\x0bx-sock-type\x03udp", 17) + 17;
