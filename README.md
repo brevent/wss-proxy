@@ -2,7 +2,7 @@ SIP003 plugin for shadowsocks, based on WebSocket.
 
 ## Requirements
 
-- [libevent](https://github.com/libevent/libevent) 2.1.8-stable+
+- [libevent](https://github.com/libevent/libevent) 2.1+
 - [OpenSSL](https://github.com/openssl/openssl) 3.0+
 
 ## Build

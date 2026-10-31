@@ -3,7 +3,7 @@
 
 #define bufferevent_free safe_bufferevent_free
 
-#if HAVE_OSSL_QUIC_CLIENT_METHOD
+#ifdef HAVE_OSSL_QUIC_CLIENT_METHOD
 
 SSL_CTX *ssl_ctx_new_http3() {
 #ifndef SSL_VALUE_QUIC_WINDOWCON

@@ -128,10 +128,8 @@ static ssize_t check_ssl_error(struct bev_context_ssl *bev_context_ssl, enum ssl
                 LOGW("cannot %s ssl, ssl shutdown", s);
             } else if (lib == ERR_LIB_SSL && reason == SSL_R_CERTIFICATE_VERIFY_FAILED) {
                 LOGE("cannot %s ssl, ssl certificate verify failed", s);
-#ifdef SSL_R_UNEXPECTED_EOF_WHILE_READING
             } else if (lib == ERR_LIB_SSL && reason == SSL_R_UNEXPECTED_EOF_WHILE_READING) {
                 LOGW("cannot %s ssl, ssl unexpected eof", s);
-#endif
             } else {
                 LOGW("cannot %s ssl, ssl error, lib: %d, reason: %d", s, lib, reason);
             }
@@ -1681,9 +1679,6 @@ start:
     }
     bufferevent_disable(tev, EV_READ | EV_WRITE);
     bufferevent_setfd(tev, sock);
-#ifndef EV_FINALIZE
-#define EV_FINALIZE 0x40
-#endif
     event_assign(&tev->ev_read, tev->ev_base,
                  (wss_context->server.http2 || wss_context->server.http3) ? -1 : sock,
                  EV_READ | EV_PERSIST | EV_FINALIZE, bufferevent_readcb, tev);

@@ -835,13 +835,8 @@ int main() {
         }
     }
 
-#ifdef OPENSSL_VERSION_STRING
     snprintf(wss_context.user_agent, sizeof(wss_context.user_agent), "wss-proxy-client/%s libevent/%s OpenSSL/%s",
              WSS_PROXY_VERSION, event_get_version(), OpenSSL_version(OPENSSL_VERSION_STRING));
-#else
-    snprintf(wss_context.user_agent, sizeof(wss_context.user_agent), "wss-proxy-client/%s libevent/%s %s",
-             WSS_PROXY_VERSION, event_get_version(), OpenSSL_version(OPENSSL_VERSION));
-#endif
 
     if (init_event_signal(base, &event_parent)) {
         goto error;

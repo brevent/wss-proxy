@@ -300,7 +300,7 @@ int init_event_signal(struct event_base *base, struct event **event_parent) {
     if (getrlimit(RLIMIT_NOFILE, &rlimit) == 0) {
         rlim_t cur_limit = rlimit.rlim_cur;
         rlim_t new_limit;
-#if defined(__APPLE__)
+#ifdef __APPLE__
         size_t size = sizeof(new_limit);
         if (sysctlbyname("kern.maxfilesperproc", &new_limit, &size, NULL, 0)) {
             new_limit = 10240;
@@ -1111,7 +1111,7 @@ void ssl_keylog_callback(const SSL *ssl, const char *line) {
         return;
     }
 
-#if defined(_WIN32)
+#ifdef _WIN32
 #define FOPEN_APPEND_TEXT "at"
 #else
 #define FOPEN_APPEND_TEXT "a"

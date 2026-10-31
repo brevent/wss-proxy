@@ -399,13 +399,8 @@ int main() {
         goto error;
     }
 
-#ifdef OPENSSL_VERSION_STRING
     LOGI("wss-proxy-server/%s libevent/%s OpenSSL/%s",
          WSS_PROXY_VERSION, event_get_version(), OpenSSL_version(OPENSSL_VERSION_STRING));
-#else
-    LOGI("wss-proxy-server/%s libevent/%s OpenSSL/%s",
-         WSS_PROXY_VERSION, event_get_version(), OpenSSL_version(OPENSSL_VERSION));
-#endif
 #ifndef _WIN32
     LOGI("started, pid: %d, ppid: %d", getpid(), getppid());
 #else
