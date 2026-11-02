@@ -1,0 +1,47 @@
+diff --git a/ssl/quic/quic_engine.c b/ssl/quic/quic_engine.c
+index 135417b3a7..76fda58b88 100644
+--- a/ssl/quic/quic_engine.c
++++ b/ssl/quic/quic_engine.c
+@@ -76,10 +76,18 @@ CRYPTO_MUTEX *ossl_quic_engine_get0_mutex(QUIC_ENGINE *qeng)
+ 
+ OSSL_TIME ossl_quic_engine_get_time(QUIC_ENGINE *qeng)
+ {
++    OSSL_TIME now;
++
+     if (qeng->now_cb == NULL)
+-        return ossl_time_now();
++        now = ossl_time_now();
++    else
++        now = qeng->now_cb(qeng->now_cb_arg);
++
++    if (ossl_time_compare(now, qeng->last_time) < 0)
++        return qeng->last_time;
+ 
+-    return qeng->now_cb(qeng->now_cb_arg);
++    qeng->last_time = now;
++    return now;
+ }
+ 
+ OSSL_TIME ossl_quic_engine_make_real_time(QUIC_ENGINE *qeng, OSSL_TIME tm)
+@@ -105,6 +113,7 @@ void ossl_quic_engine_set_time_cb(QUIC_ENGINE *qeng,
+ {
+     qeng->now_cb = now_cb;
+     qeng->now_cb_arg = now_cb_arg;
++    qeng->last_time = ossl_time_zero();
+ }
+ 
+ void ossl_quic_engine_set_inhibit_tick(QUIC_ENGINE *qeng, int inhibit)
+diff --git a/ssl/quic/quic_engine_local.h b/ssl/quic/quic_engine_local.h
+index 476a884f64..bed120577e 100644
+--- a/ssl/quic/quic_engine_local.h
++++ b/ssl/quic/quic_engine_local.h
+@@ -44,6 +44,9 @@ struct quic_engine_st {
+     OSSL_TIME (*now_cb)(void *arg);
+     void *now_cb_arg;
+ 
++    /* Latest time returned by ossl_quic_engine_get_time(), never goes back. */
++    OSSL_TIME last_time;
++
+     /* Asynchronous I/O reactor. */
+     QUIC_REACTOR rtor;
+ 

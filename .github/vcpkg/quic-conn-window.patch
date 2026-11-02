@@ -1,0 +1,61 @@
+diff --git a/include/openssl/ssl.h.in b/include/openssl/ssl.h.in
+index 17f01dbd67..2e987857bd 100644
+--- a/include/openssl/ssl.h.in
++++ b/include/openssl/ssl.h.in
+@@ -2444,6 +2444,7 @@ __owur int SSL_get_conn_close_info(SSL *ssl,
+ #define SSL_VALUE_QUIC_STREAM_UNI_LOCAL_AVAIL 3
+ #define SSL_VALUE_QUIC_STREAM_UNI_REMOTE_AVAIL 4
+ #define SSL_VALUE_QUIC_IDLE_TIMEOUT 5
++#define SSL_VALUE_QUIC_WINDOWCON 11
+ #define SSL_VALUE_EVENT_HANDLING_MODE 6
+ #define SSL_VALUE_STREAM_WRITE_BUF_SIZE 7
+ #define SSL_VALUE_STREAM_WRITE_BUF_USED 8
+diff --git a/ssl/quic/quic_channel.c b/ssl/quic/quic_channel.c
+index cd408ff847..bd8b2f1e92 100644
+--- a/ssl/quic/quic_channel.c
++++ b/ssl/quic/quic_channel.c
+@@ -151,7 +151,7 @@ static QLOG *ch_get_qlog_cb(void *arg)
+  * QUIC Channel Initialization and Teardown
+  * ========================================
+  */
+-#define DEFAULT_INIT_CONN_RXFC_WND (768 * 1024)
++#define DEFAULT_INIT_CONN_RXFC_WND (1ULL << 40)
+ #define DEFAULT_CONN_RXFC_MAX_WND_MUL 20
+ 
+ #define DEFAULT_INIT_STREAM_RXFC_WND (512 * 1024)
+@@ -1970,7 +1970,7 @@ static int ch_generate_transport_params(QUIC_CHANNEL *ch)
+         goto err;
+ 
+     if (!ossl_quic_wire_encode_transport_param_int(&wpkt, QUIC_TPARAM_MAX_UDP_PAYLOAD_SIZE,
+-            QUIC_MIN_INITIAL_DGRAM_LEN))
++            1500))
+         goto err;
+ 
+     if (!ossl_quic_wire_encode_transport_param_int(&wpkt, QUIC_TPARAM_ACTIVE_CONN_ID_LIMIT,
+@@ -2033,7 +2033,7 @@ static int ch_generate_transport_params(QUIC_CHANNEL *ch)
+         QLOG_STR("initial_source_connection_id", "");
+     }
+     QLOG_U64("max_idle_timeout", ch->max_idle_timeout);
+-    QLOG_U64("max_udp_payload_size", QUIC_MIN_INITIAL_DGRAM_LEN);
++    QLOG_U64("max_udp_payload_size", 1500);
+     QLOG_U64("active_connection_id_limit", QUIC_MIN_ACTIVE_CONN_ID_LIMIT);
+     QLOG_U64("max_ack_delay", ch->tx_max_ack_delay);
+     QLOG_U64("initial_max_data", ossl_quic_rxfc_get_cwm(&ch->conn_rxfc));
+diff --git a/ssl/quic/quic_impl.c b/ssl/quic/quic_impl.c
+index fe72d1ab74..d18e644e0c 100644
+--- a/ssl/quic/quic_impl.c
++++ b/ssl/quic/quic_impl.c
+@@ -3915,10 +3915,13 @@ QUIC_TAKES_LOCK
+ int ossl_quic_set_value_uint(SSL *s, uint32_t class_, uint32_t id,
+     uint64_t value)
+ {
+     QCTX ctx;
+ 
++    if (id == SSL_VALUE_QUIC_WINDOWCON)
++        return 1;
++
+     if (!expect_quic_for_value(s, &ctx, id))
+         return 0;
+ 
+     switch (id) {
+     case SSL_VALUE_QUIC_IDLE_TIMEOUT:
