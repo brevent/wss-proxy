@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+          package="com.github.shadowsocks.plugin.wss_proxy"
+          android:installLocation="internalOnly">
+
+    <application
+        android:label="wss-proxy"
+        android:extractNativeLibs="true">
+
+        <!-- plugin v2, pass __android_vpn in options instead of -V -->
+        <meta-data android:name="com.github.shadowsocks.plugin.version"
+                   android:value="2.0.0"/>
+
+        <provider
+            android:name=".BinaryProvider"
+            android:exported="true"
+            android:directBootAware="true"
+            android:authorities="com.github.shadowsocks.plugin.wss_proxy.BinaryProvider">
+            <intent-filter>
+                <action android:name="com.github.shadowsocks.plugin.ACTION_NATIVE_PLUGIN"/>
+            </intent-filter>
+            <intent-filter>
+                <action android:name="com.github.shadowsocks.plugin.ACTION_NATIVE_PLUGIN"/>
+                <data android:scheme="plugin"
+                      android:host="com.github.shadowsocks"
+                      android:path="/wss-proxy"/>
+            </intent-filter>
+            <meta-data android:name="com.github.shadowsocks.plugin.id"
+                       android:value="wss-proxy"/>
+            <meta-data android:name="com.github.shadowsocks.plugin.executable_path"
+                       android:value="libwss-proxy.so"/>
+        </provider>
+    </application>
+</manifest>

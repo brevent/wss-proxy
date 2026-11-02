@@ -28,6 +28,9 @@ struct wss_server_info {
     uint8_t ipv6: 1;
     uint8_t http2: 1;
     uint8_t http3: 1;
+#ifdef __ANDROID__
+    uint8_t android_vpn: 1;
+#endif
     uint16_t port;
     const char *addr;
     const char *host;

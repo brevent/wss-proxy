@@ -159,6 +159,13 @@ static int init_wss_addr(struct wss_server_info *server) {
     // interface
     server->ifname = find_option(options, "interface", NULL);
 
+#ifdef __ANDROID__
+    // __android_vpn
+    if (find_option(options, "__android_vpn", "1") != NULL) {
+        server->android_vpn = 1;
+    }
+#endif
+
     // strip, the const is safe to drop as strdup gives us writable memory
     server->host = strdup(server->host);
     if ((end = (char *) strchr(server->host, ';')) != NULL) {
@@ -784,6 +791,15 @@ int main() {
         } else {
             LOGI("added %zu certs", count);
         }
+    }
+#elif defined(__ANDROID__)
+    {
+        size_t count = add_android_certs(SSL_CTX_get_cert_store(wss_context.ssl_ctx));
+        if (!count) {
+            LOGE("cannot add trusted certificate store");
+            goto error;
+        }
+        LOGI("added %zu certs", count);
     }
 #else
     if (!SSL_CTX_set_default_verify_paths(wss_context.ssl_ctx)) {

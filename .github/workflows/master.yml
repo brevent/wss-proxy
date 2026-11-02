@@ -109,3 +109,36 @@ jobs:
         $f = "wss-proxy-client-${{ github.ref_name }}-win-x64.zip"
         Compress-Archive build/${{env.BUILD_TYPE}}/wss-proxy-client.exe $f
         gh release upload ${{ github.ref_name }} $f --clobber
+
+  android:
+    runs-on: ubuntu-24.04
+
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        fetch-depth: 10
+        fetch-tags: true
+
+    - name: Build android plugin
+      env:
+        VERSION_CODE: ${{ github.run_number }}
+        KEYSTORE: ${{ secrets.ANDROID_KEYSTORE }}
+        KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      run: |
+        export ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME
+        export VERSION_NAME=$(git describe --tags --always | sed 's/^v//')
+        android/build.sh
+
+    - name: Upload android artifact
+      uses: actions/upload-artifact@v7
+      with:
+        path: build-android/wss-proxy-*.apk
+        archive: false
+
+    - name: Upload android release asset
+      if: ${{ github.event_name == 'release' }}
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        gh release upload ${{ github.ref_name }} build-android/wss-proxy-*.apk --clobber

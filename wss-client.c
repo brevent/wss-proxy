@@ -1476,6 +1476,13 @@ static evutil_socket_t init_ssl_sock(struct wss_context *wss_context, struct eve
         goto error;
     }
 
+#ifdef __ANDROID__
+    if (wss_context->server.android_vpn && protect_socket(sock) == -1) {
+        LOGW("cannot protect socket");
+        goto error;
+    }
+#endif
+
     if (wss_context->server.http2 || wss_context->server.http3) {
         MOGI(wss_context, "new sock");
     }

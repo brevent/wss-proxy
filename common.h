@@ -4,6 +4,9 @@
 #include <stdint.h>
 #include <time.h>
 #include <errno.h>
+#ifdef __ANDROID__
+#include <arpa/inet.h>
+#endif
 #include <event2/buffer.h>
 #include <event2/bufferevent.h>
 #include <event2/bufferevent_struct.h>
@@ -234,6 +237,12 @@ void ssl_keylog_callback(const SSL *ssl, const char *line);
 
 #ifdef _WIN32
 char *strcasestr(const char *s, const char *find);
+#endif
+
+#ifdef __ANDROID__
+int protect_socket(int fd);
+
+size_t add_android_certs(X509_STORE *store);
 #endif
 
 #endif //WSS_PROXY_COMMON_H
