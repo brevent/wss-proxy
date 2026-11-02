@@ -6,6 +6,11 @@ on:
     branches: [ "master" ]
   pull_request:
     branches: [ "master" ]
+  release:
+    types: [ published ]
+
+permissions:
+  contents: write
 
 env:
   BUILD_TYPE: Release
@@ -56,6 +61,11 @@ jobs:
         copy .github\vcpkg\${{matrix.os}}.json vcpkg.json
         if ('${{matrix.os}}' -eq 'windows-2025') {
           vcpkg x-update-baseline --quiet
+          $o = "$env:RUNNER_TEMP\openssl"
+          cp -r C:\vcpkg\ports\openssl $o
+          cp .github\vcpkg\*.patch $o
+          (Get-Content $o\portfile.cmake) -replace 'PATCHES', 'PATCHES quic-time.patch quic-conn-window.patch' | Set-Content $o\portfile.cmake
+          $env:VCPKG_OVERLAY_PORTS = $o
         }
         cmake -B ${{github.workspace}}\build -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DCMAKE_TOOLCHAIN_FILE=c:\vcpkg\scripts\buildsystems\vcpkg.cmake -DVCPKG_TARGET_TRIPLET=win64-static -T v143
 
@@ -87,6 +97,15 @@ jobs:
       if: ${{ matrix.os == 'windows-2025' }}
       uses: actions/upload-artifact@v7
       with:
-        name: wss-proxy-client-win64
+        name: wss-proxy-client-win-x64
         path: |
           build/${{env.BUILD_TYPE}}/wss-proxy-client.exe
+
+    - name: Upload windows release asset
+      if: ${{ matrix.os == 'windows-2025' && github.event_name == 'release' }}
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        $f = "wss-proxy-client-${{ github.ref_name }}-win-x64.zip"
+        Compress-Archive build/${{env.BUILD_TYPE}}/wss-proxy-client.exe $f
+        gh release upload ${{ github.ref_name }} $f --clobber
