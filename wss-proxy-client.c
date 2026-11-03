@@ -542,10 +542,6 @@ static evutil_socket_t init_udp_sock(const struct sockaddr *sockaddr, int sockle
         LOGE("cannot make udp socket closeonexec for %d", get_port(sockaddr));
         goto error;
     }
-    if (evutil_make_listen_socket_reuseable(sock) < 0) {
-        LOGE("cannot make udp socket reuseable for %d", get_port(sockaddr));
-        goto error;
-    }
     if (bind(sock, sockaddr, socklen) < 0) {
         LOGE("cannot bind udp socket for %d", get_port(sockaddr));
         goto error;
