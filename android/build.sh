@@ -51,6 +51,7 @@ if [ ! -f "$DEPS/lib/libssl.a" ]; then
     pushd "$OUT/src/openssl-$OPENSSL_VERSION"
     patch -p1 < "$ROOT/.github/vcpkg/quic-time.patch"
     patch -p1 < "$ROOT/.github/vcpkg/quic-conn-window.patch"
+    patch -p1 < "$ROOT/.github/vcpkg/quic-txp.patch"
     # https://github.com/openssl/openssl/issues/18561
     ANDROID_NDK_ROOT=$ANDROID_NDK_HOME ./Configure android-arm64 -U__ANDROID_API__ -D__ANDROID_API__=$API \
         no-shared no-tests no-docs no-apps --prefix="$DEPS" --libdir=lib

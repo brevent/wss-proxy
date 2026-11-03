@@ -1,0 +1,71 @@
+diff --git a/ssl/quic/quic_fifd.c b/ssl/quic/quic_fifd.c
+index 0d99a87..ba9130c 100644
+--- a/ssl/quic/quic_fifd.c
++++ b/ssl/quic/quic_fifd.c
+@@ -141,6 +141,22 @@ static void on_lost(void *arg)
+         sstream = fifd->get_sstream_by_id(chunks[i].stream_id,
+             pkt->ackm_pkt.pkt_space,
+             fifd->get_sstream_by_id_arg);
++
++        /*
++         * Inform caller that stream needs an FC frame.
++         *
++         * Note: We could track whether an FC frame was sent originally for the
++         * stream to determine if it really needs to be regenerated or not.
++         * However, if loss has occurred, it's probably better to ensure the
++         * peer has up-to-date flow control data for the stream. Given that
++         * these frames are extremely small, we may as well always send it when
++         * handling loss.
++         */
++        fifd->regen_frame(OSSL_QUIC_FRAME_TYPE_MAX_STREAM_DATA,
++            chunks[i].stream_id,
++            pkt,
++            fifd->regen_frame_arg);
++
+         if (sstream == NULL)
+             continue;
+ 
+@@ -173,21 +189,6 @@ static void on_lost(void *arg)
+                 chunks[i].stream_id, pkt,
+                 fifd->regen_frame_arg);
+ 
+-        /*
+-         * Inform caller that stream needs an FC frame.
+-         *
+-         * Note: We could track whether an FC frame was sent originally for the
+-         * stream to determine if it really needs to be regenerated or not.
+-         * However, if loss has occurred, it's probably better to ensure the
+-         * peer has up-to-date flow control data for the stream. Given that
+-         * these frames are extremely small, we may as well always send it when
+-         * handling loss.
+-         */
+-        fifd->regen_frame(OSSL_QUIC_FRAME_TYPE_MAX_STREAM_DATA,
+-            chunks[i].stream_id,
+-            pkt,
+-            fifd->regen_frame_arg);
+-
+         if (sstream_updated && chunks[i].stream_id != UINT64_MAX)
+             fifd->sstream_updated(chunks[i].stream_id,
+                 fifd->sstream_updated_arg);
+diff --git a/ssl/quic/quic_txp.c b/ssl/quic/quic_txp.c
+index de67afe21c..c6223c2511 100644
+--- a/ssl/quic/quic_txp.c
++++ b/ssl/quic/quic_txp.c
+@@ -3014,10 +3014,14 @@ static int txp_pkt_commit(OSSL_QUIC_TX_PACKETISER *txp,
+     txpkt.pn = txp->next_pn[pn_space];
+     txpkt.flags = OSSL_QTX_PKT_FLAG_COALESCE; /* always try to coalesce */
+ 
+-    /* Generate TXPIM chunks representing STOP_SENDING and RESET_STREAM frames. */
++    /*
++     * Generate TXPIM chunks representing STOP_SENDING, RESET_STREAM and
++     * MAX_STREAM_DATA frames.
++     */
+     for (stream = pkt->stream_head; stream != NULL; stream = stream->txp_next)
+-        if (stream->txp_sent_stop_sending || stream->txp_sent_reset_stream) {
+-            /* Log STOP_SENDING/RESET_STREAM chunk to TXPIM. */
++        if (stream->txp_sent_stop_sending || stream->txp_sent_reset_stream
++            || stream->txp_sent_fc) {
++            /* Log STOP_SENDING/RESET_STREAM/MAX_STREAM_DATA chunk to TXPIM. */
+             QUIC_TXPIM_CHUNK chunk;
+ 
+             chunk.stream_id = stream->id;

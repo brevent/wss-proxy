@@ -64,7 +64,7 @@ jobs:
           $o = "$env:RUNNER_TEMP\openssl"
           cp -r C:\vcpkg\ports\openssl $o
           cp .github\vcpkg\*.patch $o
-          (Get-Content $o\portfile.cmake) -replace 'PATCHES', 'PATCHES quic-time.patch quic-conn-window.patch' | Set-Content $o\portfile.cmake
+          (Get-Content $o\portfile.cmake) -replace 'PATCHES', 'PATCHES quic-time.patch quic-conn-window.patch quic-txp.patch' | Set-Content $o\portfile.cmake
           $env:VCPKG_OVERLAY_PORTS = $o
         }
         cmake -B ${{github.workspace}}\build -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DCMAKE_TOOLCHAIN_FILE=c:\vcpkg\scripts\buildsystems\vcpkg.cmake -DVCPKG_TARGET_TRIPLET=win64-static -T v143
