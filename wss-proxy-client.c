@@ -54,7 +54,7 @@ static int bev_context_udp_cmp(const bev_context_udp *a, const bev_context_udp *
 
 static int init_raw_addr(struct sockaddr_storage *sockaddr, int *socklen) {
     int port;
-    char *end;
+    char *end = NULL;
     const char *local_host = getenv("SS_LOCAL_HOST");
     const char *local_port = getenv("SS_LOCAL_PORT");
 
@@ -82,7 +82,7 @@ static int init_raw_addr(struct sockaddr_storage *sockaddr, int *socklen) {
 static int init_wss_addr(struct wss_server_info *server) {
     int port, mux;
     size_t length;
-    char *end;
+    char *end = NULL;
     const char *value;
     const char *remote_host = getenv("SS_REMOTE_HOST");
     const char *remote_port = getenv("SS_REMOTE_PORT");

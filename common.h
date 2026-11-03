@@ -175,9 +175,9 @@ void close_syslog(void);
             if (use_syslog()) {                                                 \
                 syslog(level, format,  ## __VA_ARGS__);                         \
             } else {                                                            \
-                time_t now = time(NULL);                                        \
+                time_t tme = time(NULL);                                        \
                 char timestr[20];                                               \
-                strftime(timestr, 20, TIME_FORMAT, localtime(&now));            \
+                strftime(timestr, 20, TIME_FORMAT, localtime(&tme));            \
                 fprintf(stream, " %s " #level " " LOGGER_NAME " " format "\n",  \
                         timestr, ## __VA_ARGS__);                               \
                 fflush(stream);                                                 \
