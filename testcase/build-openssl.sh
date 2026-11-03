@@ -2,7 +2,7 @@
 
 set -e
 
-openssl_version=3.6.5
+openssl_version=3.5.9
 
 root=$PWD
 mkdir -p build/openssl

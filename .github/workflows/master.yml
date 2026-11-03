@@ -62,12 +62,18 @@ jobs:
       run: |
         copy .github\vcpkg\${{matrix.os}}.json vcpkg.json
         if ('${{matrix.os}}' -eq 'windows-2025') {
-          vcpkg x-update-baseline --quiet
-          $o = "$env:RUNNER_TEMP\openssl"
-          cp -r C:\vcpkg\ports\openssl $o
-          cp .github\vcpkg\*.patch $o
-          (Get-Content $o\portfile.cmake) -replace 'PATCHES', 'PATCHES quic-time.patch quic-conn-window.patch quic-txp.patch' | Set-Content $o\portfile.cmake
-          $env:VCPKG_OVERLAY_PORTS = $o
+          $p = "$env:RUNNER_TEMP\ports"
+          mkdir $p\openssl, $p\libevent | Out-Null
+          git -C C:\vcpkg archive -o $env:RUNNER_TEMP\openssl.tar 737382595bac2a92c7f8f54f120b53d2637af521
+          git -C C:\vcpkg archive -o $env:RUNNER_TEMP\libevent.tar 49a66da074def8806e42235e6c64af567987498f
+          tar -xf $env:RUNNER_TEMP\openssl.tar -C $p\openssl
+          tar -xf $env:RUNNER_TEMP\libevent.tar -C $p\libevent
+          cp .github\vcpkg\*.patch $p\openssl
+          (Get-Content $p\openssl\vcpkg.json) -replace '"version": "[^"]+"', '"version": "3.5.9"' | Set-Content $p\openssl\vcpkg.json
+          (Get-Content $p\openssl\portfile.cmake) -replace 'SHA512 \w+', 'SHA512 ab29a6ed40dd8c74420b9bd19c5ac119b0f191aee72d555ba5a0601456155d39c809c77300d98c7e0bce607f32c1f7a83fc7f69f86b9909fe557bba3aa2e468f' -replace 'PATCHES', 'PATCHES quic-time.patch quic-conn-window.patch quic-txp.patch' | Set-Content $p\openssl\portfile.cmake
+          (Get-Content $p\libevent\vcpkg.json) -replace '"version": "[^"]+"', '"version": "2.1.13"' | Set-Content $p\libevent\vcpkg.json
+          (Get-Content $p\libevent\portfile.cmake) -replace 'release-2.1.12-stable', 'release-2.1.13-stable' -replace 'SHA512 \w+', 'SHA512 a881c10d4af91a9c8c010cf72bb00de35b9adeb935839b4b32b032705c27e953b4a7e194dbb134b7f20f85e49145a35d49dbd5a9bdf9b8b111c93c6333ad37e1' | Set-Content $p\libevent\portfile.cmake
+          $env:VCPKG_OVERLAY_PORTS = $p
         }
         cmake -B ${{github.workspace}}\build -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DCMAKE_TOOLCHAIN_FILE=c:\vcpkg\scripts\buildsystems\vcpkg.cmake -DVCPKG_TARGET_TRIPLET=win64-static -T v143
 
