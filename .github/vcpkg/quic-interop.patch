@@ -1,0 +1,177 @@
+diff --git a/include/internal/quic_stream.h b/include/internal/quic_stream.h
+index eb22aeb9a4..1809b266f8 100644
+--- a/include/internal/quic_stream.h
++++ b/include/internal/quic_stream.h
+@@ -191,6 +191,12 @@ int ossl_quic_sstream_mark_lost(QUIC_SSTREAM *qss,
+     uint64_t start,
+     uint64_t end);
+ 
++/*
++ * Marks all transmitted but unacknowledged bytes as lost, so that they are
++ * sent again. A FIN is not requeued. Returns 1 on success and 0 on error.
++ */
++int ossl_quic_sstream_mark_unacked_lost(QUIC_SSTREAM *qss);
++
+ /*
+  * (RX/ACKM use.) Informs the QUIC_SSTREAM that a STREAM frame with the FIN bit
+  * set was lost.
+diff --git a/ssl/quic/quic_channel.c b/ssl/quic/quic_channel.c
+index 2427db85e9..d98252d680 100644
+--- a/ssl/quic/quic_channel.c
++++ b/ssl/quic/quic_channel.c
+@@ -2023,6 +2023,31 @@ err:
+  * ============================
+  */
+ 
++/*
++ * RFC 9002 s. 6.2.4: on a client PTO in the Initial or Handshake space, resend
++ * the unacknowledged CRYPTO data instead of a bare PING, so that a lost part of
++ * it is recovered without waiting for an ACK.
++ */
++static void ch_on_crypto_pto(QUIC_CHANNEL *ch,
++    const OSSL_ACKM_PROBE_INFO *before)
++{
++    const OSSL_ACKM_PROBE_INFO *probe = ossl_ackm_get0_probe_request(ch->ackm);
++    QUIC_SSTREAM *crypto;
++    uint32_t pn_space;
++
++    if (ch->is_server || ossl_quic_channel_is_terminating(ch))
++        return;
++
++    for (pn_space = QUIC_PN_SPACE_INITIAL;
++        pn_space <= QUIC_PN_SPACE_HANDSHAKE;
++        ++pn_space) {
++        crypto = ch->crypto_send[pn_space];
++        if (crypto != NULL && probe->pto[pn_space] > before->pto[pn_space]
++            && !ossl_quic_sstream_has_pending(crypto))
++            (void)ossl_quic_sstream_mark_unacked_lost(crypto);
++    }
++}
++
+ /*
+  * The central ticker function called by the reactor. This does everything, or
+  * at least everything network I/O related. Best effort - not allowed to fail
+@@ -2129,8 +2154,12 @@ void ossl_quic_channel_subtick(QUIC_CHANNEL *ch, QUIC_TICK_RESULT *res,
+     if (!ch->port->engine->inhibit_tick) {
+         deadline = ossl_ackm_get_loss_detection_deadline(ch->ackm);
+         if (!ossl_time_is_zero(deadline)
+-            && ossl_time_compare(now, deadline) >= 0)
++            && ossl_time_compare(now, deadline) >= 0) {
++            OSSL_ACKM_PROBE_INFO before = *ossl_ackm_get0_probe_request(ch->ackm);
++
+             ossl_ackm_on_timeout(ch->ackm);
++            ch_on_crypto_pto(ch, &before);
++        }
+ 
+         /* If a ping is due, inform TXP. */
+         if (ossl_time_compare(now, ch->ping_deadline) >= 0) {
+diff --git a/ssl/quic/quic_sstream.c b/ssl/quic/quic_sstream.c
+index dd5ab13fb9..cfc9a75179 100644
+--- a/ssl/quic/quic_sstream.c
++++ b/ssl/quic/quic_sstream.c
+@@ -41,7 +41,10 @@ struct quic_sstream_st {
+      *       (and may or may not have been culled);
+      *   - is in the IN_FLIGHT state otherwise.
+      *
+-     * Invariant: No logical byte is ever in both new_set and acked_set.
++     * Exception: a byte resent by ossl_quic_sstream_mark_unacked_lost() can be
++     * in both new_set and acked_set until it is culled.
++     *
++     * Invariant: No culled byte is ever in new_set.
+      */
+     UINT_SET new_set, acked_set;
+ 
+@@ -211,7 +214,13 @@ int ossl_quic_sstream_mark_lost(QUIC_SSTREAM *qss,
+     uint64_t end)
+ {
+     UINT_RANGE r;
+-    r.start = start;
++
++    /* Culled bytes are already ACKed. */
++    if (end < qss->ring_buf.ctail_offset)
++        return 1;
++
++    r.start = start < qss->ring_buf.ctail_offset ? qss->ring_buf.ctail_offset
++                                                 : start;
+     r.end = end;
+ 
+     /*
+@@ -224,6 +233,30 @@ int ossl_quic_sstream_mark_lost(QUIC_SSTREAM *qss,
+     return 1;
+ }
+ 
++int ossl_quic_sstream_mark_unacked_lost(QUIC_SSTREAM *qss)
++{
++    UINT_SET_ITEM *acked;
++    UINT_RANGE r;
++
++    /* acked_set covers [0, ctail), so the gaps are never culled. */
++    r.start = 0;
++    for (acked = ossl_list_uint_set_head(&qss->acked_set); acked != NULL;
++        acked = ossl_list_uint_set_next(acked)) {
++        if (acked->range.start > r.start) {
++            r.end = acked->range.start - 1;
++            if (!ossl_uint_set_insert(&qss->new_set, &r))
++                return 0;
++        }
++        r.start = acked->range.end + 1;
++    }
++
++    if (r.start >= qss->ring_buf.head_offset)
++        return 1;
++
++    r.end = qss->ring_buf.head_offset - 1;
++    return ossl_uint_set_insert(&qss->new_set, &r);
++}
++
+ int ossl_quic_sstream_mark_lost_fin(QUIC_SSTREAM *qss)
+ {
+     if (qss->acked_final_size)
+@@ -349,9 +382,20 @@ static void qss_cull(QUIC_SSTREAM *qss)
+      * We only need to check the first range entry in the integer set because we
+      * can only cull contiguous areas at the start of the ring buffer anyway.
+      */
+-    if (h != NULL)
++    if (h != NULL) {
++        uint64_t old_ctail = qss->ring_buf.ctail_offset;
++        UINT_RANGE culled;
++
+         ring_buf_cpop_range(&qss->ring_buf, h->range.start, h->range.end,
+             qss->cleanse);
++
++        /* Culled bytes can no longer be sent. */
++        if (qss->ring_buf.ctail_offset > old_ctail) {
++            culled.start = 0;
++            culled.end = qss->ring_buf.ctail_offset - 1;
++            (void)ossl_uint_set_remove(&qss->new_set, &culled);
++        }
++    }
+ }
+ 
+ int ossl_quic_sstream_set_buffer_size(QUIC_SSTREAM *qss, size_t num_bytes)
+diff --git a/ssl/quic/quic_txp.c b/ssl/quic/quic_txp.c
+index 891f0dbfb4..2c1e443531 100644
+--- a/ssl/quic/quic_txp.c
++++ b/ssl/quic/quic_txp.c
+@@ -1077,7 +1077,11 @@ static const struct archetype_data archetypes[QUIC_ENC_LEVEL_NUM][TX_PACKETISER_
+             /*require_ack_eliciting           =*/1,
+             /*bypass_cc                       =*/1,
+         },
+-        /* EL 0(INITIAL) - Archetype 2(ACK_ONLY) */
++        /*
++         * EL 0(INITIAL) - Archetype 2(ACK_ONLY)
++         * Initial datagrams must be padded (RFC 9000 s. 14.1). Without padding,
++         * no ACK could be sent while CC-limited.
++         */
+         {
+             /*allow_ack                       =*/1,
+             /*allow_ping                      =*/0,
+@@ -1093,7 +1097,7 @@ static const struct archetype_data archetypes[QUIC_ENC_LEVEL_NUM][TX_PACKETISER_
+             /*allow_cfq_other                 =*/0,
+             /*allow_new_token                 =*/0,
+             /*allow_force_ack_eliciting       =*/1,
+-            /*allow_padding                   =*/0,
++            /*allow_padding                   =*/1,
+             /*require_ack_eliciting           =*/0,
+             /*bypass_cc                       =*/1,
+         },

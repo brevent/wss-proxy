@@ -1,0 +1,23 @@
+--- a/test/quic-openssl-docker/hq-interop/quic-hq-interop.c
++++ b/test/quic-openssl-docker/hq-interop/quic-hq-interop.c
+@@ -875,6 +875,7 @@
+     size_t this_poll_count = 0;
+     char *req = NULL;
+     char *hostname, *port;
++    int key_update = getenv("KEY_UPDATE") != NULL;
+ 
+     if (argc < 4) {
+         fprintf(stderr, "Usage: quic-hq-interop hostname port reqfile\n");
+@@ -929,6 +930,12 @@
+      * Now poll all our descriptors for events
+      */
+     while (this_poll_count != 0 && poll_done < this_poll_count) {
++        if (key_update) {
++            if (SSL_key_update(ssl, SSL_KEY_UPDATE_REQUESTED))
++                key_update = 0;
++            else
++                ERR_clear_error();
++        }
+         result_count = 0;
+         poll_timeout.tv_sec = 0;
+         poll_timeout.tv_usec = 0;

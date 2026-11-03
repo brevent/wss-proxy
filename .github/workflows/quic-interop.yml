@@ -1,0 +1,108 @@
+name: OpenSSL QUIC interop
+
+on:
+  push:
+    branches: [ "quic-interop" ]
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    runs-on: ubuntu-26.04
+
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Build openssl and nginx image
+      run: |
+        docker build -t wss-interop -f testcase/interop/Dockerfile .
+        docker save wss-interop | gzip > wss-interop.tar.gz
+
+    - uses: actions/upload-artifact@v7
+      with:
+        name: wss-interop
+        path: wss-interop.tar.gz
+        retention-days: 1
+
+  interop:
+    needs: image
+    name: ${{ matrix.test }} (${{ matrix.client }})
+    strategy:
+      fail-fast: false
+      matrix:
+        client: [ openssl, ngtcp2 ]
+        test:
+          - H - handshake
+          - DC - transfer
+          - LR - longrtt
+          - C20 - chacha20
+          - M - multiplexing
+          - S - retry
+          - R - resumption
+          - Z - zerortt
+          - 3 - http3
+          - B - blackhole
+          - U - keyupdate
+          - A - amplificationlimit
+          - L1 - handshakeloss
+          - L2 - transferloss
+          - C1 - handshakecorruption
+          - C2 - transfercorruption
+          - 6 - ipv6
+          # - E - ecn
+          # - V2 - v2
+          # - CM - connectionmigration
+          - BP - rebind-port
+          - BA - rebind-addr
+          - G - goodput
+          - C - crosstraffic
+        include:
+          - { test: Z - zerortt, allow_failure: true }
+          - { test: 3 - http3, allow_failure: true }
+          - { test: BP - rebind-port, allow_failure: true }
+          - { test: BA - rebind-addr, allow_failure: true }
+    runs-on: ubuntu-26.04
+    continue-on-error: ${{ matrix.allow_failure == true }}
+
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        repository: quic-interop/quic-interop-runner
+        persist-credentials: false
+
+    - uses: actions/download-artifact@v7
+      with:
+        name: wss-interop
+
+    - uses: actions/setup-python@v6
+      with:
+        python-version: "3.12"
+
+    - name: Install dependencies
+      run: |
+        docker version
+        docker load < wss-interop.tar.gz
+        pip install -r requirements.txt
+        sudo apt-get update
+        sudo apt-get install -y tshark
+
+    - name: Add openssl
+      run: |
+        jq '.openssl = {image: "wss-interop", url: "https://github.com/openssl/openssl", role: "client"}' \
+            implementations_quic.json > implementations.tmp
+        mv implementations.tmp implementations_quic.json
+
+    - name: Run ${{ matrix.test }}
+      run: |
+        t="${{ matrix.test }}"
+        python3 run.py -c ${{ matrix.client }} -s nginx -r nginx=wss-interop -t "${t#* - }" -d --log-dir logs -j result.json
+        jq -e '[.. | objects | select(has("result")) | .result] | length > 0 and all(. == "succeeded")' result.json
+
+    - name: Upload logs
+      if: ${{ failure() }}
+      uses: actions/upload-artifact@v7
+      with:
+        name: logs-${{ matrix.client }}-${{ matrix.test }}
+        path: logs
+        retention-days: 7
