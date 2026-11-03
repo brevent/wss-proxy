@@ -1,0 +1,12 @@
+{
+  "local_address": "127.0.0.1",
+  "local_port": 1087,
+  "method": "chacha20-ietf-poly1305",
+  "mode": "tcp_only",
+  "password": "sip003u",
+  "plugin": "./wss-proxy-client",
+  "plugin_opts": "mux=0;loglevel=debug;host=localhost;tls;path=/v2ray",
+  "server": "127.0.0.1",
+  "server_port": 443,
+  "timeout": 60
+}

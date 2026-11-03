@@ -1,0 +1,12 @@
+{
+  "local_address": "127.0.0.1",
+  "local_port": 1086,
+  "method": "chacha20-ietf-poly1305",
+  "mode": "tcp_only",
+  "password": "sip003u",
+  "plugin": "./v2ray-plugin",
+  "plugin_opts": "mux=0;loglevel=debug;host=localhost;tls;cert=../testcase/nginx/localhost.crt",
+  "server": "127.0.0.1",
+  "server_port": 443,
+  "timeout": 60
+}

@@ -8,6 +8,6 @@
   "plugin_mode": "tcp_and_udp",
   "plugin_opts": "mux=0;loglevel=debug;host=localhost;http3",
   "server": "127.0.0.1",
-  "server_port": 9999,
+  "server_port": 443,
   "timeout": 60
 }

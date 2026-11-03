@@ -1,0 +1,10 @@
+{
+  "method": "chacha20-ietf-poly1305",
+  "mode": "tcp_only",
+  "password": "sip003u",
+  "plugin": "./v2ray-plugin",
+  "plugin_opts": "server;mux=0;path=/v2ray;loglevel=debug",
+  "server": "0.0.0.0",
+  "server_port": 8889,
+  "timeout": 60
+}

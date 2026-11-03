@@ -4,6 +4,7 @@ name: CMake on multiple platforms
 on:
   push:
     branches: [ "master" ]
+    tags: [ "v*" ]
   pull_request:
     branches: [ "master" ]
   release:
@@ -19,6 +20,7 @@ env:
 
 jobs:
   build:
+    if: ${{ github.ref_type != 'tag' || github.event_name == 'release' }}
     # https://docs.github.com/actions/using-workflows/about-workflows#using-a-build-matrix
     runs-on: ${{ matrix.os }}
 
@@ -74,7 +76,9 @@ jobs:
 
     - name: Prepare test on ubuntu
       if: ${{ startsWith(matrix.os, 'ubuntu') }}
-      run: sudo apt-get install -y python3-socks
+      run: |
+        sudo apt-get install -y python3-socks libpcre2-dev zlib1g-dev
+        sudo sysctl -w net.ipv4.ip_unprivileged_port_start=443
 
     - name: Prepare test on macos
       if: ${{ startsWith(matrix.os, 'macos') }}
@@ -87,11 +91,31 @@ jobs:
         pip3 install PySocks
         cp -v build/${{env.BUILD_TYPE}}/wss-proxy*.exe build/
 
+    - name: Build nginx on ubuntu and macos
+      if: ${{ !startsWith(matrix.os, 'windows') }}
+      run: testcase/build-nginx.sh
+
+    - name: Setup wsl on windows
+      if: ${{ startsWith(matrix.os, 'windows') }}
+      uses: Vampire/setup-wsl@v7
+      with:
+        wsl-version: 1
+        additional-packages: build-essential curl libssl-dev libpcre2-dev zlib1g-dev
+
+    - name: Build nginx on windows
+      if: ${{ startsWith(matrix.os, 'windows') }}
+      shell: wsl-bash {0}
+      run: testcase/build-nginx.sh
+
     - name: Test
-      env:
-        SECRET_REMOTE_IP: ${{ secrets.SECRET_REMOTE_IP }}
       working-directory: ${{github.workspace}}/build
       run: ctest -C ${{env.BUILD_TYPE}} -V
+
+    - name: Benchmark on ubuntu-26.04
+      if: ${{ matrix.os == 'ubuntu-26.04' }}
+      run: |
+        testcase/build-openssl.sh
+        cd build && bash ../testcase/run-bench.sh
 
     - name: Upload windows artifact
       if: ${{ matrix.os == 'windows-2025' }}
@@ -111,6 +135,7 @@ jobs:
         gh release upload ${{ github.ref_name }} $f --clobber
 
   android:
+    if: ${{ github.ref_type == 'tag' || github.event_name == 'release' }}
     runs-on: ubuntu-24.04
 
     steps:
