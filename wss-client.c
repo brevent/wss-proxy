@@ -1487,6 +1487,15 @@ static evutil_socket_t init_ssl_sock(struct wss_context *wss_context, struct eve
         MOGI(wss_context, "new sock");
     }
 
+    if (wss_context->server.http3) {
+        int rcvbuf = UDP_RCVBUF;
+        socklen_t len = (socklen_t) sizeof(rcvbuf);
+        setsockopt(sock, SOL_SOCKET, SO_RCVBUF, (void *) &rcvbuf, len);
+        if (getsockopt(sock, SOL_SOCKET, SO_RCVBUF, (void *) &rcvbuf, &len) == 0) {
+            MOGD(wss_context, "rcvbuf: %d", rcvbuf);
+        }
+    }
+
 #ifdef SO_BINDTODEVICE
     if (wss_context->server.ifname != NULL
         && setsockopt(sock, SOL_SOCKET, SO_BINDTODEVICE,

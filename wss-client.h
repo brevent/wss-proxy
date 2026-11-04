@@ -86,6 +86,10 @@ struct wss_context {
 #define MAX_MUX_CONNECTIONS 16
 #endif
 
+#ifndef UDP_RCVBUF
+#define UDP_RCVBUF 1048576
+#endif
+
 struct wss_mux_context {
     SSL_CTX *ssl_ctx;
     struct event_base *base;
