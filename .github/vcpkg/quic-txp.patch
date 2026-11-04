@@ -1,5 +1,5 @@
 diff --git a/ssl/quic/quic_fifd.c b/ssl/quic/quic_fifd.c
-index 0d99a87..ba9130c 100644
+index 0d99a8748a..ba9130c9d3 100644
 --- a/ssl/quic/quic_fifd.c
 +++ b/ssl/quic/quic_fifd.c
 @@ -141,6 +141,22 @@ static void on_lost(void *arg)
@@ -48,7 +48,7 @@ index 0d99a87..ba9130c 100644
              fifd->sstream_updated(chunks[i].stream_id,
                  fifd->sstream_updated_arg);
 diff --git a/ssl/quic/quic_txp.c b/ssl/quic/quic_txp.c
-index de67afe21c..c6223c2511 100644
+index 24314f6b34..891f0dbfb4 100644
 --- a/ssl/quic/quic_txp.c
 +++ b/ssl/quic/quic_txp.c
 @@ -3014,10 +3014,14 @@ static int txp_pkt_commit(OSSL_QUIC_TX_PACKETISER *txp,
