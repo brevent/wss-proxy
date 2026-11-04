@@ -246,7 +246,7 @@ static void http_response_cb(struct bufferevent *tev, void *raw) {
         tunnel_wss(raw, tev, NULL);
     } else {
         buffer[0xc] = '\0';
-        LOGE("wss fail for peer %d, status: %s", get_peer_port(raw), &buffer[9]);
+        LOGW("wss fail for peer %d, status: %s", get_peer_port(raw), &buffer[9]);
         bufferevent_free(raw);
         bufferevent_free(tev);
     }

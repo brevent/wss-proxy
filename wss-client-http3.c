@@ -5,6 +5,10 @@
 
 #ifdef HAVE_OSSL_QUIC_CLIENT_METHOD
 
+#ifndef OSSL_QUIC_LOCAL_ERR_IDLE_TIMEOUT
+#define OSSL_QUIC_LOCAL_ERR_IDLE_TIMEOUT UINT64_MAX
+#endif
+
 SSL_CTX *ssl_ctx_new_http3() {
 #ifndef SSL_VALUE_QUIC_WINDOWCON
     LOGW("http3 with OpenSSL %s may use more memory in fast downloading", OpenSSL_version(OPENSSL_VERSION_STRING));
@@ -236,10 +240,14 @@ void http3_eventcb(evutil_socket_t sock, short event, void *context) {
             break;
         }
         if (is_infinite) {
-            LOGI("infinite, remove timer and mark ssl as error");
+            LOGD("infinite, remove timer and mark ssl as error");
             if (SSL_get_conn_close_info(ssl, &info, sizeof(info))) {
-                MOGI(wss_context, "connection closed, error code: %llu, reason: %.*s",
-                     (unsigned long long) info.error_code, (int) info.reason_len, info.reason ? info.reason : "");
+                if (info.error_code == OSSL_QUIC_LOCAL_ERR_IDLE_TIMEOUT) {
+                    MOGI(wss_context, "connection closed, reason: idle timeout");
+                } else {
+                    MOGI(wss_context, "connection closed, error code: 0x%llx, reason: %.*s",
+                         (unsigned long long) info.error_code, (int) info.reason_len, info.reason ? info.reason : "");
+                }
             }
             event_del(wss_context->event_mux);
             wss_context->ssl_error = 1;
@@ -464,13 +472,13 @@ ssize_t check_ssl_error_http3(struct bev_context_ssl *bev_context_ssl, enum ssl_
                 MOGD(wss_context, "stream %u stopped by peer, mark as eof", stream_id);
                 return WSS_EOF;
             }
-            MOGW(wss_context, "stream %u reset local, error code: %llu", stream_id, (unsigned long long) error_code);
+            MOGW(wss_context, "stream %u reset local, error code: 0x%llx", stream_id, (unsigned long long) error_code);
             return WSS_ERROR;
         case SSL_STREAM_STATE_RESET_REMOTE:
             if (error_code == HTTP3_NO_ERROR) {
-                MOGD(wss_context, "stream %u reset remote, error code: %llu", stream_id, (unsigned long long) error_code);
+                MOGD(wss_context, "stream %u reset remote without error", stream_id);
             } else {
-                MOGW(wss_context, "stream %u reset remote, error code: %llu", stream_id, (unsigned long long) error_code);
+                MOGW(wss_context, "stream %u reset remote, error code: 0x%llx", stream_id, (unsigned long long) error_code);
             }
             return WSS_ERROR;
         case SSL_STREAM_STATE_CONN_CLOSED:
@@ -478,7 +486,7 @@ ssize_t check_ssl_error_http3(struct bev_context_ssl *bev_context_ssl, enum ssl_
                 && !(info.flags & SSL_CONN_CLOSE_FLAG_TRANSPORT) && info.error_code == HTTP3_NO_ERROR) {
                 MOGD(wss_context, "stream %u connection closed without error", stream_id);
             } else {
-                MOGW(wss_context, "stream %u connection closed by %s, error code: %llu, reason: %.*s", stream_id,
+                MOGW(wss_context, "stream %u connection closed by %s, error code: 0x%llx, reason: %.*s", stream_id,
                      (info.flags & SSL_CONN_CLOSE_FLAG_LOCAL) ? "local" : "remote", (unsigned long long) info.error_code,
                      (int) info.reason_len, info.reason ? info.reason : "");
             }

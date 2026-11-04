@@ -154,7 +154,7 @@ static ssize_t check_ssl_error(struct bev_context_ssl *bev_context_ssl, enum ssl
 
 void reset_streams_count(struct wss_context *wss_context) {
     if (wss_context->http_streams_count > 1) {
-        MOGI(wss_context, "%u streams are completed", wss_context->http_streams_count);
+        MOGD(wss_context, "%u streams are completed", wss_context->http_streams_count);
     }
     wss_context->http_streams_count = 0;
 }
@@ -471,9 +471,9 @@ static void handle_http2_frame(struct bufferevent_http_stream *http_stream, stru
             evbuffer_copyout(frame, header, sizeof(header));
             error_code = http2_frame->length == 4 ? load_be32(header + HTTP2_HEADER_LENGTH) : 0;
             if (error_code) {
-                MOGW(wss_context, "stream %u reset by server, error code: %u", bev_context_ssl->stream_id, error_code);
+                MOGW(wss_context, "stream %u reset by server, error code: 0x%x", bev_context_ssl->stream_id, error_code);
             } else {
-                MOGD(wss_context, "stream %u reset by server, error code: %u", bev_context_ssl->stream_id, error_code);
+                MOGD(wss_context, "stream %u reset by server without error", bev_context_ssl->stream_id);
             }
             discard_http_stream_output(bev);
             bev_context_ssl->no_end_stream = 1;
@@ -577,7 +577,7 @@ static void update_settings(struct wss_context *wss_context, struct evbuffer *in
         settings_type = (short) load_be16(frame);
         settings_value = load_be32(frame + 2);
         if (settings_type == 0x3) {
-            MOGI(wss_context, "max concurrent streams: %u", settings_value);
+            MOGD(wss_context, "max concurrent streams: %u", settings_value);
             wss_context->max_concurrent_streams = settings_value ? settings_value : 1;
         } else if (settings_type == 0x4) {
             LOGD("initial window size: %u", settings_value);
@@ -653,15 +653,17 @@ static void check_http2_stream(struct wss_context *wss_context, struct http2_fra
 
 static void handle_ping(struct wss_context *wss_context, uint8_t *header, size_t length) {
     if (header[0x4] == 1) {
-        MOGI(wss_context, "server send ping with ack");
+        MOGD(wss_context, "server send ping with ack");
     } else if (header[0x4] == 0 && length == 8) {
-        MOGI(wss_context, "server send ping, reply with ack");
+        MOGD(wss_context, "server send ping, reply with ack");
         header[0x4] = 1;
         evbuffer_add(wss_context->output, header, HTTP2_HEADER_LENGTH + length);
     }
 }
 
 static void check_http2_control(struct wss_context *wss_context, uint8_t type, uint8_t *header, uint32_t length) {
+    uint32_t error_code;
+
     switch (type) {
         case 4: // settings
             if (!(header[4] & 0x1)) {
@@ -676,8 +678,12 @@ static void check_http2_control(struct wss_context *wss_context, uint8_t type, u
             handle_ping(wss_context, header, length);
             break;
         case 7: // goaway
-            MOGI(wss_context, "server send goaway, error code: %u",
-                 length >= 8 ? load_be32(header + HTTP2_HEADER_LENGTH + 4) : 0);
+            error_code = length >= 8 ? load_be32(header + HTTP2_HEADER_LENGTH + 4) : 0;
+            if (error_code) {
+                MOGW(wss_context, "server send goaway, error code: 0x%x", error_code);
+            } else {
+                MOGI(wss_context, "server send goaway");
+            }
             wss_context->ssl_goaway = 1;
             break;
         case 8: // window update
@@ -957,7 +963,7 @@ static void free_all_http_streams(struct wss_context *wss_context) {
     if (wss_context->http_streams) {
         count = lh_bufferevent_http_stream_num_items(wss_context->http_streams);
         if (count) {
-            MOGI(wss_context, "would free all streams, count: %lu", count);
+            MOGD(wss_context, "would free all streams, count: %lu", count);
             lh_bufferevent_http_stream_doall(wss_context->http_streams, free_http_stream);
         }
         lh_bufferevent_http_stream_free(wss_context->http_streams);
@@ -1187,7 +1193,7 @@ static void http2_writecb(evutil_socket_t sock, short event, void *context) {
 
     while (evbuffer_get_length(output)) {
         if (wss_context->ssl_error) {
-            MOGW(wss_context, "http2 mux write ssl error, length: %zu", evbuffer_get_length(output));
+            MOGD(wss_context, "http2 mux write ssl error, length: %zu", evbuffer_get_length(output));
             evbuffer_drain(output, evbuffer_get_length(output));
             goto error;
         }
@@ -1497,11 +1503,15 @@ static evutil_socket_t init_ssl_sock(struct wss_context *wss_context, struct eve
     }
 
 #ifdef SO_BINDTODEVICE
-    if (wss_context->server.ifname != NULL
-        && setsockopt(sock, SOL_SOCKET, SO_BINDTODEVICE,
-                      wss_context->server.ifname,
-                      (socklen_t) strlen(wss_context->server.ifname)) == 0) {
-        LOGI("bind to %s", wss_context->server.ifname);
+    if (wss_context->server.ifname != NULL) {
+        if (setsockopt(sock, SOL_SOCKET, SO_BINDTODEVICE,
+                       wss_context->server.ifname,
+                       (socklen_t) strlen(wss_context->server.ifname)) == 0) {
+            LOGI("bind to %s", wss_context->server.ifname);
+        } else {
+            LOGW("cannot bind to %s: %s", wss_context->server.ifname,
+                 evutil_socket_error_to_string(evutil_socket_geterror(sock)));
+        }
     }
 #endif
 
