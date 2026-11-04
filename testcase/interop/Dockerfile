@@ -13,7 +13,6 @@ RUN curl -q -sS -f -L --retry 3 https://github.com/openssl/openssl/releases/down
     patch -p1 --fuzz=0 < /patches/quic-time.patch && \
     patch -p1 --fuzz=0 < /patches/quic-conn-window.patch && \
     patch -p1 --fuzz=0 < /patches/quic-txp.patch && \
-    patch -p1 --fuzz=0 < /patches/quic-pseudo-loss.patch && \
     patch -p1 --fuzz=0 < /patches/quic-interop.patch && \
     ./Configure enable-sslkeylog enable-hqinterop no-shared no-docs --prefix=/opt/openssl --libdir=lib > /dev/null && \
     make -j"$(nproc)" build_libs test/quic-openssl-docker/hq-interop/quic-hq-interop > /dev/null && \
