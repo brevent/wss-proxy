@@ -254,13 +254,6 @@ int find_option_port(const char *key, int default_port) {
 }
 
 static void on_native_signal(int signal) {
-    if (signal == SIGINT) {
-        LOGI("received interrupt, will exit");
-        exit(EXIT_SUCCESS);
-    } else if (signal == SIGTERM) {
-        LOGI("received termination, will exit");
-        exit(EXIT_SUCCESS);
-    }
     switch (signal) {
 #ifdef SIGUSR1
         case SIGUSR1:
@@ -285,14 +278,20 @@ static void on_native_signal(int signal) {
     }
 }
 
-int init_event_signal(struct event_base *base, struct event **event_parent) {
+static void on_termination(evutil_socket_t signal, short events, void *arg) {
+    (void) events;
+    LOGI("received %s, will exit", signal == SIGINT ? "interrupt" : "termination");
+    event_base_loopbreak(arg);
+}
+
+int init_base_events(struct event_base *base, struct base_events *events) {
 #ifdef RLIMIT_NOFILE
     struct rlimit rlimit;
 #endif
     struct timeval one_minute = {60, 0};
-    *event_parent = event_new(base, -1, EV_PERSIST, check_parent, NULL);
-    if (*event_parent) {
-        event_add(*event_parent, &one_minute);
+    events->parent = event_new(base, -1, EV_PERSIST, check_parent, NULL);
+    if (events->parent) {
+        event_add(events->parent, &one_minute);
     } else {
         LOGW("cannot add event to check parent");
     }
@@ -316,8 +315,13 @@ int init_event_signal(struct event_base *base, struct event **event_parent) {
         }
     }
 #endif
-    signal(SIGINT, on_native_signal);
-    signal(SIGTERM, on_native_signal);
+    events->sigint = evsignal_new(base, SIGINT, on_termination, base);
+    events->sigterm = evsignal_new(base, SIGTERM, on_termination, base);
+    if (!events->sigint || !events->sigterm
+        || event_add(events->sigint, NULL) < 0 || event_add(events->sigterm, NULL) < 0) {
+        LOGE("cannot add signal event");
+        return 1;
+    }
 #ifdef SIGUSR1
     signal(SIGUSR1, on_native_signal);
 #endif
@@ -328,6 +332,21 @@ int init_event_signal(struct event_base *base, struct event **event_parent) {
     signal(SIGPIPE, on_native_signal);
 #endif
     return 0;
+}
+
+void free_base_events(struct base_events *events) {
+    if (events->parent) {
+        event_free(events->parent);
+        events->parent = NULL;
+    }
+    if (events->sigint) {
+        event_free(events->sigint);
+        events->sigint = NULL;
+    }
+    if (events->sigterm) {
+        event_free(events->sigterm);
+        events->sigterm = NULL;
+    }
 }
 
 int is_websocket_key(const char *websocket_key) {

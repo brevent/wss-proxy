@@ -741,7 +741,7 @@ int main() {
     int code = 1;
     struct event_base *base = NULL;
     struct event_config *cfg = NULL;
-    struct event *event_parent = NULL;
+    struct base_events events;
     struct sockaddr_storage raw_addr, extra_raw_addr;
     struct server_context server_context, extra_server_context;
     int socklen, extra_port;
@@ -755,6 +755,7 @@ int main() {
         return 1;
     }
 #endif
+    memset(&events, 0, sizeof(events));
     memset(&wss_context, 0, sizeof(wss_context));
     memset(&server_context, 0, sizeof(server_context));
     memset(&extra_server_context, 0, sizeof(server_context));
@@ -850,7 +851,7 @@ int main() {
     snprintf(wss_context.user_agent, sizeof(wss_context.user_agent), "wss-proxy-client/%s libevent/%s OpenSSL/%s",
              WSS_PROXY_VERSION, event_get_version(), OpenSSL_version(OPENSSL_VERSION_STRING));
 
-    if (init_event_signal(base, &event_parent)) {
+    if (init_base_events(base, &events)) {
         goto error;
     }
 
@@ -871,9 +872,7 @@ error:
     server_context_free(&server_context);
     server_context_free(&extra_server_context);
     free_context_ssl(&wss_context);
-    if (event_parent) {
-        event_free(event_parent);
-    }
+    free_base_events(&events);
     if (base) {
         event_base_free(base);
     }

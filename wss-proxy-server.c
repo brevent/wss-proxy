@@ -325,7 +325,7 @@ int main() {
     int code = 1;
     struct event_base *base = NULL;
     struct event_config *cfg = NULL;
-    struct event *event_parent = NULL;
+    struct base_events events;
     const char *addr;
     int port;
     struct sockaddr_storage sockaddr_storage;
@@ -341,6 +341,7 @@ int main() {
         return 1;
     }
 #endif
+    memset(&events, 0, sizeof(events));
     memset(&raw_server_info, 0, sizeof(raw_server_info));
     if (init_raw_info(&raw_server_info)) {
         goto error;
@@ -395,7 +396,7 @@ int main() {
         goto error;
     }
 
-    if (init_event_signal(base, &event_parent)) {
+    if (init_base_events(base, &events)) {
         goto error;
     }
 
@@ -416,9 +417,7 @@ error:
     if (raw_server_info.hash) {
         free_all_udp(raw_server_info.hash);
     }
-    if (event_parent) {
-        event_free(event_parent);
-    }
+    free_base_events(&events);
     if (listener) {
         evconnlistener_free(listener);
     }

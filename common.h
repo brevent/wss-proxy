@@ -194,7 +194,15 @@ const char *find_option(const char *options, const char *key, const char *no_val
 
 int find_option_port(const char *key, int default_port);
 
-int init_event_signal(struct event_base *base, struct event **event_parent);
+struct base_events {
+    struct event *parent;
+    struct event *sigint;
+    struct event *sigterm;
+};
+
+int init_base_events(struct event_base *base, struct base_events *events);
+
+void free_base_events(struct base_events *events);
 
 int is_websocket_key(const char *websocket_key);
 
