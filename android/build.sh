@@ -4,10 +4,6 @@
 # optional env: VERSION_NAME, VERSION_CODE, KEYSTORE (base64), KEYSTORE_PASSWORD, KEY_ALIAS
 set -euo pipefail
 
-OPENSSL_VERSION=3.5.9
-OPENSSL_SHA256=603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a
-LIBEVENT_VERSION=2.1.13
-LIBEVENT_SHA256=f7e9383b8c0baa81b687e5b5eecc01beefaf1b19b64151d95ed61647fe7a315c
 API=21
 TARGET_API=37
 ABI=arm64-v8a
@@ -33,48 +29,10 @@ CMAKE_ANDROID=(
     -DCMAKE_BUILD_TYPE=Release
 )
 
-fetch() {
-    local url=$1 sha256=$2 file
-    file=$OUT/src/$(basename "$url")
-    if [ ! -f "$file" ]; then
-        curl -fsSL -o "$file.tmp" "$url"
-        mv "$file.tmp" "$file"
-    fi
-    echo "$sha256  $file" | sha256sum -c - >/dev/null
-    tar xzf "$file" -C "$OUT/src"
-}
-
-mkdir -p "$OUT/src"
-
-if [ ! -f "$DEPS/lib/libssl.a" ]; then
-    fetch https://github.com/openssl/openssl/releases/download/openssl-$OPENSSL_VERSION/openssl-$OPENSSL_VERSION.tar.gz $OPENSSL_SHA256
-    pushd "$OUT/src/openssl-$OPENSSL_VERSION"
-    patch -p1 < "$ROOT/.github/vcpkg/quic-time.patch"
-    patch -p1 < "$ROOT/.github/vcpkg/quic-conn-window.patch"
-    patch -p1 < "$ROOT/.github/vcpkg/quic-txp.patch"
-    # https://github.com/openssl/openssl/issues/18561
-    ANDROID_NDK_ROOT=$ANDROID_NDK_HOME ./Configure android-arm64 -U__ANDROID_API__ -D__ANDROID_API__=$API \
-        no-shared no-tests no-docs no-apps --prefix="$DEPS" --libdir=lib
-    make -j"$JOBS" build_libs
-    make install_dev
-    popd
-fi
-
-if [ ! -f "$DEPS/lib/libevent_core.a" ]; then
-    fetch https://github.com/libevent/libevent/releases/download/release-$LIBEVENT_VERSION-stable/libevent-$LIBEVENT_VERSION-stable.tar.gz $LIBEVENT_SHA256
-    cmake -S "$OUT/src/libevent-$LIBEVENT_VERSION-stable" -B "$OUT/libevent" "${CMAKE_ANDROID[@]}" \
-        -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
-        -DCMAKE_INSTALL_PREFIX="$DEPS" \
-        -DEVENT__LIBRARY_TYPE=STATIC \
-        -DEVENT__DISABLE_OPENSSL=ON \
-        -DEVENT__DISABLE_THREAD_SUPPORT=ON \
-        -DEVENT__DISABLE_TESTS=ON \
-        -DEVENT__DISABLE_REGRESS=ON \
-        -DEVENT__DISABLE_BENCHMARK=ON \
-        -DEVENT__DISABLE_SAMPLES=ON
-    cmake --build "$OUT/libevent" -j"$JOBS"
-    cmake --install "$OUT/libevent"
-fi
+# https://github.com/openssl/openssl/issues/18561
+ANDROID_NDK_ROOT=$ANDROID_NDK_HOME "$ROOT/deps/openssl.sh" "$OUT" "$DEPS" \
+    android-arm64 -U__ANDROID_API__ -D__ANDROID_API__=$API
+"$ROOT/deps/libevent.sh" "$OUT" "$DEPS" "${CMAKE_ANDROID[@]}"
 
 cmake -S "$ROOT" -B "$OUT/wss-proxy" "${CMAKE_ANDROID[@]}" \
     -DCMAKE_FIND_ROOT_PATH="$DEPS" \
@@ -84,7 +42,7 @@ cmake -S "$ROOT" -B "$OUT/wss-proxy" "${CMAKE_ANDROID[@]}" \
 cmake --build "$OUT/wss-proxy" --target wss-proxy-client -j"$JOBS"
 
 APK=$OUT/apk
-APK_FILE=$OUT/wss-proxy-${VERSION_NAME:-0.0.0}-android-arm64-v8a.apk
+APK_FILE=$OUT/wss-proxy-client-${VERSION_NAME:-0.0.0}-$ABI.apk
 rm -rf "$APK"
 mkdir -p "$APK/lib/$ABI" "$APK/classes" "$APK/dex"
 llvm-strip -o "$APK/lib/$ABI/libwss-proxy.so" "$OUT/wss-proxy/wss-proxy-client"

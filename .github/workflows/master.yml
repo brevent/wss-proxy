@@ -1,5 +1,5 @@
 # https://github.com/actions/starter-workflows/blob/master/ci/cmake-multi-platform.yml
-name: CMake on multiple platforms
+name: Build and Release
 
 on:
   push:
@@ -9,6 +9,7 @@ on:
     branches: [ "master" ]
   release:
     types: [ published ]
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -45,7 +46,12 @@ jobs:
 
     - name: Install libevent and openssl on ubuntu
       if: ${{ startsWith(matrix.os, 'ubuntu') }}
-      run: sudo apt-get update && sudo apt-get install -y libevent-dev libssl-dev
+      timeout-minutes: 5
+      run: |
+        curl -fsSL --retry 3 https://raw.githubusercontent.com/openssl/openssl/master/.github/retry -o retry
+        chmod +x retry
+        ./retry sudo timeout 60 apt-get update
+        ./retry sudo timeout 60 apt-get install -y libevent-dev libssl-dev
 
     - name: Install libevent and openssl on macos
       if: ${{ startsWith(matrix.os, 'macos') }}
@@ -74,6 +80,7 @@ jobs:
           (Get-Content $p\libevent\vcpkg.json) -replace '"version": "[^"]+"', '"version": "2.1.13"' | Set-Content $p\libevent\vcpkg.json
           (Get-Content $p\libevent\portfile.cmake) -replace 'release-2.1.12-stable', 'release-2.1.13-stable' -replace 'SHA512 \w+', 'SHA512 a881c10d4af91a9c8c010cf72bb00de35b9adeb935839b4b32b032705c27e953b4a7e194dbb134b7f20f85e49145a35d49dbd5a9bdf9b8b111c93c6333ad37e1' | Set-Content $p\libevent\portfile.cmake
           $env:VCPKG_OVERLAY_PORTS = $p
+          "VERSION_NAME=$((git describe --tags --always) -replace '^v')" >> $env:GITHUB_ENV
         }
         cmake -B ${{github.workspace}}\build -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DCMAKE_TOOLCHAIN_FILE=c:\vcpkg\scripts\buildsystems\vcpkg.cmake -DVCPKG_TARGET_TRIPLET=win64-static -T v143
 
@@ -82,36 +89,22 @@ jobs:
 
     - name: Prepare test on ubuntu
       if: ${{ startsWith(matrix.os, 'ubuntu') }}
+      timeout-minutes: 5
       run: |
-        sudo apt-get install -y python3-socks libpcre2-dev zlib1g-dev
-        sudo sysctl -w net.ipv4.ip_unprivileged_port_start=443
+        ./retry sudo timeout 60 apt-get install -y python3-socks
 
     - name: Prepare test on macos
       if: ${{ startsWith(matrix.os, 'macos') }}
-      run: brew install shadowsocks-rust && /usr/bin/pip3 install PySocks
+      run: brew install shadowsocks-rust caddy && /usr/bin/pip3 install PySocks
 
     - name: Prepare test on windows
       if: ${{ startsWith(matrix.os, 'windows') }}
-      shell: bash
       run: |
         pip3 install PySocks
-        cp -v build/${{env.BUILD_TYPE}}/wss-proxy*.exe build/
-
-    - name: Build nginx on ubuntu and macos
-      if: ${{ !startsWith(matrix.os, 'windows') }}
-      run: testcase/build-nginx.sh
-
-    - name: Setup wsl on windows
-      if: ${{ startsWith(matrix.os, 'windows') }}
-      uses: Vampire/setup-wsl@v7
-      with:
-        wsl-version: 1
-        additional-packages: build-essential curl libssl-dev libpcre2-dev zlib1g-dev
-
-    - name: Build nginx on windows
-      if: ${{ startsWith(matrix.os, 'windows') }}
-      shell: wsl-bash {0}
-      run: testcase/build-nginx.sh
+        Copy-Item build/${{env.BUILD_TYPE}}/wss-proxy*.exe build/ -Verbose
+        if ('${{matrix.os}}' -eq 'windows-2025') {
+          Compress-Archive build/wss-proxy-client.exe "build/wss-proxy-client-$env:VERSION_NAME-win-x64.zip"
+        }
 
     - name: Test
       working-directory: ${{github.workspace}}/build
@@ -127,18 +120,14 @@ jobs:
       if: ${{ matrix.os == 'windows-2025' }}
       uses: actions/upload-artifact@v7
       with:
-        name: wss-proxy-client-win-x64
-        path: |
-          build/${{env.BUILD_TYPE}}/wss-proxy-client.exe
+        path: build/wss-proxy-client-*-win-x64.zip
+        archive: false
 
     - name: Upload windows release asset
       if: ${{ matrix.os == 'windows-2025' && github.event_name == 'release' }}
       env:
         GH_TOKEN: ${{ github.token }}
-      run: |
-        $f = "wss-proxy-client-${{ github.ref_name }}-win-x64.zip"
-        Compress-Archive build/${{env.BUILD_TYPE}}/wss-proxy-client.exe $f
-        gh release upload ${{ github.ref_name }} $f --clobber
+      run: gh release upload ${{ github.ref_name }} "build/wss-proxy-client-$env:VERSION_NAME-win-x64.zip" --clobber
 
   android:
     if: ${{ github.ref_type == 'tag' || github.event_name == 'release' }}
@@ -164,7 +153,7 @@ jobs:
     - name: Upload android artifact
       uses: actions/upload-artifact@v7
       with:
-        path: build-android/wss-proxy-*.apk
+        path: build-android/wss-proxy-client-*.apk
         archive: false
 
     - name: Upload android release asset
@@ -172,4 +161,36 @@ jobs:
       env:
         GH_TOKEN: ${{ github.token }}
       run: |
-        gh release upload ${{ github.ref_name }} build-android/wss-proxy-*.apk --clobber
+        gh release upload ${{ github.ref_name }} build-android/wss-proxy-client-*.apk --clobber
+
+  macos:
+    if: ${{ github.ref_type == 'tag' || github.event_name == 'release' }}
+    runs-on: macos-15
+
+    strategy:
+      matrix:
+        arch: [arm64, x86_64]
+
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        fetch-depth: 10
+        fetch-tags: true
+
+    - name: Build macos binary
+      run: |
+        export VERSION_NAME=$(git describe --tags --always | sed 's/^v//')
+        macos/build.sh ${{ matrix.arch }}
+
+    - name: Upload macos artifact
+      uses: actions/upload-artifact@v7
+      with:
+        path: build-macos/wss-proxy-client-*.tar.gz
+        archive: false
+
+    - name: Upload macos release asset
+      if: ${{ github.event_name == 'release' }}
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        gh release upload ${{ github.ref_name }} build-macos/wss-proxy-client-*.tar.gz --clobber

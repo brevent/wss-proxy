@@ -69,12 +69,20 @@ cmake --build build
 - `loglevel`, default `INFO`, support `DEBUG`, `INFO`, `WARN`, `ERROR`
 - `mux`, default `1` (only `0` is supported, specify for compatible with `v2ray-plugin`)
 
-Unsupported options:
-- `tls`, use behind nginx, plugin server doesn't use tls.
-- `host`, use behind nginx, plugin server support any host.
-- `path`, use behind nginx, plugin server support any path.
+Unsupported options (configure these in the reverse proxy instead):
+
+- `tls`: the plugin server does not use TLS.
+- `host`: the plugin server accepts any host.
+- `path`: the plugin server accepts any path.
 
 #### Options for `wss-proxy-server` only
 - `udp-port`, udp port to shadowsocks server without sip003u
   - There is no `tcp-port`, which is environment `SS_LOCAL_PORT`.
 - `syslog` (since 0.3.3, [47d4681](https://github.com/brevent/wss-proxy/commit/47d4681)), log to syslog if supported
+
+#### Compatible reverse proxies
+
+- [Caddy](https://caddyserver.com/): start with `GODEBUG=http2xconnect=1` to enable WebSocket over HTTP/2.
+- [nghttpx](https://www.nghttp2.org/documentation/nghttpx-howto.html#websockets-over-http-2): HTTP/3 support is experimental.
+- [Envoy](https://www.envoyproxy.io/docs/envoy/latest/intro/arch_overview/http/upgrades.html#websocket-over-http-2-or-http-3-hops): HTTP/3 WebSocket support is alpha.
+- nginx with [PR #1683](https://github.com/nginx/nginx/pull/1683).
