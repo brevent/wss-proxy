@@ -1,0 +1,7 @@
+import Caddyfile
+
+https://localhost:9443 {
+    tls ../testcase/caddy/localhost.crt ../testcase/caddy/localhost.key
+    root * root
+    file_server
+}

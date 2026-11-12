@@ -2,18 +2,18 @@
 
 set -e
 
-nginx="./nginx/nginx -p nginx/ -e stderr -c ../../testcase/nginx/bench.conf"
+caddy=./caddy
 sslocal=./sslocal
 ssserver=./ssserver
 ss="-m chacha20-ietf-poly1305 -k sip003u"
-cert=../testcase/nginx/localhost.crt
+cert=../testcase/caddy/localhost.crt
 
 # each stream downloads a 512 MiB file over https, so truncated data fails curl
 size=536870912
 concurrencies="1 8"
 
-mkdir -p nginx/bench
-truncate -s $size nginx/bench/bench.bin
+mkdir -p root
+truncate -s $size root/bench.bin
 
 spids=()
 lpids=()
@@ -26,10 +26,7 @@ costs=()
 port=1090
 
 function cleanup() {
-    kill "${lpids[@]}" "${spids[@]}" 2>/dev/null || true
-    if [ -n "$npid" ]; then
-        $nginx -s stop
-    fi
+    kill "${lpids[@]}" "${spids[@]}" "$caddy_pid" 2>/dev/null || true
 }
 
 trap cleanup SIGINT SIGTERM ERR EXIT
@@ -38,7 +35,7 @@ trap cleanup SIGINT SIGTERM ERR EXIT
 function client() {
     for c in $concurrencies; do
         port=$((port + 1))
-        $sslocal -b 127.0.0.1:$port -s 127.0.0.1:443 $ss --plugin "$2" --plugin-opts "$3" > bench.$port.log 2>&1 &
+        $sslocal -b 127.0.0.1:$port -s 127.0.0.1:8443 $ss --plugin "$2" --plugin-opts "$3" > bench.$port.log 2>&1 &
         lpids+=($!)
         names+=("$1")
         concs+=("$c")
@@ -55,7 +52,7 @@ function measure() {
         start=$EPOCHREALTIME &&
         seq "$c" | xargs -P "$c" -I{} curl -q -s -f -k --noproxy '' -m 300 -o /dev/null \
             -w '%{size_download} %{exitcode}\n' -x socks5h://127.0.0.1:"${ports[$i]}" \
-            https://127.0.0.1:8443/bench.bin > bench.curl.log &&
+            https://localhost:9443/bench.bin > bench.curl.log &&
         end=$EPOCHREALTIME &&
         cpu1=$(cpu "${plugins[$i]}")
 }
@@ -65,11 +62,11 @@ spids+=($!)
 $ssserver -s 127.0.0.1:8890 $ss --plugin ./v2ray-plugin --plugin-opts "server;path=/v2ray-mux" &
 spids+=($!)
 
-$nginx &
-npid=$!
+GODEBUG=http2xconnect=1 $caddy run --config ../testcase/caddy/Caddyfile.bench --adapter caddyfile &
+caddy_pid=$!
 
 for _ in $(seq 1 10); do
-    if curl -q -s -k https://localhost/ok; then
+    if curl -q -s -k https://localhost:8443/ok; then
         break
     fi
     sleep 1

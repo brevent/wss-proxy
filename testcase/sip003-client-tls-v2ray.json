@@ -7,6 +7,6 @@
   "plugin": "./wss-proxy-client",
   "plugin_opts": "mux=0;loglevel=debug;host=localhost;tls;path=/v2ray",
   "server": "127.0.0.1",
-  "server_port": 443,
+  "server_port": 8443,
   "timeout": 60
 }

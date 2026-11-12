@@ -1,0 +1,30 @@
+{
+    admin off
+    auto_https off
+    log {
+        format console {
+            time_format "2006-01-02 15:04:05"
+            time_local
+        }
+    }
+}
+
+https://localhost:8443 {
+    tls ../testcase/caddy/localhost.crt ../testcase/caddy/localhost.key
+
+    handle /ok {
+        respond 200
+    }
+
+    handle /v2ray {
+        reverse_proxy 127.0.0.1:8889
+    }
+
+    handle /v2ray-mux {
+        reverse_proxy 127.0.0.1:8890
+    }
+
+    handle {
+        reverse_proxy 127.0.0.1:8888
+    }
+}

@@ -2,15 +2,6 @@
 
 set -e
 
-if [ ! -f nginx/nginx ]; then
-    echo "nginx not found, run testcase/build-nginx.sh first"
-    exit 0
-fi
-nginx="./nginx/nginx -p nginx/ -e stderr -c ../../testcase/nginx/nginx.conf"
-if [ -f wss-proxy-client.exe ]; then
-    nginx="wsl $nginx"
-fi
-
 if [ -f /usr/bin/python3 ]; then
     python3=/usr/bin/python3
 else
@@ -20,6 +11,7 @@ fi
 if which ssserver >/dev/null 2>&1; then
     sslocal=sslocal
     ssserver=ssserver
+    caddy=caddy
 elif which uname >/dev/null 2>&1 && uname -a | grep -i linux; then
     curl -q -s -L https://github.com/shadowsocks/shadowsocks-rust/releases/download/v1.25.0/shadowsocks-v1.25.0.x86_64-unknown-linux-musl.tar.xz -O
     tar xf shadowsocks-v1.25.0.x86_64-unknown-linux-musl.tar.xz sslocal ssserver
@@ -28,11 +20,17 @@ elif which uname >/dev/null 2>&1 && uname -a | grep -i linux; then
     curl -q -s -L https://github.com/shadowsocks/v2ray-plugin/releases/download/v1.5.0/v2ray-plugin-linux-amd64-v1.5.0.tar.gz -O
     tar xf v2ray-plugin-linux-amd64-v1.5.0.tar.gz
     mv v2ray-plugin_linux_amd64 v2ray-plugin
+    curl -q -s -L https://github.com/caddyserver/caddy/releases/download/v2.11.9/caddy_2.11.9_linux_amd64.tar.gz -O
+    tar xzf caddy_2.11.9_linux_amd64.tar.gz caddy
+    caddy=./caddy
 else
     curl -q -s -L https://github.com/shadowsocks/shadowsocks-rust/releases/download/v1.25.0/shadowsocks-v1.25.0.x86_64-pc-windows-msvc.zip -O
     unzip shadowsocks-v1.25.0.x86_64-pc-windows-msvc.zip sslocal.exe ssserver.exe
     sslocal=./sslocal.exe
     ssserver=./ssserver.exe
+    curl -q -s -L https://github.com/caddyserver/caddy/releases/download/v2.11.9/caddy_2.11.9_windows_amd64.zip -O
+    unzip caddy_2.11.9_windows_amd64.zip caddy.exe
+    caddy=./caddy.exe
 fi
 
 $python3 ../testcase/udp-echo-server.py &
@@ -47,11 +45,7 @@ fi
 sleep 1
 
 function cleanup() {
-    echo $echo_server_pid "$lpid" "$lpid2" "$lpid3" "$lpid4" "$lpid5" $spid "$vspid" | xargs echo | xargs kill
-    if [ -n "$npid" ]; then
-        $nginx -s stop
-        cat nginx/access.log
-    fi
+    echo $echo_server_pid "$lpid" "$lpid2" "$lpid3" "$lpid4" "$lpid5" $spid "$vspid" "$caddy_pid" | xargs echo | xargs kill
 }
 
 function check() {
@@ -71,11 +65,11 @@ function check() {
 
 trap cleanup SIGINT SIGTERM ERR EXIT
 
-$nginx &
-npid=$!
+GODEBUG=http2xconnect=1 $caddy run --config ../testcase/caddy/Caddyfile --adapter caddyfile &
+caddy_pid=$!
 
 for _ in $(seq 1 10); do
-    if curl -q -s -v -k https://localhost/ok; then
+    if curl -q -s -v -k https://localhost:8443/ok; then
         break
     fi
     sleep 1
