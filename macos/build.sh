@@ -17,7 +17,8 @@ build() {
         -DCMAKE_BUILD_TYPE=Release
     )
 
-    "$ROOT/deps/openssl.sh" "$OUT/$arch" "$deps" darwin64-$arch-cc
+    "$ROOT/deps/openssl.sh" "$OUT/$arch" "$deps" darwin64-$arch-cc \
+        --openssldir=/etc/ssl enable-ec_nistp_64_gcc_128
     "$ROOT/deps/libevent.sh" "$OUT/$arch" "$deps" "${cmake_macos[@]}"
 
     cmake -S "$ROOT" -B "$OUT/$arch/wss-proxy" "${cmake_macos[@]}" \
