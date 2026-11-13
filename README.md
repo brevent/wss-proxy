@@ -46,9 +46,8 @@ cmake --build build
 - `http2` (since 0.4.0, WebSocket over HTTP/2, [RFC 8441](https://datatracker.ietf.org/doc/html/rfc8441))
 - `http3` (since 0.4.0, WebSocket over HTTP/3, [RFC 9220](https://datatracker.ietf.org/doc/html/rfc9220))
   - requires OpenSSL 3.2+ (4.1+ recommended)
-- `interface` (since 0.5.5), prefer interface
-  - macOS 15+
-  - Linux, requires `CAP_NET_RAW` (`setcap cap_net_raw+ep wss-proxy-client`), or run as root
+- `interface` (since 0.5.5), prefer interface on macOS and Linux
+  - Linux: requires [5.7+](https://github.com/torvalds/linux/commit/c427bfec18f2190b8f4718785ee8ed2db4f84ee6), or `CAP_NET_RAW` / root
 
 ### Server
 

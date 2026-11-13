@@ -171,6 +171,31 @@ static int update_socket_flag(evutil_socket_t sock) {
     return 0;
 }
 
+#ifdef __APPLE__
+#include <net/if.h>
+#ifndef SO_BINDTODEVICE
+#define SO_BINDTODEVICE 0x1134
+#endif
+#endif
+
+#ifdef SO_BINDTODEVICE
+static int setsockopt_bind(evutil_socket_t sock, int family, const char *ifname) {
+#ifdef __APPLE__
+    unsigned int ifindex = if_nametoindex(ifname);
+    if (ifindex == 0) {
+        errno = ENXIO;
+        return -1;
+    }
+    return setsockopt(sock, family == AF_INET6 ? IPPROTO_IPV6 : IPPROTO_IP,
+                      family == AF_INET6 ? IPV6_BOUND_IF : IP_BOUND_IF,
+                      &ifindex, (socklen_t) sizeof(ifindex));
+#else
+    (void) family;
+    return setsockopt(sock, SOL_SOCKET, SO_BINDTODEVICE, ifname, (socklen_t) strlen(ifname));
+#endif
+}
+#endif
+
 static int get_sockaddr(struct wss_mux_context *wss_context, struct sockaddr *sockaddr,
                         socklen_t *socklen) {
     char port[6];
@@ -202,9 +227,7 @@ start:
         }
 #ifdef SO_BINDTODEVICE
         if (wss_context->server.ifname != NULL) {
-            setsockopt(sock, SOL_SOCKET, SO_BINDTODEVICE,
-                       wss_context->server.ifname,
-                       (socklen_t) strlen(wss_context->server.ifname));
+            setsockopt_bind(sock, ai->ai_family, wss_context->server.ifname);
         }
 #endif
         ret = connect(sock, ai->ai_addr, (socklen_t) ai->ai_addrlen);
@@ -1504,9 +1527,7 @@ static evutil_socket_t init_ssl_sock(struct wss_context *wss_context, struct eve
 
 #ifdef SO_BINDTODEVICE
     if (wss_context->server.ifname != NULL) {
-        if (setsockopt(sock, SOL_SOCKET, SO_BINDTODEVICE,
-                       wss_context->server.ifname,
-                       (socklen_t) strlen(wss_context->server.ifname)) == 0) {
+        if (setsockopt_bind(sock, sockaddr.ss_family, wss_context->server.ifname) == 0) {
             LOGI("bind to %s", wss_context->server.ifname);
         } else {
             LOGW("cannot bind to %s: %s", wss_context->server.ifname,

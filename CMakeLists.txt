@@ -53,7 +53,6 @@ check_symbol_exists(syslog "syslog.h" HAVE_SYSLOG)
 if (HAVE_SYSLOG)
     add_definitions(-DHAVE_SYSLOG)
 endif()
-check_symbol_exists(SO_BINDTODEVICE "sys/socket.h" HAVE_SO_BINDTODEVICE)
 
 include(CheckFunctionExists)
 
