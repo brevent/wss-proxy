@@ -21,9 +21,7 @@ rm -rf openssl-$OPENSSL_VERSION
 tar xzf "${URL##*/}"
 
 cd openssl-$OPENSSL_VERSION
-patch -p1 < "$ROOT/deps/patches/quic-time.patch"
 patch -p1 < "$ROOT/deps/patches/quic-conn-window.patch"
-patch -p1 < "$ROOT/deps/patches/quic-txp.patch"
 
 case ${1:-} in
 VC-*)
