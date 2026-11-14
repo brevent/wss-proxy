@@ -855,10 +855,10 @@ void raw_event_cb(struct bufferevent *raw, short event, void *tev) {
     port = get_peer_port(tev);
 #endif
     if (event & (BEV_EVENT_EOF | BEV_EVENT_ERROR)) {
-        LOGD("connection %u closed for wss %p, event: 0x%02x", port, tev, event);
+        LOGD("peer %d closed for wss %p, event: 0x%02x", port, tev, event);
         do_close_wss(tev);
     } else if (event & BEV_EVENT_TIMEOUT) {
-        LOGW("connection %u timeout for wss %p, event: 0x%02x", port, tev, event);
+        LOGW("peer %d timeout for wss %p, event: 0x%02x", port, tev, event);
         bev_context = bufferevent_get_context(tev);
         if (bev_context && *bev_context) {
             (*bev_context)->timeout(bev_context);
@@ -880,7 +880,7 @@ static void raw_event_cb_wss(struct bufferevent *raw, short event, void *wev) {
 #ifdef WSS_PROXY_SERVER
         port = get_peer_port(tev);
 #endif
-        LOGD("connection %u closed for wss %p, event: 0x%02x", port, tev, event);
+        LOGD("peer %d closed for wss %p, event: 0x%02x", port, tev, event);
         if (tev && tev->cbarg) {
             close_wss(tev, close_reason_raw, event);
         } else {
@@ -923,7 +923,7 @@ static void wss_event_cb(struct bufferevent *wev, short event, void *raw) {
 #ifdef WSS_PROXY_SERVER
         port = get_peer_port(tev);
 #endif
-        LOGD("connection %u closing from wss %p, event: 0x%02x", port, get_cbarg(raw), event);
+        LOGD("peer %d closing from wss %p, event: 0x%02x", port, get_cbarg(raw), event);
         close_wss(tev, close_reason_wss, event);
     }
 #ifdef WSS_ENABLE_PING
@@ -1030,7 +1030,7 @@ void bev_context_udp_writecb(evutil_socket_t fd, short event, void *arg) {
         goto reschedule;
     }
     if (evbuffer_copyout(buf, &udp_frame, UDP_FRAME_LENGTH_SIZE) != UDP_FRAME_LENGTH_SIZE) {
-        LOGE("cannot copy udp to get payload length for %d", get_port(bev_context_udp->sockaddr));
+        LOGE("cannot copy udp to get payload length for peer %d", get_port(bev_context_udp->sockaddr));
         what |= BEV_EVENT_ERROR;
         goto error;
     }
@@ -1040,7 +1040,7 @@ void bev_context_udp_writecb(evutil_socket_t fd, short event, void *arg) {
         goto reschedule;
     }
     if (evbuffer_copyout(buf, &udp_frame, length) != (ssize_t) length) {
-        LOGE("cannot copy udp %d for %d", (int) length, get_port(bev_context_udp->sockaddr));
+        LOGE("cannot copy udp %d for peer %d", (int) length, get_port(bev_context_udp->sockaddr));
         what |= BEV_EVENT_ERROR;
         goto error;
     }
@@ -1050,7 +1050,7 @@ void bev_context_udp_writecb(evutil_socket_t fd, short event, void *arg) {
         if (EVUTIL_ERR_RW_RETRIABLE(err)) {
             goto reschedule;
         }
-        LOGW("cannot send udp to %d: %s", get_port(bev_context_udp->sockaddr), evutil_socket_error_to_string(err));
+        LOGW("cannot send udp to peer %d: %s", get_port(bev_context_udp->sockaddr), evutil_socket_error_to_string(err));
         what |= BEV_EVENT_ERROR;
         goto error;
     }
@@ -1059,7 +1059,7 @@ void bev_context_udp_writecb(evutil_socket_t fd, short event, void *arg) {
         goto error;
     }
     if (res != payload_length) {
-        LOGW("cannot send entire udp packet to %d", get_port(bev_context_udp->sockaddr));
+        LOGW("cannot send entire udp packet to peer %d", get_port(bev_context_udp->sockaddr));
         what |= BEV_EVENT_ERROR;
         goto error;
     }
@@ -1108,12 +1108,12 @@ ssize_t udp_read(evutil_socket_t sock, struct udp_frame *udp_frame, struct socka
         }
         return -1;
     } else if (size == 0) {
-        LOGE("udp receive 0 from port %d", get_port(sockaddr));
+        LOGE("udp receive 0 from peer %d", get_port(sockaddr));
         return 0;
     } else {
         udp_frame->length = ntohs((uint16_t) size);
 #ifndef NDEBUG
-        LOGD("udp read %d from port %d", (int) size, get_port(sockaddr));
+        LOGD("udp read %d from peer %d", (int) size, get_port(sockaddr));
 #endif
         return (int) size;
     }

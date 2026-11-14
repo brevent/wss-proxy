@@ -143,7 +143,7 @@ static void udp_read_cb_client(evutil_socket_t sock, short event, void *ctx) {
                 break;
             }
             if (size == 0) {
-                LOGW("udp read empty from %d", get_port((const struct sockaddr *) &sockaddr));
+                LOGW("udp read empty from peer %d", get_port((const struct sockaddr *) &sockaddr));
                 continue;
             }
             evbuffer_add(raw->input, &udp_frame, size + UDP_FRAME_LENGTH_SIZE);
@@ -217,7 +217,7 @@ static struct bufferevent *init_tcp_client(struct event_base *base, struct raw_s
         return NULL;
     }
     if (bufferevent_socket_connect(raw, (struct sockaddr *) &(raw_server_info->sockaddr), raw_server_info->socklen)) {
-        LOGW("cannot connect raw at %s:%u", raw_server_info->addr, raw_server_info->port);
+        LOGW("cannot connect raw at %s:%d", raw_server_info->addr, raw_server_info->port);
         bufferevent_free(raw);
         return NULL;
     }
@@ -259,7 +259,7 @@ static void http_request_cb(struct bufferevent *tev, void *ctx) {
     }
     evbuffer_drain(input, length);
     bufferevent_set_timeouts(tev, NULL, NULL);
-    LOGD("new connection from %d", get_peer_port(tev));
+    LOGD("new peer %d", get_peer_port(tev));
     base = bufferevent_get_base(tev);
     udp = strcasestr(request, "\r\n" X_SOCK_TYPE ": " SOCK_TYPE_UDP "\r\n") != NULL;
     if (udp) {
@@ -297,7 +297,7 @@ static void client_event_cb(struct bufferevent *tev, short event, void *ctx) {
     (void) ctx;
     if (event & (BEV_EVENT_EOF | BEV_EVENT_ERROR | BEV_EVENT_TIMEOUT)) {
         port = get_peer_port(tev);
-        LOGD("connection %u closed for wss, event: 0x%02x", port, event);
+        LOGD("peer %d closed for wss, event: 0x%02x", port, event);
         bufferevent_free(tev);
     }
 }
@@ -311,7 +311,7 @@ static void accept_conn_cb(struct evconnlistener *listener, evutil_socket_t fd,
     base = evconnlistener_get_base(listener);
     tev = bufferevent_socket_new(base, fd, BEV_OPT_CLOSE_ON_FREE);
     if (tev == NULL) {
-        LOGW("cannot handle request from port %d", get_port(address));
+        LOGW("cannot handle request from peer %d", get_port(address));
         evutil_closesocket(fd);
     } else {
         struct timeval tv = {WSS_TIMEOUT, 0};

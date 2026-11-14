@@ -517,7 +517,7 @@ static void accept_conn_cb(struct evconnlistener *listener, evutil_socket_t fd,
     evbuffer_unfreeze(raw->input, 0);
     evbuffer_unfreeze(raw->output, 1);
     port = get_port(address);
-    LOGD("new connection from %d", port);
+    LOGD("new peer %d", port);
     if (!connect_wss(ctx, raw, 0)) {
         goto error;
     }
@@ -633,7 +633,7 @@ static void udp_read_cb_server(evutil_socket_t sock, short event, void *ctx) {
             break;
         }
         if (size == 0) {
-            LOGW("udp read empty from %d", get_port(bev_context_udp.sockaddr));
+            LOGW("udp read empty from peer %d", get_port(bev_context_udp.sockaddr));
             continue;
         }
         if ((raw = init_udp_raw(&bev_context_udp, context, sock)) == NULL) {
