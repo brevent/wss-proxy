@@ -95,7 +95,7 @@ struct wss_mux_context {
     struct event_base *base;
     struct wss_context *conns[MAX_MUX_CONNECTIONS];
     struct wss_server_info server;
-    char user_agent[80];
+    char user_agent[127];
 };
 
 struct bev_context_ssl {

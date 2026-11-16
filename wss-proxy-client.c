@@ -5,11 +5,18 @@
 #include <errno.h>
 #ifndef _WIN32
 #include <unistd.h>
+#include <sys/utsname.h>
+#ifdef __APPLE__
+#include <sys/sysctl.h>
+#elif defined(__ANDROID__)
+#include <sys/system_properties.h>
+#endif
 #else
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #pragma comment(lib, "Ws2_32.lib")
 #include <windows.h>
+__declspec(dllimport) LONG NTAPI RtlGetVersion(OSVERSIONINFOW *info);
 #define strdup _strdup
 #endif
 #include <event2/buffer.h>
@@ -50,6 +57,58 @@ static int bev_context_udp_cmp(const bev_context_udp *a, const bev_context_udp *
         return result;
     }
     return memcmp(a->sockaddr, b->sockaddr, a->socklen);
+}
+
+static void get_system_info(char *buf, size_t size) {
+    const char *os, *version = "unknown", *arch = "unknown";
+#ifdef _WIN32
+    char release[32];
+    SYSTEM_INFO system_info;
+    OSVERSIONINFOW info = {sizeof(info)};
+    os = "Windows";
+    GetNativeSystemInfo(&system_info);
+    switch (system_info.wProcessorArchitecture) {
+        case PROCESSOR_ARCHITECTURE_ARM: arch = "arm"; break;
+        case PROCESSOR_ARCHITECTURE_ARM64: arch = "arm64"; break;
+        case PROCESSOR_ARCHITECTURE_AMD64: arch = "x64"; break;
+        case PROCESSOR_ARCHITECTURE_INTEL: arch = "x86"; break;
+    }
+    if (RtlGetVersion(&info) == 0) {
+        snprintf(release, sizeof(release), "%lu.%lu.%lu", info.dwMajorVersion, info.dwMinorVersion,
+                 info.dwBuildNumber);
+        version = release;
+    }
+#else
+    struct utsname name;
+    if (uname(&name)) {
+        strcpy(name.sysname, "unknown");
+        strcpy(name.release, "unknown");
+        strcpy(name.machine, "unknown");
+    }
+    arch = name.machine;
+#ifdef __APPLE__
+    char release[32] = {0};
+    size_t release_size = sizeof(release);
+    os = "macOS";
+    if (sysctlbyname("kern.osproductversion", release, &release_size, NULL, 0) == 0 && release[0]) {
+        version = release;
+    }
+#elif defined(__ANDROID__)
+    char release[PROP_VALUE_MAX] = {0};
+    os = "Android";
+    if (__system_property_get("ro.build.version.release", release) > 0) {
+        version = release;
+    }
+#else
+    char *dash;
+    if ((dash = strpbrk(name.release, "-+")) != NULL) {
+        *dash = '\0';
+    }
+    os = name.sysname;
+    version = name.release;
+#endif
+#endif
+    snprintf(buf, size, "%s %s %s", os, version, arch);
 }
 
 static int init_raw_addr(struct sockaddr_storage *sockaddr, int *socklen) {
@@ -738,7 +797,7 @@ static void add_cert_for_store(X509_STORE *store, const char *name, size_t *coun
 #endif
 
 int main() {
-    int code = 1;
+    int code;
     struct event_base *base = NULL;
     struct event_config *cfg = NULL;
     struct base_events events;
@@ -746,15 +805,17 @@ int main() {
     struct server_context server_context, extra_server_context;
     int socklen, extra_port;
     struct wss_mux_context wss_context;
+    char system_info[64];
 #ifdef _WIN32
     WSADATA wsaData;
 
-    code = WSAStartup(MAKEWORD(2, 2), &wsaData);;
+    code = WSAStartup(MAKEWORD(2, 2), &wsaData);
     if (code != 0) {
         LOGE("WSAStartup failed with error: %d", code);
         return 1;
     }
 #endif
+    code = 1;
     memset(&events, 0, sizeof(events));
     memset(&wss_context, 0, sizeof(wss_context));
     memset(&server_context, 0, sizeof(server_context));
@@ -848,15 +909,17 @@ int main() {
         }
     }
 
-    snprintf(wss_context.user_agent, sizeof(wss_context.user_agent), "wss-proxy-client/%s libevent/%s OpenSSL/%s",
-             WSS_PROXY_VERSION, event_get_version(), OpenSSL_version(OPENSSL_VERSION_STRING));
+    get_system_info(system_info, sizeof(system_info));
+    snprintf(wss_context.user_agent, sizeof(wss_context.user_agent),
+             "wss-proxy-client/%s (%s) OpenSSL/%s",
+             WSS_PROXY_VERSION, system_info, OpenSSL_version(OPENSSL_VERSION_STRING));
 
     if (init_base_events(base, &events)) {
         goto error;
     }
 
     wss_context.base = base;
-    LOGI("%s", wss_context.user_agent);
+    LOGI("%s libevent/%s", wss_context.user_agent, event_get_version());
 #ifndef _WIN32
     LOGI("started, pid: %d, ppid: %d", getpid(), getppid());
 #else

@@ -322,7 +322,7 @@ static void accept_conn_cb(struct evconnlistener *listener, evutil_socket_t fd,
 }
 
 int main() {
-    int code = 1;
+    int code;
     struct event_base *base = NULL;
     struct event_config *cfg = NULL;
     struct base_events events;
@@ -335,12 +335,13 @@ int main() {
 #ifdef _WIN32
     WSADATA wsaData;
 
-    code = WSAStartup(MAKEWORD(2, 2), &wsaData);;
+    code = WSAStartup(MAKEWORD(2, 2), &wsaData);
     if (code != 0) {
         LOGE("WSAStartup failed with error: %d", code);
         return 1;
     }
 #endif
+    code = 1;
     memset(&events, 0, sizeof(events));
     memset(&raw_server_info, 0, sizeof(raw_server_info));
     if (init_raw_info(&raw_server_info)) {
@@ -400,8 +401,8 @@ int main() {
         goto error;
     }
 
-    LOGI("wss-proxy-server/%s libevent/%s OpenSSL/%s",
-         WSS_PROXY_VERSION, event_get_version(), OpenSSL_version(OPENSSL_VERSION_STRING));
+    LOGI("wss-proxy-server/%s OpenSSL/%s libevent/%s",
+         WSS_PROXY_VERSION, OpenSSL_version(OPENSSL_VERSION_STRING), event_get_version());
 #ifndef _WIN32
     LOGI("started, pid: %d, ppid: %d", getpid(), getppid());
 #else
