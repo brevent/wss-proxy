@@ -14,6 +14,10 @@ cmake -B build
 cmake --build build
 ```
 
+## Release artifacts
+
+Prebuilt clients are available for Android 5.0+ (`arm64-v8a`), macOS 12+ (`arm64` and `x64`), and Windows 7+ (`x64`).
+
 ## Usage
 
 ### Client
