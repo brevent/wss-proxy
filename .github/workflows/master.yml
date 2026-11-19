@@ -49,7 +49,8 @@ jobs:
     - name: Configure and build on ubuntu and macos
       if: ${{ startsWith(matrix.os, 'ubuntu') || startsWith(matrix.os, 'macos') }}
       run: |
-        cmake -B ${{github.workspace}}/build -DCMAKE_BUILD_TYPE=Release
+        cmake -B ${{github.workspace}}/build -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
         cmake --build ${{github.workspace}}/build
 
     - name: Install nasm and jom on windows
@@ -81,6 +82,8 @@ jobs:
 
     - name: Test
       working-directory: ${{github.workspace}}/build
+      env:
+        UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
       run: ctest -V
 
     - name: Prepare upload on windows
