@@ -101,6 +101,35 @@ size_t build_http2_frame(uint8_t *buffer, size_t length, uint8_t type, uint8_t f
     return 9;
 }
 
+static void forget_bad_source(struct wss_mux_context *wss_mux_context) {
+    memset(&wss_mux_context->bad_source, 0, sizeof(wss_mux_context->bad_source));
+    wss_mux_context->bad_source_timeout.tv_sec = 0;
+}
+
+static void mark_bad_source(struct wss_context *wss_context) {
+    struct wss_mux_context *wss_mux_context = wss_context->wss_mux_context;
+
+    if (wss_context->answered) {
+        return;
+    }
+    if (!wss_context->sock_ipv6) {
+        forget_bad_source(wss_mux_context);
+        return;
+    }
+    MOGW(wss_context, "cannot use ipv6, would try later in %ds", BAD_SOURCE_TIMEOUT);
+    wss_mux_context->bad_source = wss_context->source;
+    event_base_gettimeofday_cached(wss_mux_context->base, &wss_mux_context->bad_source_timeout);
+    wss_mux_context->bad_source_timeout.tv_sec += BAD_SOURCE_TIMEOUT;
+}
+
+static int is_socket_network_unavailable(int code) {
+#ifdef _WIN32
+    return code == WSAENETDOWN || code == WSAENETUNREACH || code == WSAEHOSTUNREACH;
+#else
+    return code == ENETDOWN || code == ENETUNREACH || code == EHOSTUNREACH;
+#endif
+}
+
 static ssize_t check_ssl_error(struct bev_context_ssl *bev_context_ssl, enum ssl_type ssl_type, int code) {
     const char *s;
     ssize_t what;
@@ -137,8 +166,11 @@ static ssize_t check_ssl_error(struct bev_context_ssl *bev_context_ssl, enum ssl
             break;
         }
         case SSL_ERROR_SYSCALL:
-            code = errno;
-            LOGW("cannot %s ssl, syscall: %s (%d)", s, strerror(code), code);
+            code = evutil_socket_geterror(SSL_get_fd(bev_context_ssl->ssl));
+            LOGW("cannot %s ssl, syscall: %s (%d)", s, evutil_socket_error_to_string(code), code);
+            if (bev_context_ssl->wss_context && is_socket_network_unavailable(code)) {
+                mark_bad_source(bev_context_ssl->wss_context);
+            }
             what = WSS_ERROR;
             break;
         default:
@@ -197,58 +229,86 @@ static int setsockopt_bind(evutil_socket_t sock, int family, const char *ifname)
 #endif
 
 static int get_sockaddr(struct wss_mux_context *wss_context, struct sockaddr *sockaddr,
-                        socklen_t *socklen) {
+                        socklen_t *socklen, struct in6_addr *source) {
     char port[6];
-    uint8_t ipv6;
+    int family;
+    struct timeval now;
     struct evutil_addrinfo hints, *res, *ai;
 
-    ipv6 = wss_context->server.ipv6;
-    snprintf(port, sizeof(port), "%d", wss_context->server.port);
-start:
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = ipv6 ? AF_INET6 : AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    if (evutil_getaddrinfo(wss_context->server.addr, port, &hints, &res) < 0) {
-        if (ipv6) {
-            LOGD("cannot resolve6 %s", wss_context->server.addr);
-            ipv6 = 0;
-            goto start;
+    if (wss_context->bad_source_timeout.tv_sec) {
+        event_base_gettimeofday_cached(wss_context->base, &now);
+        if (evutil_timercmp(&now, &wss_context->bad_source_timeout, >=)) {
+            LOGD("would try ipv6 again");
+            forget_bad_source(wss_context);
         }
+    }
+    snprintf(port, sizeof(port), "%d", wss_context->server.port);
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = wss_context->server.ipv6 ? AF_UNSPEC : AF_INET;
+    hints.ai_flags = EVUTIL_AI_ADDRCONFIG;
+    hints.ai_socktype = SOCK_STREAM;
+    if (evutil_getaddrinfo(wss_context->server.addr, port, &hints, &res) != 0) {
         LOGW("cannot resolve %s", wss_context->server.addr);
         return -1;
     }
 
+    family = wss_context->server.ipv6 ? AF_INET6 : AF_INET;
+start:
     for (ai = res; ai; ai = ai->ai_next) {
         evutil_socket_t sock;
         int ret;
+        struct sockaddr_in6 local = {0};
+        socklen_t locallen = (socklen_t) sizeof(local);
+        if (ai->ai_family != family) {
+            continue;
+        }
         sock = socket(ai->ai_family, SOCK_DGRAM, IPPROTO_UDP);
         if (sock < 0) {
             continue;
         }
+#ifdef __ANDROID__
+        if (wss_context->server.android_vpn && protect_socket(sock) == -1) {
+            LOGW("cannot protect probe socket");
+        }
+#endif
 #ifdef SO_BINDTODEVICE
         if (wss_context->server.ifname != NULL) {
             setsockopt_bind(sock, ai->ai_family, wss_context->server.ifname);
         }
 #endif
         ret = connect(sock, ai->ai_addr, (socklen_t) ai->ai_addrlen);
+        if (ret == 0 && family == AF_INET6) {
+            if (getsockname(sock, (struct sockaddr *) &local, &locallen) < 0) {
+                ret = -1;
+            } else if (!memcmp(&local.sin6_addr, &wss_context->bad_source, sizeof(local.sin6_addr))) {
+                ret = -1;
+            } else if (!IN6_IS_ADDR_UNSPECIFIED(&wss_context->bad_source)) {
+                LOGI("ipv6 changed, probe again");
+                forget_bad_source(wss_context);
+            }
+        }
         evutil_closesocket(sock);
         if (ret < 0) {
             continue;
         }
         *socklen = (socklen_t) ai->ai_addrlen;
         memcpy(sockaddr, ai->ai_addr, ai->ai_addrlen);
+        if (family == AF_INET6) {
+            *source = local.sin6_addr;
+        } else {
+            memset(source, 0, sizeof(*source));
+        }
         evutil_freeaddrinfo(res);
         return 0;
     }
 
-    if (res) {
-        evutil_freeaddrinfo(res);
-    }
-    if (ipv6) {
-        LOGD("cannot connect6 to %s", wss_context->server.addr);
-        ipv6 = 0;
+    if (family == AF_INET6) {
+        LOGD("cannot connect to %s over ipv6", wss_context->server.addr);
+        family = AF_INET;
         goto start;
     }
+    evutil_freeaddrinfo(res);
+    forget_bad_source(wss_context);
     LOGW("cannot connect to %s", wss_context->server.addr);
     return -1;
 }
@@ -1065,6 +1125,14 @@ static void wss_context_close(struct wss_mux_context *wss_mux_context, int index
     wss_context_unref(wss_context);
 }
 
+void mark_wss_answered(struct bufferevent *tev, int status) {
+    struct bev_context_ssl *bev_context_ssl = bufferevent_get_context(tev);
+
+    if (status > 0 && bev_context_ssl && bev_context_ssl->wss_context) {
+        bev_context_ssl->wss_context->answered = 1;
+    }
+}
+
 void free_context_ssl(struct wss_mux_context *wss_context) {
     for (int i = 0; i < MAX_MUX_CONNECTIONS; i++) {
         wss_context_close(wss_context, i);
@@ -1083,6 +1151,14 @@ static unsigned long wss_context_streams(struct wss_context *wss_context) {
         lh_bufferevent_http_stream_doall(wss_context->http_streams, count_active_http_stream);
     }
     return wss_context->active_streams;
+}
+
+static int better_wss_context(struct wss_mux_context *wss_mux_context,
+                              struct wss_context *wss_context, struct wss_context *picked) {
+    if (wss_context->answered != picked->answered) {
+        return wss_context->answered;
+    }
+    return server.ipv6 && wss_context->sock_ipv6 && !picked->sock_ipv6;
 }
 
 static struct wss_context *pick_wss_context(struct wss_mux_context *wss_mux_context) {
@@ -1115,7 +1191,7 @@ static struct wss_context *pick_wss_context(struct wss_mux_context *wss_mux_cont
             }
         } else if (streams >= wss_context->max_concurrent_streams) {
             LOGD("connection %d is full, %lu streams", i, streams);
-        } else if (!picked) {
+        } else if (!picked || better_wss_context(wss_mux_context, wss_context, picked)) {
             picked = wss_context;
         }
     }
@@ -1353,6 +1429,9 @@ static enum status is_ssl_connected(struct bev_context_ssl *bev_context_ssl, evu
             return eagain;
         } else {
             LOGW("socket error: %s", evutil_socket_error_to_string(err));
+            if (bev_context_ssl->wss_context && is_socket_network_unavailable(err)) {
+                mark_bad_source(bev_context_ssl->wss_context);
+            }
             return error;
         }
     }
@@ -1489,7 +1568,8 @@ static evutil_socket_t init_ssl_sock(struct wss_context *wss_context, struct eve
         }
     }
 
-    if (get_sockaddr(wss_mux_context, (struct sockaddr *) &sockaddr, &socklen)) {
+    if (get_sockaddr(wss_mux_context, (struct sockaddr *) &sockaddr, &socklen,
+                     &wss_context->source)) {
         goto error;
     }
 
@@ -1501,10 +1581,6 @@ static evutil_socket_t init_ssl_sock(struct wss_context *wss_context, struct eve
         return -1;
     }
 
-    if (update_socket_flag(sock)) {
-        goto error;
-    }
-
 #ifdef __ANDROID__
     if (wss_context->server.android_vpn && protect_socket(sock) == -1) {
         LOGW("cannot protect socket");
@@ -1512,8 +1588,15 @@ static evutil_socket_t init_ssl_sock(struct wss_context *wss_context, struct eve
     }
 #endif
 
+    if (update_socket_flag(sock)) {
+        goto error;
+    }
+
+    wss_context->sock_ipv6 = sockaddr.ss_family == AF_INET6;
     if (wss_context->server.http2 || wss_context->server.http3) {
-        MOGI(wss_context, "new sock");
+        MOGI(wss_context, "new sock over ipv%d", wss_context->sock_ipv6 ? 6 : 4);
+        event_base_gettimeofday_cached(base, &wss_context->timeout);
+        wss_context->timeout.tv_sec += WSS_TIMEOUT;
     }
 
     if (wss_context->server.http3) {
@@ -1540,6 +1623,9 @@ static evutil_socket_t init_ssl_sock(struct wss_context *wss_context, struct eve
         socket_error = evutil_socket_geterror(sock);
         if (!EVUTIL_ERR_CONNECT_RETRIABLE(socket_error)) {
             LOGW("cannot connect: %s", evutil_socket_error_to_string(socket_error));
+            if (is_socket_network_unavailable(socket_error)) {
+                mark_bad_source(wss_context);
+            }
             goto error;
         }
     }
@@ -1787,7 +1873,11 @@ static void bev_context_ssl_timeout(void *context) {
         return;
     }
     wss_context = bev_context_ssl->wss_context;
-    if (!wss_context || !wss_context->http_streams) {
+    if (!wss_context) {
+        return;
+    }
+    if (!wss_context->http_streams) {
+        mark_bad_source(wss_context);
         return;
     }
     key.stream_id = bev_context_ssl->stream_id;
@@ -1804,6 +1894,7 @@ static void bev_context_ssl_timeout(void *context) {
         wss_context->timeout.tv_sec += WSS_TIMEOUT;
     } else if (!wss_context->ssl_goaway && evutil_timercmp(&timeout, &wss_context->timeout, >=)) {
         MOGW(wss_context, "http mux connection timeout, mark ssl as goaway");
+        mark_bad_source(wss_context);
         wss_context->ssl_goaway = 1;
     }
     if (bev_context_ssl->http == http2 && !wss_context->ssl_error && wss_context->output) {

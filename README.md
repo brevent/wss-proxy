@@ -46,7 +46,7 @@ Prebuilt clients are available for Android 5.0+ (`arm64-v8a`), macOS 12+ (`arm64
 #### Options for `wss-proxy-client` only
 - `extra-listen-port` (since 0.3.0, [689f0e7](https://github.com/brevent/wss-proxy/commit/689f0e7)), extra listen port for shadowsocks client without sip003u
 - `syslog` (since 0.3.3, [47d4681](https://github.com/brevent/wss-proxy/commit/47d4681)), log to syslog if supported
-- `ipv6` (since 0.3.4, [a8b5f71](https://github.com/brevent/wss-proxy/commit/a8b5f71)), prefer ipv6 (should fallback to ipv4 if no ipv6)
+- `ipv6` (since 0.3.4, [a8b5f71](https://github.com/brevent/wss-proxy/commit/a8b5f71)), prefer ipv6, defaults to 1 (`ipv6=0` for ipv4 only)
 - `http2` (since 0.4.0, WebSocket over HTTP/2, [RFC 8441](https://datatracker.ietf.org/doc/html/rfc8441))
 - `http3` (since 0.4.0, WebSocket over HTTP/3, [RFC 9220](https://datatracker.ietf.org/doc/html/rfc9220))
   - requires OpenSSL 3.2+ (4.1+ recommended)

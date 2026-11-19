@@ -75,6 +75,9 @@ struct wss_context {
     uint8_t closed: 1;
     uint8_t http3_reading: 1;
     uint8_t http3_progress: 1;
+    uint8_t sock_ipv6: 1;
+    uint8_t answered: 1;
+    struct in6_addr source;
     uint32_t next_stream_id;
     uint32_t initial_window_size;
     uint32_t max_concurrent_streams;
@@ -90,11 +93,17 @@ struct wss_context {
 #define UDP_RCVBUF 1048576
 #endif
 
+#ifndef BAD_SOURCE_TIMEOUT
+#define BAD_SOURCE_TIMEOUT 300
+#endif
+
 struct wss_mux_context {
     SSL_CTX *ssl_ctx;
     struct event_base *base;
     struct wss_context *conns[MAX_MUX_CONNECTIONS];
     struct wss_server_info server;
+    struct in6_addr bad_source;
+    struct timeval bad_source_timeout;
     char user_agent[127];
 };
 
@@ -153,6 +162,8 @@ struct bufferevent_http_stream {
 #define WSS_MORE (-3)
 
 void free_context_ssl(struct wss_mux_context *wss_mux_context);
+
+void mark_wss_answered(struct bufferevent *tev, int status);
 
 enum ssl_type {
     ssl_read,

@@ -87,6 +87,7 @@ void http_response_cb_v3(struct bufferevent *tev, void *raw) {
             }
         }
     }
+    mark_wss_answered(tev, status);
     if (status != 200) {
         LOGW("wss fail for peer %d, status: %d", get_peer_port(raw), status);
         goto error;
@@ -368,6 +369,7 @@ static void read_http3_control(struct wss_context *wss_context) {
 
     while (SSL_read_ex(wss_context->control_stream, buffer, sizeof(buffer), &size)) {
         evbuffer_add(wss_context->input, buffer, size);
+        wss_context->timeout.tv_sec = 0;
     }
     for (;;) {
         length = evbuffer_get_length(wss_context->input);

@@ -213,6 +213,8 @@ static int init_wss_addr(struct wss_server_info *server) {
     // ipv6
     if ((value = find_option(options, "ipv6", "1")) != NULL) {
         server->ipv6 = strtol(value, NULL, 10) == 1;
+    } else {
+        server->ipv6 = 1;
     }
 
     // interface
@@ -264,7 +266,7 @@ static int init_wss_addr(struct wss_server_info *server) {
         LOGW("mux %d is unsupported", mux);
     }
 
-    LOGI("wss client%s %s:%d (wss://%s%s%s)", server->ipv6 ? "6" : "", remote_host, port, server->host, server->path,
+    LOGI("wss client%s %s:%d (wss://%s%s%s)", server->ipv6 ? "" : "4", remote_host, port, server->host, server->path,
          server->http3 ? " over http3" : server->http2 ? " over http2" : "");
     return 0;
 invalid:
@@ -300,6 +302,8 @@ static void http_response_cb(struct bufferevent *tev, void *raw) {
     evbuffer_drain(input, length);
     // HTTP/1.1 xxx
     // 0123456789abc
+    buffer[0xd] = '\0';
+    mark_wss_answered(tev, (int) evutil_strtoll(&buffer[9], NULL, 10));
     if (memcmp(&buffer[9], "101 ", 4) == 0) {
         LOGD("wss is ready for peer %d", get_peer_port(raw));
         tunnel_wss(raw, tev, NULL);
@@ -467,6 +471,7 @@ static void http_response_cb_v2(struct bufferevent *tev, void *raw) {
             }
         }
     }
+    mark_wss_answered(tev, status);
     if (status != 200) {
         LOGW("wss fail for peer %d, status: %d", get_peer_port(raw), status);
         goto error;
