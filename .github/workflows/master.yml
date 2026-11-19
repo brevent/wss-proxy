@@ -44,7 +44,12 @@ jobs:
 
     - name: Install libevent and openssl on macos
       if: ${{ startsWith(matrix.os, 'macos') }}
-      run: brew list libevent &>/dev/null && brew uses --installed libevent || brew install libevent
+      run: |
+        brew list libevent &>/dev/null || brew install libevent
+        if [ '${{ matrix.os }}' = macos-15 ]; then
+          brew list openssl@3 &>/dev/null || brew install openssl@3
+          echo "OPENSSL_ROOT_DIR=$(brew --prefix openssl@3)" >> "$GITHUB_ENV"
+        fi
 
     - name: Configure and build on ubuntu and macos
       if: ${{ startsWith(matrix.os, 'ubuntu') || startsWith(matrix.os, 'macos') }}
