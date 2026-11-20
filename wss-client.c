@@ -133,6 +133,7 @@ static int is_socket_network_unavailable(int code) {
 static ssize_t check_ssl_error(struct bev_context_ssl *bev_context_ssl, enum ssl_type ssl_type, int code) {
     const char *s;
     ssize_t what;
+    struct wss_context *wss_context = bev_context_ssl->wss_context;
 
     switch (ssl_type) {
         case ssl_read:
@@ -146,7 +147,7 @@ static ssize_t check_ssl_error(struct bev_context_ssl *bev_context_ssl, enum ssl
     }
     switch (code) {
         case SSL_ERROR_ZERO_RETURN:
-            LOGD("cannot %s ssl, zero return, mark as eof", s);
+            MOGD(wss_context, "cannot %s ssl, zero return, mark as eof", s);
             what = WSS_EOF;
             break;
         case SSL_ERROR_SSL: {
@@ -154,32 +155,32 @@ static ssize_t check_ssl_error(struct bev_context_ssl *bev_context_ssl, enum ssl
             int lib = ERR_GET_LIB(error);
             int reason = ERR_GET_REASON(error);
             if (lib == ERR_LIB_SSL && reason == SSL_R_PROTOCOL_IS_SHUTDOWN) {
-                LOGW("cannot %s ssl, ssl shutdown", s);
+                MOGW(wss_context, "cannot %s ssl, ssl shutdown", s);
             } else if (lib == ERR_LIB_SSL && reason == SSL_R_CERTIFICATE_VERIFY_FAILED) {
-                LOGE("cannot %s ssl, ssl certificate verify failed", s);
+                MOGE(wss_context, "cannot %s ssl, ssl certificate verify failed", s);
             } else if (lib == ERR_LIB_SSL && reason == SSL_R_UNEXPECTED_EOF_WHILE_READING) {
-                LOGW("cannot %s ssl, ssl unexpected eof", s);
+                MOGW(wss_context, "cannot %s ssl, ssl unexpected eof", s);
             } else {
-                LOGW("cannot %s ssl, ssl error, lib: %d, reason: %d", s, lib, reason);
+                MOGW(wss_context, "cannot %s ssl, ssl error, lib: %d, reason: %d", s, lib, reason);
             }
             what = WSS_ERROR;
             break;
         }
         case SSL_ERROR_SYSCALL:
             code = evutil_socket_geterror(SSL_get_fd(bev_context_ssl->ssl));
-            LOGW("cannot %s ssl, syscall: %s (%d)", s, evutil_socket_error_to_string(code), code);
-            if (bev_context_ssl->wss_context && is_socket_network_unavailable(code)) {
-                mark_bad_source(bev_context_ssl->wss_context);
+            MOGW(wss_context, "cannot %s ssl, syscall: %s (%d)", s, evutil_socket_error_to_string(code), code);
+            if (wss_context && is_socket_network_unavailable(code)) {
+                mark_bad_source(wss_context);
             }
             what = WSS_ERROR;
             break;
         default:
-            LOGW("cannot %s ssl (%d)", s, code);
+            MOGW(wss_context, "cannot %s ssl (%d)", s, code);
             what = WSS_ERROR;
             break;
     }
-    if (bev_context_ssl->wss_context) {
-        bev_context_ssl->wss_context->ssl_error = 1;
+    if (wss_context) {
+        wss_context->ssl_error = 1;
     }
     return what;
 }
@@ -320,26 +321,26 @@ static SSL *init_ssl(struct wss_context *wss_context, struct event_base *base, e
 
     ssl = SSL_new(wss_context->ssl_ctx);
     if (!ssl) {
-        LOGW("cannot create ssl");
+        MOGW(wss_context, "cannot create ssl");
         return NULL;
     }
     SSL_set_connect_state(ssl);
 #ifdef _WIN32
     if (fd > INT_MAX) {
-        LOGW("fd %zu is too large", fd);
+        MOGW(wss_context, "fd %zu is too large", fd);
         goto error;
     }
 #endif
     if (SSL_set_fd(ssl, (int) fd) <= 0) {
-        LOGW("cannot set fd to ssl");
+        MOGW(wss_context, "cannot set fd to ssl");
         goto error;
     }
     if (!SSL_set_tlsext_host_name(ssl, wss_context->server.host)) {
-        LOGW("cannot set sni extension for ssl");
+        MOGW(wss_context, "cannot set sni extension for ssl");
         goto error;
     }
     if (!SSL_set1_dnsname(ssl, wss_context->server.host)) {
-        LOGW("cannot set certificate verification hostname for ssl");
+        MOGW(wss_context, "cannot set certificate verification hostname for ssl");
         goto error;
     }
     if (wss_context->server.http3) {
@@ -350,7 +351,7 @@ static SSL *init_ssl(struct wss_context *wss_context, struct event_base *base, e
         wss_context->max_concurrent_streams = HTTP3_MAX_CONCURRENT_STREAMS;
     } else if (wss_context->server.http2) {
         if (SSL_set_alpn_protos(ssl, (uint8_t *) "\x08http/1.1\x02h2", 12)) {
-            LOGW("cannot set h2 alpn");
+            MOGW(wss_context, "cannot set h2 alpn");
             goto error;
         }
         wss_context->initial_window_size = DEFAULT_INITIAL_WINDOW_SIZE;
@@ -362,18 +363,18 @@ static SSL *init_ssl(struct wss_context *wss_context, struct event_base *base, e
         wss_context->input = evbuffer_new();
         wss_context->output = evbuffer_new();
         if (!wss_context->input || !wss_context->output) {
-            LOGW("cannot init http2 frame and output");
+            MOGW(wss_context, "cannot init http2 frame and output");
             goto error;
         }
         evbuffer_add_cb(wss_context->output, http2_output_cb, wss_context);
         wss_context->event_mux = event_new(base, fd, EV_TIMEOUT | EV_PERSIST, http2_writecb, wss_context);
         if (!wss_context->event_mux) {
-            LOGW("cannot init http2 mux writecb");
+            MOGW(wss_context, "cannot init http2 mux writecb");
             goto error;
         }
         event = event_new(base, fd, EV_READ | EV_PERSIST, http2_readcb, wss_context);
         if (!event) {
-            LOGW("cannot init http2 readcb");
+            MOGW(wss_context, "cannot init http2 readcb");
             goto error;
         }
     }
@@ -386,7 +387,7 @@ static SSL *init_ssl(struct wss_context *wss_context, struct event_base *base, e
         wss_context->http_streams = lh_bufferevent_http_stream_new(bufferevent_http_stream_hash,
                                                                    bufferevent_http_stream_cmp);
         if (!wss_context->http_streams) {
-            LOGE("cannot create http streams");
+            MOGE(wss_context, "cannot create http streams");
             goto error;
         }
     }
@@ -420,9 +421,11 @@ static ssize_t parse_http3(struct bufferevent *bev, uint8_t *buffer, size_t size
     ssize_t header_size;
     uint8_t frame_type, header[HTTP3_MAX_HEADER_LENGTH];
     struct bev_context_ssl *bev_context_ssl;
+    struct wss_context *wss_context;
 
     total = size;
     bev_context_ssl = bufferevent_get_context(bev);
+    wss_context = bev_context_ssl->wss_context;
     evbuffer_add(bev_context_ssl->frame, buffer, size);
     input = evbuffer_get_length(bev->input);
     for (;;) {
@@ -431,19 +434,19 @@ static ssize_t parse_http3(struct bufferevent *bev, uint8_t *buffer, size_t size
             break;
         }
         if (header[0] >> 0x6) {
-            LOGW("frame type of %d bytes is unsupported", 1 << (header[0] >> 0x6));
+            MOGW(wss_context, "frame type of %d bytes is unsupported", 1 << (header[0] >> 0x6));
             return WSS_ERROR;
         }
         frame_length = parse_http3_frame(header, header_size, &header_length);
         if (frame_length == 0) {
             break;
         } else if (frame_length > MAX_FRAME_SIZE) {
-            LOGW("frame length %u is unsupported", (unsigned) frame_length);
+            MOGW(wss_context, "frame length %u is unsupported", (unsigned) frame_length);
             return WSS_ERROR;
         }
         frame_type = header[0];
         if (bev_context_ssl->upgrade && frame_type != 0) {
-            LOGW("only data is supported after upgrade");
+            MOGW(wss_context, "only data is supported after upgrade");
             return WSS_ERROR;
         }
         if (evbuffer_get_length(bev_context_ssl->frame) < frame_length) {
@@ -455,7 +458,7 @@ static ssize_t parse_http3(struct bufferevent *bev, uint8_t *buffer, size_t size
             evbuffer_drain(bev_context_ssl->frame, header_length);
             evbuffer_remove_buffer(bev_context_ssl->frame, bev->input, frame_length - header_length);
         } else {
-            LOGW("frame_type %d is unsupported", frame_type);
+            MOGW(wss_context, "frame_type %d is unsupported", frame_type);
             evbuffer_drain(bev_context_ssl->frame, frame_length);
         }
     }
@@ -517,10 +520,24 @@ static void update_connection_window(struct wss_context *wss_context, uint32_t l
     }
 }
 
+static int call_read_callback(struct bufferevent *bev, struct wss_context *wss_context) {
+    int closed;
+    struct wss_context wss_context_log;
+
+    wss_context_log.slot = wss_context->slot;
+    bufferevent_incref(bev);
+    bev->readcb(bev, bev->cbarg);
+    closed = bev->errorcb == NULL;
+    bufferevent_decref(bev);
+    if (closed) {
+        MOGD(&wss_context_log, "wss %p closed by read callback", bev);
+    }
+    return closed;
+}
+
 static void handle_http2_frame(struct bufferevent_http_stream *http_stream, struct http2_frame *http2_frame,
                                struct evbuffer *frame) {
     short what;
-    uint8_t closing;
     uint32_t delta, error_code;
     uint8_t header[HTTP2_HEADER_LENGTH + 4];
     struct bufferevent *bev;
@@ -583,12 +600,7 @@ static void handle_http2_frame(struct bufferevent_http_stream *http_stream, stru
         evbuffer_drain(frame, http2_frame->length + HTTP2_HEADER_LENGTH);
     }
     if (bev->readcb && evbuffer_get_length(bev->input)) {
-        bufferevent_incref(bev);
-        bev->readcb(bev, bev->cbarg);
-        closing = bev->errorcb == NULL;
-        bufferevent_decref(bev);
-        if (closing) {
-            LOGD("wss %p closed in data callback", bev);
+        if (call_read_callback(bev, wss_context)) {
             return;
         }
     }
@@ -648,12 +660,12 @@ static void update_settings(struct wss_context *wss_context, struct evbuffer *in
     struct evbuffer_ptr pos;
 
     if (length % 6 != 0) {
-        LOGD("invalid settings length: %u", length);
+        MOGD(wss_context, "invalid settings length: %u", length);
     }
     evbuffer_ptr_set(input, &pos, HTTP2_HEADER_LENGTH, EVBUFFER_PTR_SET);
     while (length >= 6) {
         if (evbuffer_copyout_from(input, &pos, frame, sizeof(frame)) != sizeof(frame)) {
-            LOGW("cannot read settings, remain: %u", length);
+            MOGW(wss_context, "cannot read settings, remain: %u", length);
             break;
         }
         evbuffer_ptr_set(input, &pos, sizeof(frame), EVBUFFER_PTR_ADD);
@@ -663,9 +675,9 @@ static void update_settings(struct wss_context *wss_context, struct evbuffer *in
             MOGD(wss_context, "max concurrent streams: %u", settings_value);
             wss_context->max_concurrent_streams = settings_value ? settings_value : 1;
         } else if (settings_type == 0x4) {
-            LOGD("initial window size: %u", settings_value);
+            MOGD(wss_context, "initial window size: %u", settings_value);
             if (settings_value > MAX_WINDOW_SIZE) {
-                LOGW("initial window size %u is too large, mark ssl as error", settings_value);
+                MOGW(wss_context, "initial window size %u is too large, mark ssl as error", settings_value);
                 wss_context->ssl_error = 1;
                 return;
             }
@@ -673,11 +685,11 @@ static void update_settings(struct wss_context *wss_context, struct evbuffer *in
             lh_bufferevent_http_stream_doall(wss_context->http_streams, update_window_size);
             flush_http_streams(wss_context);
         } else if (settings_type == 0x5) {
-            LOGD("max frame size: %u", settings_value);
+            MOGD(wss_context, "max frame size: %u", settings_value);
         } else if (settings_type == 0x8) {
-            LOGD("enable connect: %u", settings_value);
+            MOGD(wss_context, "enable connect: %u", settings_value);
         } else {
-            LOGD("unsupported settings %u : %u", settings_type, settings_value);
+            MOGD(wss_context, "unsupported settings %u : %u", settings_type, settings_value);
         }
         length -= 6;
     }
@@ -687,7 +699,7 @@ static void update_window_update(struct wss_context *wss_context, const uint8_t 
     uint32_t delta;
 
     if (length != 4) {
-        LOGD("invalid window update length: %zu", length);
+        MOGD(wss_context, "invalid window update length: %zu", length);
         return;
     }
     delta = load_be32(header) & MAX_WINDOW_SIZE;
@@ -773,7 +785,7 @@ static void check_http2_control(struct wss_context *wss_context, uint8_t type, u
             update_window_update(wss_context, header + HTTP2_HEADER_LENGTH, length);
             break;
         default:
-            LOGW("unknown control frame %d", type);
+            MOGW(wss_context, "unknown control frame %d", type);
             break;
     }
 }
@@ -793,7 +805,7 @@ static ssize_t parse_http2(struct wss_context *wss_context, uint8_t *buffer, siz
         frame = (uint8_t *) &header;
         http2_frame.length = load_be32(frame) >> 8;
         if (http2_frame.length > MAX_FRAME_SIZE) {
-            LOGW("frame length %u is unsupported", (unsigned) http2_frame.length);
+            MOGW(wss_context, "frame length %u is unsupported", (unsigned) http2_frame.length);
             wss_context->ssl_error = 1;
             return WSS_ERROR;
         }
@@ -846,7 +858,7 @@ static ssize_t do_ssl_read(struct bev_context_ssl *bev_context_ssl, struct buffe
         }
         if (bev_context_ssl->http == http3) {
             if (!bev) {
-                LOGW("http3 no bev");
+                MOGW(wss_context, "http3 no bev");
                 return WSS_ERROR;
             }
             wss_context->http3_progress = 1;
@@ -855,13 +867,13 @@ static ssize_t do_ssl_read(struct bev_context_ssl *bev_context_ssl, struct buffe
             res = parse_http2(bev_context_ssl->wss_context, frame, size);
         } else if (bev_context_ssl->http == http1) {
             if (!bev) {
-                LOGW("http1 no bev");
+                MOGW(wss_context, "http1 no bev");
                 return WSS_ERROR;
             }
             evbuffer_add(bev->input, frame, size);
             res = (ssize_t) size;
         } else {
-            LOGW("unsupported http type %d", bev_context_ssl->http);
+            MOGW(wss_context, "unsupported http type %d", bev_context_ssl->http);
             return WSS_ERROR;
         }
         if (res > 0) {
@@ -881,7 +893,7 @@ error:
         case SSL_ERROR_WANT_READ:
             return WSS_AGAIN;
         case SSL_ERROR_WANT_WRITE:
-            LOGD("cannot read ssl, want write, will try later");
+            MOGD(wss_context, "cannot read ssl, want write, will try later");
             return WSS_AGAIN;
         case SSL_ERROR_SSL:
             if (bev_context_ssl->http == http3) {
@@ -938,7 +950,7 @@ error:
             // stream is not read yet
             return WSS_AGAIN;
         case SSL_ERROR_WANT_WRITE:
-            LOGD("cannot write ssl, want write, will try later");
+            MOGD(wss_context, "cannot write ssl, want write, will try later");
             return WSS_AGAIN;
         case SSL_ERROR_SSL:
             if (bev_context_ssl->http == http3) {
@@ -996,6 +1008,7 @@ static void discard_http_stream_output(struct bufferevent *tev) {
     size_t pending;
     struct evbuffer *output;
     struct bufferevent *wev;
+    struct bev_context_ssl *bev_context_ssl;
 
     wev = tev->cbarg;
     if (!wev || bufferevent_get_underlying(wev) != tev) {
@@ -1007,7 +1020,9 @@ static void discard_http_stream_output(struct bufferevent *tev) {
     evbuffer_drain(tev->output, evbuffer_get_length(tev->output));
     evbuffer_drain(output, evbuffer_get_length(output));
     if (pending > get_close_frame_length(tev)) {
-        LOGW("http stream %p discards %zu bytes", tev, pending);
+        bev_context_ssl = bufferevent_get_context(tev);
+        MOGW2(bev_context_ssl->wss_context, "http stream %u discards %zu bytes",
+              (bev_context_ssl->stream_id, pending), ", tev: %p", (tev));
     }
 }
 
@@ -1076,7 +1091,7 @@ static void wss_context_ref(struct wss_context *wss_context) {
 
 static void wss_context_unref(struct wss_context *wss_context) {
     if (wss_context && !--wss_context->refs) {
-        LOGD("free connection %p, slot: %d", (void *) wss_context, wss_context->slot);
+        MOGD(wss_context, "free context %p", (void *) wss_context);
         free(wss_context);
     }
 }
@@ -1211,7 +1226,7 @@ static struct wss_context *pick_wss_context(struct wss_mux_context *wss_mux_cont
     if (wss_context) {
         wss_context->slot = slot;
         wss_mux_context->conns[slot] = wss_context;
-        LOGD("new connection at slot %d", slot);
+        LOGD("connection %d created", slot);
     }
     return wss_context;
 }
@@ -1339,7 +1354,6 @@ static void http2_output_cb(struct evbuffer *output, const struct evbuffer_cb_in
 
 static void bufferevent_readcb(evutil_socket_t fd, short event, void *arg) {
     ssize_t res;
-    uint8_t closing;
     short what = BEV_EVENT_READING;
     struct bufferevent *bev = arg;
     struct bev_context_ssl *bev_context_ssl;
@@ -1362,12 +1376,7 @@ static void bufferevent_readcb(evutil_socket_t fd, short event, void *arg) {
 loop:
     res = do_read(bev);
     if (res > 0 && bev->readcb) {
-        bufferevent_incref(bev);
-        bev->readcb(bev, bev->cbarg);
-        closing = bev->errorcb == NULL;
-        bufferevent_decref(bev);
-        if (closing) {
-            LOGD("wss %p closed in data callback", bev);
+        if (call_read_callback(bev, bev_context_ssl->wss_context)) {
             return;
         }
     }
@@ -1421,14 +1430,14 @@ static enum status is_ssl_connected(struct bev_context_ssl *bev_context_ssl, evu
     len = sizeof(err);
     if (getsockopt(fd, SOL_SOCKET, SO_ERROR, (void *) &err, &len) < 0) {
         err = evutil_socket_geterror(fd);
-        LOGW("cannot getsockopt: %s", evutil_socket_error_to_string(err));
+        MOGW(bev_context_ssl->wss_context, "cannot getsockopt: %s", evutil_socket_error_to_string(err));
         return error;
     }
     if (err) {
         if (EVUTIL_ERR_CONNECT_RETRIABLE(err)) {
             return eagain;
         } else {
-            LOGW("socket error: %s", evutil_socket_error_to_string(err));
+            MOGW(bev_context_ssl->wss_context, "socket error: %s", evutil_socket_error_to_string(err));
             if (bev_context_ssl->wss_context && is_socket_network_unavailable(err)) {
                 mark_bad_source(bev_context_ssl->wss_context);
             }
@@ -1459,8 +1468,10 @@ static void bufferevent_writecb(evutil_socket_t fd, short event, void *arg) {
     }
 
     bev_context_ssl = bufferevent_get_context(bev);
-    if (bev_context_ssl->wss_context->closed) {
-        MOGW(bev_context_ssl->wss_context, "http stream is on a closed connection, tev: %p", bev);
+    wss_context = bev_context_ssl->wss_context;
+    if (wss_context->closed) {
+        MOGW2(wss_context, "http stream %u is on a closed connection", (bev_context_ssl->stream_id),
+              ", tev: %p", (bev));
         what |= BEV_EVENT_ERROR;
         goto error;
     }
@@ -1476,9 +1487,9 @@ static void bufferevent_writecb(evutil_socket_t fd, short event, void *arg) {
     }
 
     if (bev_context_ssl->http == http2) {
-        wss_context = bev_context_ssl->wss_context;
         if (evbuffer_get_length(bev->output)) {
-            LOGW("write to http stream instead of context, tev: %p", bev);
+            MOGW2(wss_context, "write to http stream %u instead of connection",
+                  (bev_context_ssl->stream_id), ", tev: %p", (bev));
             evbuffer_add_buffer(wss_context->output, bev->output);
         }
         output = wss_context->output;
@@ -1487,15 +1498,16 @@ static void bufferevent_writecb(evutil_socket_t fd, short event, void *arg) {
     }
 
     while (evbuffer_get_length(output)) {
-        if (bev_context_ssl->wss_context->ssl_error) {
-            LOGW("http mux write ssl error, length: %zu, tev: %p", evbuffer_get_length(output), bev);
+        if (wss_context->ssl_error) {
+            MOGW2(wss_context, "discard %zu bytes after ssl error", (evbuffer_get_length(output)),
+                  ", tev: %p", (bev));
             evbuffer_drain(output, evbuffer_get_length(output));
             what |= BEV_EVENT_ERROR;
             goto error;
         }
         size = evbuffer_copyout(output, buffer, sizeof(buffer));
         if (size <= 0) {
-            LOGE("bufferevent_writecb cannot copy buffer");
+            MOGE(wss_context, "bufferevent_writecb cannot copy buffer");
             what |= BEV_EVENT_ERROR;
             goto error;
         }
@@ -1577,13 +1589,13 @@ static evutil_socket_t init_ssl_sock(struct wss_context *wss_context, struct eve
                   wss_context->server.http3 ? SOCK_DGRAM : SOCK_STREAM,
                   wss_context->server.http3 ? IPPROTO_UDP : IPPROTO_TCP);
     if (sock < 0) {
-        LOGW("cannot init fd");
+        MOGW(wss_context, "cannot init fd");
         return -1;
     }
 
 #ifdef __ANDROID__
     if (wss_context->server.android_vpn && protect_socket(sock) == -1) {
-        LOGW("cannot protect socket");
+        MOGW(wss_context, "cannot protect socket");
         goto error;
     }
 #endif
@@ -1611,9 +1623,9 @@ static evutil_socket_t init_ssl_sock(struct wss_context *wss_context, struct eve
 #ifdef SO_BINDTODEVICE
     if (wss_context->server.ifname != NULL) {
         if (setsockopt_bind(sock, sockaddr.ss_family, wss_context->server.ifname) == 0) {
-            LOGI("bind to %s", wss_context->server.ifname);
+            MOGI(wss_context, "bind to %s", wss_context->server.ifname);
         } else {
-            LOGW("cannot bind to %s: %s", wss_context->server.ifname,
+            MOGW(wss_context, "cannot bind to %s: %s", wss_context->server.ifname,
                  evutil_socket_error_to_string(evutil_socket_geterror(sock)));
         }
     }
@@ -1622,7 +1634,7 @@ static evutil_socket_t init_ssl_sock(struct wss_context *wss_context, struct eve
     if (!wss_context->server.http3 && connect(sock, (struct sockaddr *) &sockaddr, socklen) < 0) {
         socket_error = evutil_socket_geterror(sock);
         if (!EVUTIL_ERR_CONNECT_RETRIABLE(socket_error)) {
-            LOGW("cannot connect: %s", evutil_socket_error_to_string(socket_error));
+            MOGW(wss_context, "cannot connect: %s", evutil_socket_error_to_string(socket_error));
             if (is_socket_network_unavailable(socket_error)) {
                 mark_bad_source(wss_context);
             }
@@ -1769,7 +1781,7 @@ static struct bev_context_ssl *init_bev_context_ssl(struct wss_context *wss_cont
         }
         MOGD(wss_context, "stream %u send window %zd, recv window %zu",
              bev_context_ssl->stream_id, bev_context_ssl->send_window, bev_context_ssl->recv_window);
-        LOGD("ssl: %p", ssl);
+        MOGD(wss_context, "ssl: %p", ssl);
     } else {
         bev_context_ssl->http = http1;
         bev_context_ssl->ssl = ssl;
@@ -1801,7 +1813,7 @@ start:
     base = bufferevent_get_base(raw);
     tev = bufferevent_socket_new(base, -1, mux ? 0 : BEV_OPT_CLOSE_ON_FREE);
     if (tev == NULL) {
-        LOGW("cannot create bufferevent socket");
+        MOGW(wss_context, "cannot create bufferevent socket");
         goto error;
     }
     evbuffer_unfreeze(tev->input, 0);
@@ -1837,12 +1849,12 @@ start:
         wss_context->http_streams_count++;
         if (!event_pending(SSL_get_app_data(wss_context->ssl), EV_READ, NULL)) {
             event_add(SSL_get_app_data(wss_context->ssl), NULL);
-            LOGD("add event for read");
+            MOGD(wss_context, "add event for read");
         }
         MOGD(wss_context, "http stream %u: %p, total: %lu", http_stream->stream_id, http_stream,
              lh_bufferevent_http_stream_num_items(wss_context->http_streams));
     }
-    LOGD("bufferevent_wss_new, tev: %p, raw: %p", tev, raw);
+    MOGD(wss_context, "bufferevent_wss_new, tev: %p, raw: %p", tev, raw);
 
     if (!mux) {
         wss_context_unref(wss_context);

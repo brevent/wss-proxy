@@ -282,7 +282,11 @@ static void http_response_cb(struct bufferevent *tev, void *raw) {
     ev_ssize_t size;
     char buffer[WSS_PAYLOAD_SIZE];
     struct evbuffer *input;
+    struct bev_context_ssl *bev_context_ssl;
+    struct wss_context *wss_context;
 
+    bev_context_ssl = bufferevent_get_context(tev);
+    wss_context = bev_context_ssl->wss_context;
     memset(buffer, 0, sizeof(buffer));
     input = bufferevent_get_input(tev);
     length = evbuffer_get_length(input);
@@ -291,12 +295,12 @@ static void http_response_cb(struct bufferevent *tev, void *raw) {
     }
     size = evbuffer_copyout(input, buffer, sizeof(buffer) - 1);
     if (size < 0) {
-        LOGW("cannot read response");
+        MOGW(wss_context, "cannot read response");
         return;
     }
     buffer[size] = '\0';
     if (strstr(buffer, "\r\n\r\n") == NULL) {
-        LOGW("uncompleted response: %s", buffer);
+        MOGW(wss_context, "uncompleted response: %s", buffer);
         return;
     }
     evbuffer_drain(input, length);
@@ -305,11 +309,11 @@ static void http_response_cb(struct bufferevent *tev, void *raw) {
     buffer[0xd] = '\0';
     mark_wss_answered(tev, (int) evutil_strtoll(&buffer[9], NULL, 10));
     if (memcmp(&buffer[9], "101 ", 4) == 0) {
-        LOGD("wss is ready for peer %d", get_peer_port(raw));
+        MOGD(wss_context, "wss is ready for peer %d", get_peer_port(raw));
         tunnel_wss(raw, tev, NULL);
     } else {
         buffer[0xc] = '\0';
-        LOGW("wss fail for peer %d, status: %s", get_peer_port(raw), &buffer[9]);
+        MOGW(wss_context, "wss fail for peer %d, status: %s", get_peer_port(raw), &buffer[9]);
         bufferevent_free(raw);
         bufferevent_free(tev);
     }
@@ -358,13 +362,13 @@ static enum bufferevent_filter_result wss_output_filter_v2(struct evbuffer *src,
     while (evbuffer_get_length(src)) {
         size_t size;
         if (bev_context_ssl->send_window <= 0 || bev_context_ssl->wss_context->send_window == 0) {
-            LOGD("cannot send as there is no send window");
+            MOGD(bev_context_ssl->wss_context, "cannot send as there is no send window");
             result = BEV_NEED_MORE;
             break;
         }
         size = MIN((size_t) bev_context_ssl->send_window, bev_context_ssl->wss_context->send_window);
         if (evbuffer_get_length(bev_context_ssl->wss_context->output) >= MAX_PROXY_BUFFER) {
-            LOGD("cannot send as mux output is full");
+            MOGD(bev_context_ssl->wss_context, "cannot send as mux output is full");
             result = BEV_NEED_MORE;
             break;
         }
@@ -427,7 +431,11 @@ static void http_response_cb_v2(struct bufferevent *tev, void *raw) {
     int index, status, codes[] = {200, 204, 206, 304, 400, 404, 500};
     uint8_t buffer[HTTP2_HEADER_LENGTH + 6];
     struct evbuffer *input;
+    struct bev_context_ssl *bev_context_ssl;
+    struct wss_context *wss_context;
 
+    bev_context_ssl = bufferevent_get_context(tev);
+    wss_context = bev_context_ssl->wss_context;
     input = bufferevent_get_input(tev);
     length = evbuffer_get_length(input);
     if (length < HTTP2_HEADER_LENGTH) {
@@ -444,11 +452,12 @@ static void http_response_cb_v2(struct bufferevent *tev, void *raw) {
         return;
     }
     if (buffer[4] & 0x1) {
-        LOGW("wss fail for peer %d, stream is end", get_peer_port(raw));
+        MOGW(wss_context, "wss fail for peer %d, stream is end", get_peer_port(raw));
         goto error;
     }
     if (buffer[4] & 0x28) {
-        LOGW("wss fail for peer %d, padded or priority is unsupported", get_peer_port(raw));
+        MOGW(wss_context, "wss fail for peer %d, padded or priority is unsupported",
+             get_peer_port(raw));
         goto error;
     }
     status = -1;
@@ -473,11 +482,12 @@ static void http_response_cb_v2(struct bufferevent *tev, void *raw) {
     }
     mark_wss_answered(tev, status);
     if (status != 200) {
-        LOGW("wss fail for peer %d, status: %d", get_peer_port(raw), status);
+        MOGW(wss_context, "wss fail for peer %d, status: %d", get_peer_port(raw), status);
         goto error;
     }
-    LOGD("wss is ready for peer %d, remain: %zu", get_peer_port(raw), evbuffer_get_length(input));
-    ((struct bev_context_ssl *) bufferevent_get_context(tev))->upgrade = 1;
+    MOGD(wss_context, "wss is ready for peer %d, remain: %zu", get_peer_port(raw),
+         evbuffer_get_length(input));
+    bev_context_ssl->upgrade = 1;
     tunnel_wss(raw, tev, wss_output_filter_v2);
     return;
 error:
@@ -548,7 +558,8 @@ static struct bufferevent *connect_wss(struct wss_mux_context *wss_context, stru
         bev_context_ssl = bufferevent_get_context(tev);
         length = build_http_request_v2(wss_context, udp, request, bev_context_ssl->stream_id);
         bev_context_ssl->recv_window = HTTP2_STREAM_WINDOW_SIZE;
-        LOGD("stream %u recv window %zu", bev_context_ssl->stream_id, bev_context_ssl->recv_window);
+        MOGD(bev_context_ssl->wss_context, "stream %u recv window %zu", bev_context_ssl->stream_id,
+             bev_context_ssl->recv_window);
         cb = http_response_cb_v2;
     } else {
         length = build_http_request(wss_context, udp, request);

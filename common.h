@@ -189,6 +189,18 @@ void close_syslog(void);
 #define LOGI(format, ...) LOG(format, stdout, INFO, ## __VA_ARGS__)
 #define LOGW(format, ...) LOG(format, stderr, WARN, ## __VA_ARGS__)
 #define LOGE(format, ...) LOG(format, stderr, ERROR, ## __VA_ARGS__)
+#define LOG_EXPAND_ARGS(...) __VA_ARGS__
+#define LOG2(LOGX, format, format_args, debug_format, debug_args)                       \
+    do {                                                                                \
+        if (get_log_level() >= DEBUG) {                                                 \
+            LOGX(format debug_format, LOG_EXPAND_ARGS format_args,                      \
+                 LOG_EXPAND_ARGS debug_args);                                           \
+        } else {                                                                        \
+            LOGX(format, LOG_EXPAND_ARGS format_args);                                  \
+        }                                                                               \
+    } while (0)
+#define LOGW2(format, format_args, debug_format, debug_args) \
+    LOG2(LOGW, format, format_args, debug_format, debug_args)
 
 const char *find_option(const char *options, const char *key, const char *no_value);
 

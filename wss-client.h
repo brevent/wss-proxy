@@ -17,6 +17,17 @@
 #define MOGI(wss_context, format, ...) MOG(LOGI, wss_context, format, ## __VA_ARGS__)
 #define MOGW(wss_context, format, ...) MOG(LOGW, wss_context, format, ## __VA_ARGS__)
 #define MOGE(wss_context, format, ...) MOG(LOGE, wss_context, format, ## __VA_ARGS__)
+#define MOG2(LOGX, wss_context, format, format_args, debug_format, debug_args)      \
+    do {                                                                            \
+        if (get_log_level() >= DEBUG) {                                             \
+            LOGX(wss_context, format debug_format, LOG_EXPAND_ARGS format_args,     \
+                 LOG_EXPAND_ARGS debug_args);                                       \
+        } else {                                                                    \
+            LOGX(wss_context, format, LOG_EXPAND_ARGS format_args);                 \
+        }                                                                           \
+    } while (0)
+#define MOGW2(wss_context, format, format_args, debug_format, debug_args) \
+    MOG2(MOGW, wss_context, format, format_args, debug_format, debug_args)
 
 enum http {
     http1,

@@ -48,7 +48,11 @@ void http_response_cb_v3(struct bufferevent *tev, void *raw) {
     size_t length, frame_length, header_length;
     uint8_t buffer[HTTP3_MAX_HEADER_LENGTH + 9];
     struct evbuffer *input;
+    struct bev_context_ssl *bev_context_ssl;
+    struct wss_context *wss_context;
 
+    bev_context_ssl = bufferevent_get_context(tev);
+    wss_context = bev_context_ssl->wss_context;
     input = bufferevent_get_input(tev);
     memset(buffer, 0, sizeof(buffer));
     frame_length = evbuffer_copyout(input, buffer, sizeof(buffer) - 1);
@@ -58,7 +62,8 @@ void http_response_cb_v3(struct bufferevent *tev, void *raw) {
         return;
     }
     if (buffer[0] != 0x1) {
-        LOGW("wss fail for peer %d, invalid frame %d, expect headers (0x1)", get_peer_port(raw), buffer[0]);
+        MOGW(wss_context, "wss fail for peer %d, invalid frame %d, expect headers (0x1)",
+             get_peer_port(raw), buffer[0]);
         goto error;
     }
     evbuffer_drain(input, frame_length);
@@ -89,11 +94,12 @@ void http_response_cb_v3(struct bufferevent *tev, void *raw) {
     }
     mark_wss_answered(tev, status);
     if (status != 200) {
-        LOGW("wss fail for peer %d, status: %d", get_peer_port(raw), status);
+        MOGW(wss_context, "wss fail for peer %d, status: %d", get_peer_port(raw), status);
         goto error;
     }
-    LOGD("wss is ready for peer %d, remain: %zu", get_peer_port(raw), evbuffer_get_length(input));
-    ((struct bev_context_ssl *) bufferevent_get_context(tev))->upgrade = 1;
+    MOGD(wss_context, "wss is ready for peer %d, remain: %zu", get_peer_port(raw),
+         evbuffer_get_length(input));
+    bev_context_ssl->upgrade = 1;
     tunnel_wss(raw, tev, wss_output_filter_v3);
     return;
 error:
@@ -237,11 +243,11 @@ void http3_eventcb(evutil_socket_t sock, short event, void *context) {
     ssl = wss_context->ssl;
     for (i = 0; i < 0x3; i++) {
         if (!SSL_get_event_timeout(ssl, &tv, &is_infinite)) {
-            LOGW("cannot SSL_get_event_timeout");
+            MOGW(wss_context, "cannot SSL_get_event_timeout");
             break;
         }
         if (is_infinite) {
-            LOGD("infinite, remove timer and mark ssl as error");
+            MOGD(wss_context, "infinite, remove timer and mark ssl as error");
             if (SSL_get_conn_close_info(ssl, &info, sizeof(info))) {
                 if (info.error_code == OSSL_QUIC_LOCAL_ERR_IDLE_TIMEOUT) {
                     MOGI(wss_context, "connection closed, reason: idle timeout");
@@ -258,7 +264,8 @@ void http3_eventcb(evutil_socket_t sock, short event, void *context) {
         }
         if (tv.tv_sec || tv.tv_usec) {
             event_add(wss_context->event_mux, &tv);
-            LOGD("handled %d, would handle events %lu.%03d later", i, tv.tv_sec, (int) tv.tv_usec / 1000);
+            MOGD(wss_context, "handled %d, would handle events %lu.%03d later", i, tv.tv_sec,
+                 (int) tv.tv_usec / 1000);
             break;
         }
         SSL_handle_events(ssl);
@@ -307,7 +314,7 @@ static void read_http3_stream(struct bufferevent_http_stream *http_stream, void 
 
 static void close_http_stream(struct bufferevent_http_stream *http_stream, void *http_streams) {
     if (http_stream->mark_free) {
-        LOGD("close http stream %u: %p", http_stream->stream_id, http_stream);
+        MOGD(http_stream->wss_context, "close http stream %u: %p", http_stream->stream_id, http_stream);
         lh_bufferevent_http_stream_delete(http_streams, http_stream);
         free(http_stream);
     }
@@ -422,7 +429,7 @@ void http3_readcb(evutil_socket_t sock, short event, void *context) {
         lh_bufferevent_http_stream_set_down_load(http_streams, hash_factor);
     }
     if (wss_context->ssl_error) {
-        LOGD("disable http3 read as ssl error");
+        MOGD(wss_context, "disable http3 read as ssl error");
         event_del(SSL_get_app_data(wss_context->ssl));
         lh_bufferevent_http_stream_doall(http_streams, read_closed_http3_stream);
         lh_bufferevent_http_stream_doall(http_streams, abort_http_stream);
@@ -567,33 +574,33 @@ SSL *init_http3_stream(SSL *ssl, struct sockaddr *sockaddr, uint16_t port) {
 struct event *init_ssl_http3(struct wss_context *wss_context, struct event_base *base, evutil_socket_t fd, SSL *ssl) {
     struct event *event;
     if (SSL_set_alpn_protos(ssl, (uint8_t *) "\x02h3", 3)) {
-        LOGW("cannot set h3 alpn");
+        MOGW(wss_context, "cannot set h3 alpn");
         return NULL;
     }
     if (!SSL_set_default_stream_mode(ssl, SSL_DEFAULT_STREAM_MODE_NONE)) {
-        LOGW("cannot set quic default stream mode to none");
+        MOGW(wss_context, "cannot set quic default stream mode to none");
         return NULL;
     }
     if (!SSL_set_blocking_mode(ssl, 0)) {
-        LOGD("cannot set quic blocking mode");
+        MOGD(wss_context, "cannot set quic blocking mode");
         return NULL;
     }
     SSL_set_mode(ssl, SSL_MODE_ENABLE_PARTIAL_WRITE);
 #ifdef SSL_VALUE_QUIC_WINDOWCON
     if (!SSL_set_feature_request_uint(ssl, SSL_VALUE_QUIC_WINDOWCON, HTTP3_CONNECTION_WINDOW_SIZE)) {
-        LOGW("cannot set quic connection window");
+        MOGW(wss_context, "cannot set quic connection window");
         return NULL;
     }
 #endif
 #ifdef SSL_VALUE_QUIC_UDP_PAYLOAD_SIZE_MAX
     if (!SSL_set_feature_request_uint(ssl, SSL_VALUE_QUIC_UDP_PAYLOAD_SIZE_MAX, HTTP3_MAX_UDP_PAYLOAD_SIZE)) {
-        LOGW("cannot set quic max udp payload size");
+        MOGW(wss_context, "cannot set quic max udp payload size");
         return NULL;
     }
 #endif
     wss_context->input = evbuffer_new();
     if (!wss_context->input) {
-        LOGW("cannot init http3 control input");
+        MOGW(wss_context, "cannot init http3 control input");
         return NULL;
     }
     if (wss_context->event_mux) {
@@ -601,12 +608,12 @@ struct event *init_ssl_http3(struct wss_context *wss_context, struct event_base 
     }
     wss_context->event_mux = event_new(base, fd, EV_TIMEOUT | EV_PERSIST, http3_eventcb, wss_context);
     if (!wss_context->event_mux) {
-        LOGW("cannot init quic ssl events");
+        MOGW(wss_context, "cannot init quic ssl events");
         return NULL;
     }
     event = event_new(base, fd, EV_READ | EV_PERSIST, http3_readcb, wss_context);
     if (!event) {
-        LOGW("cannot init http3 readcb");
+        MOGW(wss_context, "cannot init http3 readcb");
         return NULL;
     }
     return event;
@@ -615,17 +622,18 @@ struct event *init_ssl_http3(struct wss_context *wss_context, struct event_base 
 int init_context_ssl_http3(struct bev_context_ssl *bev_context_ssl, SSL *ssl) {
     SSL *stream;
     uint64_t stream_id;
+    struct wss_context *wss_context = bev_context_ssl->wss_context;
 
     stream = SSL_new_stream(ssl, SSL_STREAM_FLAG_ADVANCE);
     if (stream == NULL) {
-        LOGW("cannot new quic stream");
-        bev_context_ssl->wss_context->ssl_error = 1;
+        MOGW(wss_context, "cannot new quic stream");
+        wss_context->ssl_error = 1;
         return 1;
     }
     stream_id = SSL_get_stream_id(stream);
     if (stream_id > UINT32_MAX) {
-        LOGW("quic stream id too large");
-        bev_context_ssl->wss_context->ssl_error = 1;
+        MOGW(wss_context, "quic stream id too large");
+        wss_context->ssl_error = 1;
         SSL_free(stream);
         return 1;
     }
@@ -634,11 +642,11 @@ int init_context_ssl_http3(struct bev_context_ssl *bev_context_ssl, SSL *ssl) {
     bev_context_ssl->stream_id = (uint32_t) stream_id;
     bev_context_ssl->frame = evbuffer_new();
     if (!bev_context_ssl->frame) {
-        LOGW("cannot new quic stream frame");
+        MOGW(wss_context, "cannot new quic stream frame");
         SSL_free(stream);
         return 1;
     }
-    LOGD("stream: %p", stream);
+    MOGD(wss_context, "stream: %p", stream);
     return 0;
 }
 
@@ -679,7 +687,7 @@ void free_context_ssl_http3(struct bev_context_ssl *bev_context_ssl) {
     stream = bev_context_ssl->ssl;
     while (SSL_read_ex(stream, buffer, sizeof(buffer), &size)) {
     }
-    LOGD("conclude stream: %p", stream);
+    MOGD(bev_context_ssl->wss_context, "conclude stream: %p", stream);
     SSL_stream_conclude(stream, 0);
     SSL_free(stream);
 }

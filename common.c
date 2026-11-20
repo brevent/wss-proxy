@@ -656,7 +656,8 @@ static void bev_error_cb(struct bufferevent *bev, short event, void *arg) {
         return;
     }
     if (size > get_close_frame_length(bev)) {
-        LOGW("free bev %p, event: 0x%02x, pending: %zu", bev, event, size);
+        LOGW2("bev closed with %zu bytes discarded", (size),
+              ", bev: %p, event: 0x%02x", (bev, event));
     } else {
         LOGD("free bev %p, event: 0x%02x", bev, event);
     }
@@ -692,8 +693,8 @@ static void wev_error_cb(struct bufferevent *wev, short event, void *arg) {
     }
     pending = evbuffer_get_length(bufferevent_get_output(wev));
     if (pending > get_close_frame_length(bufferevent_get_underlying(wev))) {
-        LOGW("wss %p is closed with %zu bytes discarded, event: 0x%02x",
-             bufferevent_get_underlying(wev), pending, event);
+        LOGW2("wss is closed with %zu bytes discarded", (pending),
+              ", wss: %p, event: 0x%02x", (bufferevent_get_underlying(wev), event));
     }
     evbuffer_drain(bufferevent_get_output(wev), pending);
     wev_empty_cb(wev, arg);
@@ -858,7 +859,7 @@ void raw_event_cb(struct bufferevent *raw, short event, void *tev) {
         LOGD("peer %d closed for wss %p, event: 0x%02x", port, tev, event);
         do_close_wss(tev);
     } else if (event & BEV_EVENT_TIMEOUT) {
-        LOGW("peer %d timeout for wss %p, event: 0x%02x", port, tev, event);
+        LOGW2("peer %d timeout", (port), ", wss: %p, event: 0x%02x", (tev, event));
         bev_context = bufferevent_get_context(tev);
         if (bev_context && *bev_context) {
             (*bev_context)->timeout(bev_context);
